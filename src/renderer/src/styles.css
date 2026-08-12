@@ -187,6 +187,114 @@ button:disabled {
   position: relative;
 }
 
+.project-menu-shell {
+  position: relative;
+}
+
+.project-lifecycle-menu {
+  position: absolute;
+  z-index: 90;
+  top: calc(100% + 7px);
+  right: 0;
+  display: grid;
+  width: 310px;
+  max-height: min(560px, calc(100vh - 90px));
+  padding: 7px;
+  overflow-y: auto;
+  background: #24272e;
+  border: 1px solid rgba(224, 232, 243, 0.16);
+  border-radius: 9px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.48);
+}
+
+.project-menu-summary {
+  display: grid;
+  gap: 3px;
+  padding: 7px 9px 9px;
+  border-bottom: 1px solid rgba(224, 232, 243, 0.1);
+  margin-bottom: 5px;
+}
+
+.project-menu-summary strong,
+.recent-project-row strong {
+  overflow: hidden;
+  color: #eef5fc;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-menu-summary small,
+.recent-project-row small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.project-lifecycle-menu > button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 7px 9px;
+  color: #dce2ea;
+  text-align: left;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.project-lifecycle-menu button:not(:disabled):hover,
+.project-lifecycle-menu button:not(:disabled):focus-visible {
+  background: rgba(76, 151, 222, 0.13);
+  outline: none;
+}
+
+.project-lifecycle-menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.recent-projects {
+  display: grid;
+  gap: 3px;
+  padding-top: 7px;
+  margin-top: 5px;
+  border-top: 1px solid rgba(224, 232, 243, 0.1);
+}
+
+.recent-projects > span {
+  padding: 3px 9px;
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.recent-project-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px;
+}
+
+.recent-project-row button {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding: 7px 9px;
+  color: #dce2ea;
+  text-align: left;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.recent-project-row .recent-readonly {
+  display: block;
+  align-self: stretch;
+  color: #aeb8c5;
+  font-size: 10px;
+}
+
 .export-split-button {
   display: inline-flex;
 }

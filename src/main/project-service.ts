@@ -29,9 +29,17 @@ const maximumRolls = 100;
 
 export class ProjectService {
   private readonly projectDirectory: string;
+  private readonly bundleName: string;
+  private readonly legacyFallback: boolean;
 
-  public constructor(projectDirectory: string) {
+  public constructor(
+    projectDirectory: string,
+    bundleName = projectBundleName,
+    legacyFallback = bundleName === projectBundleName,
+  ) {
     this.projectDirectory = projectDirectory;
+    this.bundleName = bundleName;
+    this.legacyFallback = legacyFallback;
   }
 
   public async load(): Promise<WorkspaceProject> {
@@ -78,14 +86,14 @@ export class ProjectService {
   }
 
   private get bundleDirectory(): string {
-    return join(this.projectDirectory, projectBundleName);
+    return join(this.projectDirectory, this.bundleName);
   }
 
   private async readProjectContents(): Promise<string> {
     try {
       return await readFile(this.filePath, "utf8");
     } catch (error: unknown) {
-      if (!hasCode(error, "ENOENT")) throw error;
+      if (!hasCode(error, "ENOENT") || !this.legacyFallback) throw error;
       return readFile(join(this.projectDirectory, legacyProjectFileName), "utf8");
     }
   }
@@ -118,7 +126,7 @@ export function createDefaultProject(): WorkspaceProject {
   };
 }
 
-function parseStoredProject(value: unknown): WorkspaceProject {
+export function parseStoredProject(value: unknown): WorkspaceProject {
   const record = requireRecord(value, "项目文件");
   if (
     record.schemaVersion !== projectSchemaVersion
@@ -175,7 +183,7 @@ function parseStoredProject(value: unknown): WorkspaceProject {
   };
 }
 
-function parseProjectDraft(value: unknown): WorkspaceProjectDraft {
+export function parseProjectDraft(value: unknown): WorkspaceProjectDraft {
   const record = requireRecord(value, "项目");
   const recipe = parseRecipe(record.recipe);
   const rolls = parseRolls(record.rolls, recipe);

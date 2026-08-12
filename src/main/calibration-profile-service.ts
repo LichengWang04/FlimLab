@@ -67,6 +67,20 @@ export class CalibrationProfileService {
     return this.profiles.get(id);
   }
 
+  /** Returns the canonical validated JSON used for a portable project snapshot. */
+  public async serialize(id: string): Promise<string | undefined> {
+    const document = await this.get(id);
+    return document === undefined ? undefined : serializeCalibrationProfileDocument(document);
+  }
+
+  /** Restores a project-owned snapshot into the machine-local profile store. */
+  public async importSerialized(contents: string): Promise<CalibrationProfileSummary> {
+    const document = parseCalibrationProfileDocument(contents);
+    assertProfileId(document.id);
+    await this.store(document);
+    return summarize(document);
+  }
+
   /** Stores a profile produced by the isolated color-card workflow using the
    * same validation and atomic-write path as an imported profile. */
   public async saveGenerated(document: CalibrationProfileDocument): Promise<CalibrationProfileSummary> {

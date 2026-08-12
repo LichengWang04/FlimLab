@@ -45,6 +45,26 @@ test("project save queue continues after a failed write", async () => {
   assert.equal(laterSaveRan, true);
 });
 
+test("project save queue flush waits for every accepted write", async () => {
+  const queue = new ProjectSaveQueue();
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let completed = false;
+  void queue.enqueue(async () => {
+    await gate;
+    completed = true;
+  });
+
+  const flushed = queue.flush();
+  await Promise.resolve();
+  assert.equal(completed, false);
+  release?.();
+  await flushed;
+  assert.equal(completed, true);
+});
+
 test("project storage persists a renderer-safe recipe and source list", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "filmlab-project-"));
   context.after(async () => rm(directory, { recursive: true, force: true }));

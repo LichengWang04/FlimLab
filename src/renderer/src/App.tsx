@@ -48,11 +48,20 @@ import type {
   BatchJobSummary,
   MasterExportFormat,
   ProcessingRecipe,
+  ProjectLoadResult,
+  ProjectSessionSummary,
+  RecentProjectSummary,
   SourceAsset,
   ColorTrust,
 } from "../../shared/contracts.ts";
 import { defaultProcessingRecipe } from "../../shared/contracts.ts";
-import { demoFrameId, type FilmRoll, type ProjectPreset, type ProjectRecipe } from "../../shared/project.ts";
+import {
+  demoFrameId,
+  type FilmRoll,
+  type ProjectPreset,
+  type ProjectRecipe,
+  type WorkspaceProjectDraft,
+} from "../../shared/project.ts";
 import { estimateAlignmentFromRgba } from "./alignment.ts";
 import { getFilmLabApi } from "./bridge.ts";
 import { estimateFilmFrameCropFromRgba } from "./film-frame.ts";
@@ -205,6 +214,10 @@ export function App(): ReactNode {
   const [projectPresets, setProjectPresets] = useState<readonly ProjectPreset[]>([]);
   const [projectStatus, setProjectStatus] = useState("正在恢复");
   const [projectLoaded, setProjectLoaded] = useState(false);
+  const [projectSession, setProjectSession] = useState<ProjectSessionSummary | undefined>();
+  const [recentProjects, setRecentProjects] = useState<readonly RecentProjectSummary[]>([]);
+  const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
+  const [isProjectSwitching, setIsProjectSwitching] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [masterExportFormat, setMasterExportFormat] = useState<MasterExportFormat>("tiff");
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
@@ -228,18 +241,41 @@ export function App(): ReactNode {
   const thumbnailUrlsRef = useRef(new Map<string, string>());
   const saveRevision = useRef(0);
   const projectSaveQueue = useRef(new ProjectSaveQueue());
+  const projectAutosaveTimer = useRef<number | undefined>(undefined);
+  const latestProjectDraftRef = useRef<WorkspaceProjectDraft | undefined>(undefined);
+  const projectSessionRef = useRef<ProjectSessionSummary | undefined>(undefined);
   const whiteBalanceSampleGeneration = useRef(0);
   const activeSelectionRef = useRef<{ readonly rollId: string; readonly assetId?: string }>({
     rollId: initialFilmRoll.id,
   });
   const rollMenuRef = useRef<HTMLDivElement | null>(null);
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
+  const projectMenuRef = useRef<HTMLDivElement | null>(null);
   const librarySectionsRef = useRef<HTMLDivElement | null>(null);
   const activeRoll = rolls.find((roll) => roll.id === activeRollId) ?? rolls[0] ?? initialFilmRoll;
+  projectSessionRef.current = projectSession;
   activeSelectionRef.current = { rollId: activeRollId, assetId: activeAssetId };
   const assets = activeRoll.assets;
   const frames = useMemo(() => resolveFrames(activeRoll), [activeRoll]);
   const projectTitle = activeRoll.title;
+  const latestProjectDraft = useMemo<WorkspaceProjectDraft>(() => {
+    const recipe: ProjectRecipe = {
+      mode,
+      view,
+      tone: { ...tone },
+      calibrationProfileId,
+      processing: cloneProcessing(processing),
+    };
+    return {
+      rolls: activeAssetId === undefined
+        ? rolls
+        : withRollFrameRecipe(rolls, activeRollId, activeAssetId, recipe),
+      activeRollId,
+      recipe,
+      presets: projectPresets,
+    };
+  }, [activeAssetId, activeRollId, calibrationProfileId, mode, processing, projectPresets, rolls, tone, view]);
+  latestProjectDraftRef.current = latestProjectDraft;
   const activeAssetNeedsRelink = activeAssetId !== undefined
     && activeAssetId !== demoFrameId
     && !linkedAssetIds.has(activeAssetId);
@@ -403,44 +439,62 @@ export function App(): ReactNode {
     document.documentElement.dataset.thumbnailStatus = "ready:" + frameId;
   }, []);
 
+  const applyLoadedProject = useCallback((loaded: ProjectLoadResult): void => {
+    const project = loaded.project;
+    const restoredRoll = project.rolls.find((roll) => roll.id === project.activeRollId) ?? project.rolls[0];
+    const restoredFrameId = restoredRoll?.frameOrder[0];
+    const restoredRecipe = restoredRoll === undefined
+      ? project.recipe
+      : resolveFrameRecipe(restoredRoll, restoredFrameId, project.recipe);
+    precomputedPreviews.current.clear();
+    precomputeInFlight.current.clear();
+    thumbnailUrlsRef.current.clear();
+    for (const asset of project.rolls.flatMap((roll) => roll.assets)) {
+      assetEpochRef.current.set(asset.id, (assetEpochRef.current.get(asset.id) ?? 0) + 1);
+    }
+    setThumbnailUrls(new Map());
+    setPreview(null);
+    setRolls(project.rolls);
+    setActiveRollId(project.activeRollId);
+    setLinkedAssetIds(new Set(loaded.relinkedAssetIds));
+    setActiveAssetId(restoredFrameId);
+    setMode(restoredRecipe.mode);
+    setView(restoredRecipe.view);
+    setTone({ ...restoredRecipe.tone });
+    setCalibrationProfileId(restoredRecipe.calibrationProfileId);
+    setProcessing(cloneProcessing(restoredRecipe.processing));
+    setProjectPresets(project.presets);
+    setProjectSession(loaded.session);
+    setRecentProjects(loaded.recentProjects);
+    setUndoStack([]);
+    setRedoStack([]);
+    setProjectStatus(loaded.session.pendingAction === "migration"
+      ? "等待迁移确认"
+      : loaded.session.pendingAction === "recovery"
+        ? "等待恢复确认"
+        : loaded.session.readOnly ? "只读" : "已保存");
+    setNotice(loaded.session.pendingAction === "migration"
+      ? `项目来自 schema v${loaded.session.migratedFromVersion ?? "旧版"}，已只读打开；确认迁移后才会写入 v8。`
+      : loaded.session.pendingAction === "recovery"
+        ? "主项目文件已损坏，当前已从最近有效备份只读恢复；确认恢复后才会覆盖主文件。"
+        : loaded.session.readOnly
+          ? "项目已只读打开；可以编辑预览，但必须使用“另存为”才能持久化。"
+          : loaded.missingAssets.length > 0
+            ? "项目已打开；仍有 " + loaded.missingAssets.length + " 个源文件需要扫描目录重连。"
+            : "项目已打开 · " + loaded.session.name
+              + (loaded.restoredCalibrationProfileIds.length === 0
+                ? ""
+                : ` · 已恢复 ${loaded.restoredCalibrationProfileIds.length} 个校准快照`));
+    setProjectLoaded(true);
+    setIsProjectMenuOpen(false);
+  }, []);
+
   useEffect(() => {
     let active = true;
     void api
       .loadProject()
       .then((loaded) => {
-        if (!active) {
-          return;
-        }
-        const project = loaded.project;
-        setRolls(project.rolls);
-        setActiveRollId(project.activeRollId);
-        setLinkedAssetIds(new Set(loaded.relinkedAssetIds));
-        const restoredRoll = project.rolls.find((roll) => roll.id === project.activeRollId) ?? project.rolls[0];
-        const restoredFrameId = restoredRoll?.frameOrder[0];
-        setActiveAssetId(restoredFrameId);
-        const restoredRecipe = restoredRoll === undefined
-          ? project.recipe
-          : resolveFrameRecipe(restoredRoll, restoredFrameId, project.recipe);
-        setMode(restoredRecipe.mode);
-        setView(restoredRecipe.view);
-        setTone({ ...restoredRecipe.tone });
-        setCalibrationProfileId(restoredRecipe.calibrationProfileId);
-        setProcessing(cloneProcessing(restoredRecipe.processing));
-        setProjectPresets(project.presets);
-        setProjectStatus("已保存");
-        setNotice(loaded.missingAssets.length > 0
-          ? "项目已恢复并自动连接 " + loaded.relinkedAssetIds.length
-            + " 个源文件；仍有 " + loaded.missingAssets.length + " 个需要选择目录重新连接。"
-          : loaded.relinkedAssetIds.length > 0
-            ? "项目已恢复；" + loaded.relinkedAssetIds.length + " 个源文件身份验证通过并已自动重新连接。"
-            : restoredRoll?.frameOrder[0] === undefined
-              ? "项目已恢复；当前胶卷为空。"
-              : restoredRoll.frameOrder[0] === demoFrameId
-                ? "项目已恢复；演示负片已就绪。"
-                : restoredRoll.uniformRecipe !== undefined
-                  ? "项目已恢复；整卷统一反转已启用。"
-                  : "项目已恢复；尚无可自动连接的来源身份。");
-        setProjectLoaded(true);
+        if (active) applyLoadedProject(loaded);
       })
       .catch((error: unknown) => {
         if (active) {
@@ -452,7 +506,7 @@ export function App(): ReactNode {
     return () => {
       active = false;
     };
-  }, [api]);
+  }, [api, applyLoadedProject]);
 
   useEffect(() => {
     if (!projectLoaded || activeAssetId === undefined) return;
@@ -516,6 +570,22 @@ export function App(): ReactNode {
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [isExportMenuOpen]);
+
+  useEffect(() => {
+    if (!isProjectMenuOpen) return;
+    const close = (event: PointerEvent): void => {
+      if (!projectMenuRef.current?.contains(event.target as Node)) setIsProjectMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setIsProjectMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [isProjectMenuOpen]);
 
   useEffect(() => {
     whiteBalanceSampleGeneration.current += 1;
@@ -619,22 +689,19 @@ export function App(): ReactNode {
   }, [api]);
 
   useEffect(() => {
-    if (!projectLoaded) {
-      return;
-    }
+    if (!projectLoaded || projectSession === undefined || projectSession.readOnly) return;
     const nextSaveRevision = saveRevision.current + 1;
     saveRevision.current = nextSaveRevision;
-    const draft = {
-      rolls,
-      activeRollId,
-      recipe: { mode, view, tone, calibrationProfileId, processing },
-      presets: projectPresets,
-    };
-    const timer = window.setTimeout(() => {
+    if (projectAutosaveTimer.current !== undefined) window.clearTimeout(projectAutosaveTimer.current);
+    projectAutosaveTimer.current = window.setTimeout(() => {
+      projectAutosaveTimer.current = undefined;
       setProjectStatus("保存中");
       void projectSaveQueue.current
-        .enqueue(() => api.saveProject(draft))
-        .then(() => {
+        .enqueue(() => api.saveProject(projectSession.id, latestProjectDraft))
+        .then((result) => {
+          setProjectSession((current) => current?.id === projectSession.id
+            ? { ...current, backupCount: result.backupCount }
+            : current);
           if (saveRevision.current === nextSaveRevision) {
             setProjectStatus("已保存");
           }
@@ -647,8 +714,41 @@ export function App(): ReactNode {
         });
     }, 550);
 
-    return () => window.clearTimeout(timer);
-  }, [activeRollId, api, calibrationProfileId, mode, processing, projectLoaded, projectPresets, rolls, tone, view]);
+    return () => {
+      if (projectAutosaveTimer.current !== undefined) {
+        window.clearTimeout(projectAutosaveTimer.current);
+        projectAutosaveTimer.current = undefined;
+      }
+    };
+  }, [api, latestProjectDraft, projectLoaded, projectSession]);
+
+  const flushProject = useCallback(async (): Promise<void> => {
+    if (projectAutosaveTimer.current !== undefined) {
+      window.clearTimeout(projectAutosaveTimer.current);
+      projectAutosaveTimer.current = undefined;
+    }
+    await projectSaveQueue.current.flush();
+    const session = projectSessionRef.current;
+    const draft = latestProjectDraftRef.current;
+    if (
+      session === undefined
+      || draft === undefined
+      || session.readOnly
+      || session.pendingAction !== undefined
+    ) return;
+    const result = await projectSaveQueue.current.enqueue(() => api.saveProject(session.id, draft));
+    setProjectSession((current) => current?.id === session.id
+      ? { ...current, backupCount: result.backupCount }
+      : current);
+  }, [api]);
+
+  useEffect(() => api.onRequestClose(() => {
+    void flushProject()
+      .catch((error: unknown) => {
+        console.error("FilmLab final project save failed", error);
+      })
+      .finally(() => api.confirmClose());
+  }), [api, flushProject]);
 
   useEffect(() => {
     const generation = previewGeneration.current + 1;
@@ -1909,6 +2009,79 @@ export function App(): ReactNode {
     });
   };
 
+  const refreshCalibrationProfiles = async (): Promise<void> => {
+    setCalibrationProfiles(await api.listCalibrationProfiles());
+  };
+
+  const runProjectSwitch = async (
+    operation: () => Promise<ProjectLoadResult | undefined>,
+  ): Promise<void> => {
+    if (isProjectSwitching) return;
+    setIsProjectSwitching(true);
+    setProjectStatus("切换中");
+    try {
+      await flushProject();
+      const loaded = await operation();
+      if (loaded === undefined) {
+        setProjectStatus(projectSessionRef.current?.readOnly ? "只读" : "已保存");
+        return;
+      }
+      applyLoadedProject(loaded);
+      await refreshCalibrationProfiles();
+    } catch (error: unknown) {
+      setProjectStatus(projectSessionRef.current?.readOnly ? "只读" : "保存失败");
+      setNotice(error instanceof Error ? error.message : "项目操作失败");
+    } finally {
+      setIsProjectSwitching(false);
+    }
+  };
+
+  const saveProjectAs = async (): Promise<void> => {
+    const session = projectSessionRef.current;
+    const draft = latestProjectDraftRef.current;
+    if (session === undefined || draft === undefined || isProjectSwitching) return;
+    await runProjectSwitch(() => api.saveProjectAs(session.id, draft));
+  };
+
+  const confirmProjectPendingAction = async (): Promise<void> => {
+    const session = projectSessionRef.current;
+    const draft = latestProjectDraftRef.current;
+    if (session?.pendingAction === undefined || draft === undefined || isProjectSwitching) return;
+    setIsProjectSwitching(true);
+    try {
+      const loaded = await api.confirmProjectPendingAction(session.id, draft);
+      applyLoadedProject(loaded);
+      await refreshCalibrationProfiles();
+      setNotice(session.pendingAction === "migration"
+        ? "项目迁移已确认；原文件已备份，当前项目已保存为 schema v8。"
+        : "备份恢复已确认；损坏主文件已保留在备份目录。"
+      );
+    } catch (error: unknown) {
+      setNotice(error instanceof Error ? error.message : "无法确认项目操作");
+    } finally {
+      setIsProjectSwitching(false);
+    }
+  };
+
+  const createManualProjectBackup = async (): Promise<void> => {
+    const session = projectSessionRef.current;
+    if (session === undefined || isProjectSwitching) return;
+    setIsProjectSwitching(true);
+    try {
+      await flushProject();
+      const result = await api.createProjectBackup(session.id);
+      setProjectSession((current) => current === undefined ? current : { ...current, backupCount: result.backupCount });
+      setNotice(result.created
+        ? `项目备份已创建 · 当前 ${result.backupCount} 份`
+        : "项目尚未落盘，没有可备份的内容。");
+    } catch (error: unknown) {
+      setNotice(error instanceof Error ? error.message : "无法创建项目备份");
+    } finally {
+      setIsProjectSwitching(false);
+      setIsProjectMenuOpen(false);
+    }
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -1923,7 +2096,7 @@ export function App(): ReactNode {
         </div>
 
         <div className="project-title">
-          <span>Projects</span>
+          <span>{projectSession?.name ?? "Projects"}</span>
           <ChevronDown size={14} />
           <span className="project-separator">/</span>
           <input
@@ -2023,9 +2196,74 @@ export function App(): ReactNode {
               </div>
             ) : null}
           </div>
-          <button className="icon-button" type="button" aria-label="更多操作">
-            <MoreHorizontal size={18} />
-          </button>
+          <div className="project-menu-shell" ref={projectMenuRef}>
+            <button
+              className={isProjectMenuOpen ? "icon-button is-active" : "icon-button"}
+              type="button"
+              aria-label="项目操作"
+              aria-haspopup="menu"
+              aria-expanded={isProjectMenuOpen}
+              onClick={() => setIsProjectMenuOpen((current) => !current)}
+            >
+              <MoreHorizontal size={18} />
+            </button>
+            {isProjectMenuOpen ? (
+              <div className="project-lifecycle-menu" role="menu" aria-label="项目操作">
+                <div className="project-menu-summary">
+                  <strong>{projectSession?.name ?? "FilmLab 项目"}</strong>
+                  <small>
+                    {projectSession?.readOnly ? "只读" : "可写"}
+                    {projectSession === undefined ? "" : ` · ${projectSession.backupCount} 份备份`}
+                  </small>
+                </div>
+                {projectSession?.pendingAction === undefined ? null : (
+                  <button type="button" role="menuitem" disabled={isProjectSwitching} onClick={() => void confirmProjectPendingAction()}>
+                    <Check size={15} />
+                    {projectSession.pendingAction === "migration" ? "确认迁移到 schema v8" : "确认从备份恢复"}
+                  </button>
+                )}
+                <button type="button" role="menuitem" disabled={isProjectSwitching} onClick={() => void runProjectSwitch(() => api.createProject())}>
+                  <FileImage size={15} /> 新建项目
+                </button>
+                <button type="button" role="menuitem" disabled={isProjectSwitching} onClick={() => void runProjectSwitch(() => api.openProject(false))}>
+                  <FolderOpen size={15} /> 打开项目
+                </button>
+                <button type="button" role="menuitem" disabled={isProjectSwitching} onClick={() => void runProjectSwitch(() => api.openProject(true))}>
+                  <FolderOpen size={15} /> 只读打开
+                </button>
+                <button type="button" role="menuitem" disabled={isProjectSwitching || projectSession === undefined} onClick={() => void saveProjectAs()}>
+                  <Copy size={15} /> 另存为
+                </button>
+                <button type="button" role="menuitem" disabled={isProjectSwitching || projectSession === undefined || projectSession.readOnly} onClick={() => void createManualProjectBackup()}>
+                  <Layers size={15} /> 创建备份
+                </button>
+                {recentProjects.length === 0 ? null : (
+                  <div className="recent-projects" aria-label="最近项目">
+                    <span>最近项目</span>
+                    {recentProjects.map((recent) => (
+                      <div className="recent-project-row" key={recent.id}>
+                        <button
+                          type="button"
+                          disabled={!recent.available || isProjectSwitching || recent.id === projectSession?.projectId}
+                          onClick={() => void runProjectSwitch(() => api.openRecentProject({ id: recent.id, readOnly: false }))}
+                        >
+                          <strong>{recent.name}</strong>
+                          <small>{recent.available ? new Date(recent.lastOpenedAt).toLocaleString("zh-CN") : "位置不可用"}</small>
+                        </button>
+                        <button
+                          className="recent-readonly"
+                          type="button"
+                          title="只读打开"
+                          disabled={!recent.available || isProjectSwitching}
+                          onClick={() => void runProjectSwitch(() => api.openRecentProject({ id: recent.id, readOnly: true }))}
+                        >只读</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 

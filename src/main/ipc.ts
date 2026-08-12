@@ -13,6 +13,7 @@ import {
   type GpuMasterTiffStripRequest,
   type MasterExportFormat,
   type MasterTiffExportRequest,
+  type OpenRecentProjectRequest,
   type ProcessingRecipe,
   type PreviewRequest,
   type SourceAsset,
@@ -25,7 +26,7 @@ import { CalibrationProfileService } from "./calibration-profile-service.ts";
 import { exportPreviewPng } from "./export-service.ts";
 import { ProcessingService } from "./processing-service.ts";
 import { renderDemoPreview } from "./preview-service.ts";
-import { ProjectService } from "./project-service.ts";
+import { ProjectLifecycleService, type LifecycleProjectLoad } from "./project-lifecycle-service.ts";
 import { SourceRegistry } from "./source-registry.ts";
 import {
   createStreamingMasterWriter,
@@ -37,7 +38,13 @@ const PREVIEW_CHANNEL = "preview:render";
 const PRECOMPUTE_PREVIEW_CHANNEL = "preview:precompute";
 const SELECT_SOURCES_CHANNEL = "project:select-sources";
 const LOAD_PROJECT_CHANNEL = "project:load";
+const CREATE_PROJECT_CHANNEL = "project:create";
+const OPEN_PROJECT_CHANNEL = "project:open";
+const OPEN_RECENT_PROJECT_CHANNEL = "project:open-recent";
 const SAVE_PROJECT_CHANNEL = "project:save";
+const SAVE_PROJECT_AS_CHANNEL = "project:save-as";
+const CONFIRM_PROJECT_PENDING_CHANNEL = "project:confirm-pending";
+const CREATE_PROJECT_BACKUP_CHANNEL = "project:create-backup";
 const EXPORT_PNG_CHANNEL = "preview:export-png";
 const EXPORT_TIFF_CHANNEL = "master:export-tiff";
 const EXPORT_GPU_TIFF_CHANNEL = "master:export-gpu-tiff";
@@ -55,7 +62,7 @@ const CANCEL_BATCH_JOB_CHANNEL = "batch:cancel";
 
 export function registerIpcHandlers(
   getMainWindow: () => BrowserWindow | null,
-  projectService: ProjectService,
+  projectService: ProjectLifecycleService,
   sourceRegistry: SourceRegistry,
   processingService: ProcessingService,
   backgroundProcessingService: ProcessingService,
@@ -74,7 +81,13 @@ export function registerIpcHandlers(
   ipcMain.removeHandler(PRECOMPUTE_PREVIEW_CHANNEL);
   ipcMain.removeHandler(SELECT_SOURCES_CHANNEL);
   ipcMain.removeHandler(LOAD_PROJECT_CHANNEL);
+  ipcMain.removeHandler(CREATE_PROJECT_CHANNEL);
+  ipcMain.removeHandler(OPEN_PROJECT_CHANNEL);
+  ipcMain.removeHandler(OPEN_RECENT_PROJECT_CHANNEL);
   ipcMain.removeHandler(SAVE_PROJECT_CHANNEL);
+  ipcMain.removeHandler(SAVE_PROJECT_AS_CHANNEL);
+  ipcMain.removeHandler(CONFIRM_PROJECT_PENDING_CHANNEL);
+  ipcMain.removeHandler(CREATE_PROJECT_BACKUP_CHANNEL);
   ipcMain.removeHandler(EXPORT_PNG_CHANNEL);
   ipcMain.removeHandler(EXPORT_TIFF_CHANNEL);
   ipcMain.removeHandler(EXPORT_GPU_TIFF_CHANNEL);
@@ -154,15 +167,79 @@ export function registerIpcHandlers(
 
   ipcMain.handle(LOAD_PROJECT_CHANNEL, async (event) => {
     assertTrustedSender(event, getMainWindow);
-    const project = await projectService.load();
-    const assets = project.rolls.flatMap((roll) => roll.assets);
-    const relinked = await sourceRegistry.restore(assets);
-    return { project, ...relinked };
+    return enrichProjectLoad(await projectService.loadStartup(), sourceRegistry);
+  });
+
+  ipcMain.handle(CREATE_PROJECT_CHANNEL, async (event) => {
+    assertTrustedSender(event, getMainWindow);
+    const parent = requireMainWindow(getMainWindow);
+    const selection = await dialog.showSaveDialog(parent, {
+      title: "新建 FilmLab 项目",
+      buttonLabel: "创建项目",
+      defaultPath: "未命名项目.filmlab",
+      filters: [{ name: "FilmLab 项目目录", extensions: ["filmlab"] }],
+      properties: ["showOverwriteConfirmation", "createDirectory"],
+    });
+    if (selection.canceled || selection.filePath === undefined) return undefined;
+    return enrichProjectLoad(await projectService.create(selection.filePath), sourceRegistry);
+  });
+
+  ipcMain.handle(OPEN_PROJECT_CHANNEL, async (event, value: unknown) => {
+    assertTrustedSender(event, getMainWindow);
+    if (typeof value !== "boolean") throw new Error("项目打开模式无效。");
+    const parent = requireMainWindow(getMainWindow);
+    const selection = await dialog.showOpenDialog(parent, {
+      title: value ? "只读打开 FilmLab 项目" : "打开 FilmLab 项目",
+      buttonLabel: value ? "只读打开" : "打开项目",
+      properties: ["openDirectory"],
+    });
+    if (selection.canceled || selection.filePaths[0] === undefined) return undefined;
+    return enrichProjectLoad(await projectService.open(selection.filePaths[0], value), sourceRegistry);
+  });
+
+  ipcMain.handle(OPEN_RECENT_PROJECT_CHANNEL, async (event, value: unknown) => {
+    assertTrustedSender(event, getMainWindow);
+    const request = parseOpenRecentProjectRequest(value);
+    return enrichProjectLoad(await projectService.openRecent(request.id, request.readOnly), sourceRegistry);
   });
 
   ipcMain.handle(SAVE_PROJECT_CHANNEL, async (event, value: unknown) => {
     assertTrustedSender(event, getMainWindow);
-    return projectService.save(value);
+    const request = parseProjectWriteRequest(value);
+    return projectService.save(request.sessionId, request.project);
+  });
+
+  ipcMain.handle(SAVE_PROJECT_AS_CHANNEL, async (event, value: unknown) => {
+    assertTrustedSender(event, getMainWindow);
+    const request = parseProjectWriteRequest(value);
+    const parent = requireMainWindow(getMainWindow);
+    const selection = await dialog.showSaveDialog(parent, {
+      title: "项目另存为",
+      buttonLabel: "另存项目",
+      defaultPath: "FilmLab 项目副本.filmlab",
+      filters: [{ name: "FilmLab 项目目录", extensions: ["filmlab"] }],
+      properties: ["showOverwriteConfirmation", "createDirectory"],
+    });
+    if (selection.canceled || selection.filePath === undefined) return undefined;
+    return enrichProjectLoad(
+      await projectService.saveAs(request.sessionId, request.project, selection.filePath),
+      sourceRegistry,
+    );
+  });
+
+  ipcMain.handle(CONFIRM_PROJECT_PENDING_CHANNEL, async (event, value: unknown) => {
+    assertTrustedSender(event, getMainWindow);
+    const request = parseProjectWriteRequest(value);
+    return enrichProjectLoad(
+      await projectService.confirmPending(request.sessionId, request.project),
+      sourceRegistry,
+    );
+  });
+
+  ipcMain.handle(CREATE_PROJECT_BACKUP_CHANNEL, async (event, value: unknown) => {
+    assertTrustedSender(event, getMainWindow);
+    if (typeof value !== "string") throw new Error("项目会话 ID 无效。");
+    return projectService.createBackup(value);
   });
 
   ipcMain.handle(RELINK_SOURCES_CHANNEL, async (event, value: unknown) => {
@@ -478,6 +555,43 @@ function assertTrustedSender(
   if (mainWindow === null || event.sender.id !== mainWindow.webContents.id) {
     throw new Error("Rejected IPC request from an unknown renderer.");
   }
+}
+
+async function enrichProjectLoad(
+  loaded: LifecycleProjectLoad,
+  sourceRegistry: SourceRegistry,
+) {
+  const assets = loaded.project.rolls.flatMap((roll) => roll.assets);
+  const relinked = await sourceRegistry.restore(assets);
+  return { ...loaded, ...relinked };
+}
+
+function requireMainWindow(getMainWindow: () => BrowserWindow | null): BrowserWindow {
+  const parent = getMainWindow();
+  if (parent === null) throw new Error("应用窗口不可用。");
+  return parent;
+}
+
+function parseProjectWriteRequest(value: unknown): {
+  readonly sessionId: string;
+  readonly project: unknown;
+} {
+  if (typeof value !== "object" || value === null) throw new Error("项目保存请求无效。");
+  const record = value as Record<string, unknown>;
+  if (typeof record.sessionId !== "string" || !/^[a-f0-9]{64}$/.test(record.sessionId)) {
+    throw new Error("项目会话 ID 无效。");
+  }
+  return { sessionId: record.sessionId, project: record.project };
+}
+
+function parseOpenRecentProjectRequest(value: unknown): OpenRecentProjectRequest {
+  if (typeof value !== "object" || value === null) throw new Error("最近项目请求无效。");
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.id !== "string" || !/^[a-f0-9]{64}$/.test(record.id)
+    || typeof record.readOnly !== "boolean"
+  ) throw new Error("最近项目请求无效。");
+  return { id: record.id, readOnly: record.readOnly };
 }
 
 function isPreviewRequest(value: unknown): value is PreviewRequest {

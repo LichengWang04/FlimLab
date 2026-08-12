@@ -13,4 +13,9 @@ export class ProjectSaveQueue {
     );
     return result;
   }
+
+  /** Resolves after every save accepted before this call has settled. */
+  public flush(): Promise<void> {
+    return this.tail;
+  }
 }

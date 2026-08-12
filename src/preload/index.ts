@@ -16,7 +16,19 @@ const api: FilmLabApi = {
   renderPreview: (request: PreviewRequest) => ipcRenderer.invoke("preview:render", request),
   precomputePreview: (request: PreviewRequest) => ipcRenderer.invoke("preview:precompute", request),
   loadProject: () => ipcRenderer.invoke("project:load"),
-  saveProject: (project: WorkspaceProjectDraft) => ipcRenderer.invoke("project:save", project),
+  createProject: () => ipcRenderer.invoke("project:create"),
+  openProject: (readOnly: boolean) => ipcRenderer.invoke("project:open", readOnly),
+  openRecentProject: (request) => ipcRenderer.invoke("project:open-recent", request),
+  saveProject: (sessionId: string, project: WorkspaceProjectDraft) => ipcRenderer.invoke("project:save", { sessionId, project }),
+  saveProjectAs: (sessionId: string, project: WorkspaceProjectDraft) => ipcRenderer.invoke("project:save-as", { sessionId, project }),
+  confirmProjectPendingAction: (sessionId: string, project: WorkspaceProjectDraft) => ipcRenderer.invoke("project:confirm-pending", { sessionId, project }),
+  createProjectBackup: (sessionId: string) => ipcRenderer.invoke("project:create-backup", sessionId),
+  onRequestClose: (listener) => {
+    const wrapped = (): void => listener();
+    ipcRenderer.on("app:request-close", wrapped);
+    return () => ipcRenderer.removeListener("app:request-close", wrapped);
+  },
+  confirmClose: () => ipcRenderer.send("app:confirm-close"),
   exportPreviewPng: (request: PreviewPngExportRequest) => ipcRenderer.invoke("preview:export-png", request),
   exportMasterTiff: (request: MasterTiffExportRequest) => ipcRenderer.invoke("master:export-tiff", request),
   exportGpuMasterTiff: (request: GpuMasterTiffExportRequest) => ipcRenderer.invoke("master:export-gpu-tiff", request),

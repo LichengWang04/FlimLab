@@ -290,6 +290,47 @@ export interface ProjectRelinkResult {
 
 export interface ProjectLoadResult extends ProjectRelinkResult {
   readonly project: WorkspaceProject;
+  readonly session: ProjectSessionSummary;
+  readonly recentProjects: readonly RecentProjectSummary[];
+  readonly restoredCalibrationProfileIds: readonly string[];
+}
+
+export type ProjectPendingAction = "migration" | "recovery";
+
+/** Renderer-safe project session state. Absolute directories remain private. */
+export interface ProjectSessionSummary {
+  /** Unique for each open/create operation; delayed writes from older sessions are rejected. */
+  readonly id: string;
+  /** Stable opaque ID used to match this session with the machine-private recent list. */
+  readonly projectId: string;
+  readonly name: string;
+  readonly readOnly: boolean;
+  readonly pendingAction?: ProjectPendingAction;
+  readonly migratedFromVersion?: number;
+  readonly backupCount: number;
+}
+
+export interface RecentProjectSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly lastOpenedAt: string;
+  readonly available: boolean;
+}
+
+export interface OpenRecentProjectRequest {
+  readonly id: string;
+  readonly readOnly: boolean;
+}
+
+export interface ProjectBackupResult {
+  readonly created: boolean;
+  readonly createdAt?: string;
+  readonly backupCount: number;
+}
+
+export interface ProjectSaveResult {
+  readonly project: WorkspaceProject;
+  readonly backupCount: number;
 }
 
 export type BatchJobState = "queued" | "running" | "completed" | "cancelled" | "failed";
@@ -327,7 +368,15 @@ export interface FilmLabApi {
    */
   readonly precomputePreview: (request: PreviewRequest) => Promise<PreviewResult>;
   readonly loadProject: () => Promise<ProjectLoadResult>;
-  readonly saveProject: (project: WorkspaceProjectDraft) => Promise<WorkspaceProject>;
+  readonly createProject: () => Promise<ProjectLoadResult | undefined>;
+  readonly openProject: (readOnly: boolean) => Promise<ProjectLoadResult | undefined>;
+  readonly openRecentProject: (request: OpenRecentProjectRequest) => Promise<ProjectLoadResult>;
+  readonly saveProject: (sessionId: string, project: WorkspaceProjectDraft) => Promise<ProjectSaveResult>;
+  readonly saveProjectAs: (sessionId: string, project: WorkspaceProjectDraft) => Promise<ProjectLoadResult | undefined>;
+  readonly confirmProjectPendingAction: (sessionId: string, project: WorkspaceProjectDraft) => Promise<ProjectLoadResult>;
+  readonly createProjectBackup: (sessionId: string) => Promise<ProjectBackupResult>;
+  readonly onRequestClose: (listener: () => void) => () => void;
+  readonly confirmClose: () => void;
   readonly exportPreviewPng: (request: PreviewPngExportRequest) => Promise<PreviewPngExportResult>;
   readonly exportMasterTiff: (request: MasterTiffExportRequest) => Promise<MasterTiffExportResult>;
   readonly exportGpuMasterTiff: (request: GpuMasterTiffExportRequest) => Promise<MasterTiffExportResult>;

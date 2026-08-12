@@ -9,6 +9,13 @@ import {
 } from "../../shared/project.ts";
 
 let cachedApi: FilmLabApi | null = null;
+const demoSession = {
+  id: "web-demo-session",
+  projectId: "web-demo-project",
+  name: "workspace.filmlab",
+  readOnly: false,
+  backupCount: 0,
+} as const;
 const masterExportUiDemo = typeof window !== "undefined"
   && new URLSearchParams(window.location.search).has("master-export-demo");
 const masterExportDemoAsset = {
@@ -51,19 +58,40 @@ export function createWebDemoApi(): FilmLabApi {
     precomputePreview: async (request: PreviewRequest) => createPreview(request),
     loadProject: async () => ({
       project: demoProject,
+      session: demoSession,
+      recentProjects: [],
+      restoredCalibrationProfileIds: [],
       relinkedAssetIds: [],
       relinkedAssets: [],
       missingAssets: [],
     }),
-    saveProject: async (project: WorkspaceProjectDraft) => {
+    createProject: async () => undefined,
+    openProject: async () => undefined,
+    openRecentProject: async () => {
+      throw new Error("浏览器演示模式没有最近项目目录。");
+    },
+    saveProject: async (_sessionId: string, project: WorkspaceProjectDraft) => {
       demoProject = {
         schemaVersion: projectSchemaVersion,
         ...project,
         presets: project.presets ?? [],
         updatedAt: new Date().toISOString(),
       };
-      return demoProject;
+      return { project: demoProject, backupCount: 0 };
     },
+    saveProjectAs: async () => undefined,
+    confirmProjectPendingAction: async () => ({
+      project: demoProject,
+      session: demoSession,
+      recentProjects: [],
+      restoredCalibrationProfileIds: [],
+      relinkedAssetIds: [],
+      relinkedAssets: [],
+      missingAssets: [],
+    }),
+    createProjectBackup: async () => ({ created: false, backupCount: 0 }),
+    onRequestClose: () => () => undefined,
+    confirmClose: () => undefined,
     exportPreviewPng: async () => ({ saved: false }),
     exportMasterTiff: async () => ({ saved: false }),
     exportGpuMasterTiff: async () => ({ saved: false }),

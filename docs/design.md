@@ -25,7 +25,8 @@ Renderer
           ▼
 Electron main
   ├─ SourceRegistry：assetId ↔ 本机绝对路径
-  ├─ ProjectService：目录项目与 schema 迁移
+  ├─ ProjectLifecycleService：活动/最近会话、只读、迁移、恢复与备份
+  ├─ ProjectService：单个目录项目的 schema 校验与原子写入
   └─ 原子文件发布、原生对话框、导出会话
           │
           ▼
@@ -105,11 +106,16 @@ TIFF、JPEG 和 HEIF 可以在三种可信度下导出，因为其 ICC 只声明
 
 ## 7. 项目目录、来源身份与长期重连
 
-当前 schema 为 v8。应用使用固定活动工作区目录：
+当前 schema 为 v8。应用可以新建、打开、只读打开、另存和从最近列表恢复任意 `.filmlab` 目录；首次启动的兼容默认目录为 `<userData>/projects/workspace.filmlab/`。项目包为：
 
 ```text
-<userData>/projects/workspace.filmlab/
-└─ project.json
+<name>.filmlab/
+├─ project.json
+├─ calibration-profiles/<profile-id>.json
+└─ backups/<kind>-<timestamp>-<uuid>/
+   ├─ project.json
+   ├─ backup.json
+   └─ calibration-profiles/    # 可选
 ```
 
 `project.json` 是可复制的项目内容，保存胶卷、帧、配方、预设、时间戳和来源身份，不保存绝对路径。每个来源身份包括：
@@ -120,7 +126,7 @@ TIFF、JPEG 和 HEIF 可以在三种可信度下导出，因为其 ICC 只声明
 - 算法标识 `sha256-full-v1`；
 - 完整文件 SHA-256。
 
-本机最近位置单独保存在 `<userData>/source-locations-v1.json`。该索引含绝对路径，只用于同机自动恢复，不属于项目包、不随项目分享，也不暴露给渲染进程。项目目录与本机索引的拆分同时满足长期身份核验和隐私边界。
+本机最近源位置单独保存在 `<userData>/source-locations-v1.json`；活动项目与最近项目目录保存在 `<userData>/project-sessions-v1.json`。两个索引都含绝对路径，只用于同机自动恢复，不属于项目包、不随项目分享，也不暴露给渲染进程；渲染进程只获得路径 SHA-256 形成的会话 ID。项目目录与本机索引的拆分同时满足长期身份核验和隐私边界。
 
 重连顺序为：
 
@@ -132,7 +138,16 @@ TIFF、JPEG 和 HEIF 可以在三种可信度下导出，因为其 ICC 只声明
 
 如果来源内容发生实际变化，应视为新来源。当前不会把已修改文件自动替换进旧配方，以避免历史处理无提示地指向不同母片。
 
-当前实现只有一个固定活动工作区；多项目目录选择、直接打开任意 `.filmlab` 目录和归档恢复界面属于后续产品能力，不应在验收中假定已经存在。
+项目引用的标定配置不只保存 `calibrationProfileId`：每次保存还会把经过校验的完整配置快照写入 `calibration-profiles/`，并删除已经不再引用的快照。换机打开时快照会再次经过 schema 校验后导入本机配置库；缺失被引用配置时拒绝写入，避免产生不可移植项目。
+
+保存与恢复遵守以下状态规则：
+
+1. 正常保存前创建自动备份，保留最近 10 份；手动备份保留最近 20 份。
+2. v1–v7 项目只迁移到内存并以只读会话打开；确认迁移时先备份原文件，再原子写入 v8。
+3. 主文件损坏时从最新可解析备份恢复为只读会话；确认恢复前不覆盖损坏文件。
+4. 显式只读打开允许内存编辑和另存为，但禁止原目录自动保存。
+5. 项目会话切换后，旧会话 ID 的延迟保存请求会被主进程拒绝，避免串写到新项目。
+6. 切换项目和退出应用前，渲染进程取消 550 ms 防抖、等待已有保存队列，再提交包含当前帧尚未经过 160 ms 同步防抖的最新配方；主窗口收到确认后才关闭，渲染进程失联则在 8 秒安全超时后退出。
 
 ## 8. CI 与发布边界
 

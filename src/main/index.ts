@@ -1,10 +1,10 @@
-import { app, BrowserWindow, session } from "electron";
+import { app, BrowserWindow, ipcMain, session, type IpcMainEvent } from "electron";
 import { join } from "node:path";
 
 import { CalibrationProfileService } from "./calibration-profile-service.ts";
 import { registerIpcHandlers } from "./ipc.ts";
 import { ProcessingService } from "./processing-service.ts";
-import { ProjectService } from "./project-service.ts";
+import { ProjectLifecycleService } from "./project-lifecycle-service.ts";
 import { SourceRegistry } from "./source-registry.ts";
 
 installBrokenPipeGuards();
@@ -34,6 +34,8 @@ function installBrokenPipeGuards(): void {
 }
 
 function createMainWindow(): void {
+  let allowClose = false;
+  let closeRequested = false;
   const window = new BrowserWindow({
     width: 1480,
     height: 940,
@@ -55,6 +57,29 @@ function createMainWindow(): void {
   mainWindow = window;
   window.once("ready-to-show", () => window.show());
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  const confirmClose = (event: IpcMainEvent): void => {
+    if (event.sender.id !== window.webContents.id) return;
+    allowClose = true;
+    window.close();
+  };
+  ipcMain.on("app:confirm-close", confirmClose);
+  window.on("close", (event) => {
+    if (allowClose || window.webContents.isDestroyed()) return;
+    event.preventDefault();
+    if (closeRequested) return;
+    closeRequested = true;
+    window.webContents.send("app:request-close");
+    // A crashed/unresponsive renderer must not make the application
+    // impossible to close. Normal paths acknowledge after the save queue and
+    // one final immediate project save have completed.
+    setTimeout(() => {
+      if (!window.isDestroyed() && !allowClose) {
+        console.warn("[FilmLab] renderer did not acknowledge close; forcing shutdown after save timeout");
+        allowClose = true;
+        window.close();
+      }
+    }, 8_000);
+  });
 
   if (process.env.ELECTRON_RENDERER_URL !== undefined) {
     void window.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -65,6 +90,7 @@ function createMainWindow(): void {
 
   window.webContents.on("will-navigate", (event) => event.preventDefault());
   window.on("closed", () => {
+    ipcMain.removeListener("app:confirm-close", confirmClose);
     if (mainWindow === window) {
       mainWindow = null;
     }
@@ -133,9 +159,13 @@ function runDevelopmentGpuSelfCheck(rendererUrl: string): void {
 app.whenReady().then(() => {
   app.setAppUserModelId("com.filmlab.desktop");
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-  const projectService = new ProjectService(join(app.getPath("userData"), "projects"));
   const sourceRegistry = new SourceRegistry(join(app.getPath("userData"), "source-locations-v1.json"));
   const calibrationProfiles = new CalibrationProfileService(join(app.getPath("userData"), "calibration-profiles"));
+  const projectService = new ProjectLifecycleService(
+    join(app.getPath("userData"), "projects"),
+    join(app.getPath("userData"), "project-sessions-v1.json"),
+    calibrationProfiles,
+  );
   const previewCacheDirectory = join(app.getPath("sessionData"), "linear-preview-v1");
   processingService = new ProcessingService(
     "FilmLab Image Worker",
