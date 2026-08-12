@@ -41,13 +41,13 @@ jobs:
             platform: darwin
             electron_target: mac
             arch: x64
-            triplet: x64-osx
+            triplet: x64-osx-filmlab
             requires_codesign: true
           - runner: macos-15
             platform: darwin
             electron_target: mac
             arch: arm64
-            triplet: arm64-osx
+            triplet: arm64-osx-filmlab
             requires_codesign: true
           - runner: ubuntu-22.04
             platform: linux

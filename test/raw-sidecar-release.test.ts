@@ -96,6 +96,22 @@ test("RAW release manifest pins the LibRaw build input", async () => {
   });
 });
 
+test("macOS native dependencies honour the application's minimum system version", async () => {
+  const configuration = JSON.parse(await readFile(new URL("../native/raw-worker/vcpkg-configuration.json", import.meta.url), "utf8")) as {
+    readonly "overlay-triplets": readonly string[];
+  };
+  const workflow = await readFile(new URL("../.github/workflows/raw-sidecar-release.yml", import.meta.url), "utf8");
+  const x64Triplet = await readFile(new URL("../native/raw-worker/triplets/x64-osx-filmlab.cmake", import.meta.url), "utf8");
+  const arm64Triplet = await readFile(new URL("../native/raw-worker/triplets/arm64-osx-filmlab.cmake", import.meta.url), "utf8");
+  assert.deepEqual(configuration["overlay-triplets"], ["triplets"]);
+  assert.match(workflow, /triplet: x64-osx-filmlab/);
+  assert.match(workflow, /triplet: arm64-osx-filmlab/);
+  for (const triplet of [x64Triplet, arm64Triplet]) {
+    assert.match(triplet, /set\(VCPKG_LIBRARY_LINKAGE static\)/);
+    assert.match(triplet, /set\(VCPKG_OSX_DEPLOYMENT_TARGET 13\.0\)/);
+  }
+});
+
 test("RAW sidecar exposes versioned edge-aware CPU and compact GPU Bayer paths", async () => {
   const source = await readFile(
     new URL("../native/raw-worker/src/main.cpp", import.meta.url),

@@ -109,6 +109,10 @@ cmake -S . -B build/windows-x64 `
 cmake --build build/windows-x64 --config Release
 ```
 
+macOS builds use the project-provided `x64-osx-filmlab` or
+`arm64-osx-filmlab` overlay triplet. Both pin every static dependency to a
+macOS 13 deployment target, matching the Electron package contract.
+
 Equivalent release artifacts are needed for every Electron target. CI sets
 `FILMLAB_RAW_WORKER_OUTPUT_DIR` while configuring CMake, so the executable is
 written directly to its package input location rather than copied from a build
