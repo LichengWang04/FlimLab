@@ -2,6 +2,10 @@
   "name": "filmlab-core",
   "version": "0.1.0",
   "private": true,
+  "author": {
+    "name": "Licheng Wang"
+  },
+  "license": "UNLICENSED",
   "type": "module",
   "main": "./out/main/index.js",
   "description": "A deterministic, linear-light core for camera-scanned film negatives.",
@@ -15,16 +19,18 @@
     "check": "npm run typecheck && npm run test",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "build:release-assets": "node scripts/build-release-assets.cjs",
     "benchmark:preview": "node --experimental-strip-types scripts/benchmark-preview.ts",
     "acceptance:a7rv": "npm run build && node scripts/run-a7rv-acceptance.cjs",
     "acceptance:masters": "node scripts/verify-master-compatibility.cjs",
     "benchmark:raw": "npm run build && node scripts/run-a7rv-acceptance.cjs --formats tiff",
     "verify:raw-sidecar": "node scripts/verify-raw-sidecar.cjs --ping",
     "start": "electron-vite preview",
-    "dist": "npm run build && electron-builder",
-    "dist:win": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac",
-    "dist:linux": "npm run build && electron-builder --linux"
+    "dist": "npm run build:release-assets && npm run build && electron-builder",
+    "dist:win": "npm run build:release-assets && npm run build && electron-builder --win",
+    "dist:mac": "npm run build:release-assets && npm run build && electron-builder --mac",
+    "dist:linux": "npm run build:release-assets && npm run build && electron-builder --linux",
+    "verify:installed-release": "node scripts/verify-installed-release.cjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

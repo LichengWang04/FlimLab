@@ -13,6 +13,7 @@ test("A7R V acceptance uses Electron/native ARW rather than the retired Sharp TI
   assert.match(runner, /FILMLAB_A7RV_ACCEPTANCE_SPEC/);
   assert.match(runner, /source-changed/);
   assert.match(runner, /--disable-gpu/);
+  assert.match(runner, /app-executable/);
 });
 
 test("real-camera workflow covers Windows x64 and both macOS architectures", async () => {
@@ -24,6 +25,8 @@ test("real-camera workflow covers Windows x64 and both macOS architectures", asy
   assert.match(workflow, /require-tools exiftool,magick/);
   assert.match(workflow, /require-native/);
   assert.match(workflow, /require-gpu/);
+  assert.match(workflow, /verify-installed-release\.cjs/);
+  assert.match(workflow, /--fixture-root "\$FILMLAB_A7RV_FIXTURE_ROOT"/);
 });
 
 test("A7R V performance baseline pins full dimensions, PTC identity and memory limits", async () => {

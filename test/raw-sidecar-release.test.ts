@@ -55,6 +55,28 @@ test("electron-builder validates the RAW sidecar before and after package copy",
   assert.match(configuration, /to: raw-worker/);
 });
 
+test("release configuration produces native installers with explicit lifecycle metadata", async () => {
+  const configuration = await readFile(new URL("../electron-builder.yml", import.meta.url), "utf8");
+  assert.match(configuration, /^productName: FilmLab$/m);
+  assert.match(configuration, /^copyright: /m);
+  assert.match(configuration, /win:[\s\S]*target:\n\s+- nsis/);
+  assert.match(configuration, /mac:[\s\S]*notarize: true[\s\S]*target:\n\s+- dmg/);
+  assert.match(configuration, /linux:[\s\S]*target:\n\s+- AppImage/);
+  assert.match(configuration, /allowToChangeInstallationDirectory: true/);
+  assert.match(configuration, /deleteAppDataOnUninstall: false/);
+  assert.match(configuration, /build\/generated\/icon\.(?:ico|icns|png)/);
+});
+
+test("release CI installs packages and gates tagged publication on signatures", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/raw-sidecar-release.yml", import.meta.url), "utf8");
+  assert.match(workflow, /verify-installed-release\.cjs/);
+  assert.match(workflow, /Get-AuthenticodeSignature/);
+  assert.match(workflow, /codesign --verify --deep --strict/);
+  assert.match(workflow, /xcrun stapler validate/);
+  assert.match(workflow, /publish-release:/);
+  assert.match(workflow, /SHA256SUMS/);
+});
+
 test("RAW release manifest pins the LibRaw build input", async () => {
   const manifest = JSON.parse(await readFile(new URL("../native/raw-worker/vcpkg.json", import.meta.url), "utf8")) as {
     "builtin-baseline": string;

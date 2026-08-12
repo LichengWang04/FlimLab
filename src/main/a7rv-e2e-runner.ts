@@ -315,7 +315,9 @@ async function resumeAndExport(
 }
 
 async function runRendererCheck(spec: A7rvAcceptanceSpec): Promise<object> {
-  const rendererPath = requirePath(spec.rendererPath, "rendererPath");
+  const rendererPath = spec.rendererPath === undefined
+    ? join(__dirname, "../renderer/index.html")
+    : requirePath(spec.rendererPath, "rendererPath");
   const window = new BrowserWindow({
     width: 960,
     height: 640,

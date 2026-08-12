@@ -7,6 +7,7 @@ dist/
 out/
 release/
 artifacts/
+/build/generated/
 *.tsbuildinfo
 *.log
 .DS_Store

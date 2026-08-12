@@ -181,3 +181,11 @@ DNG 容器验收使用动态匹配当前相机/decoder 的“验收专用单位�
 - 任何“GPU 导出”表述都必须区分已存在的条带接口与当前桌面默认 CPU 母版路径。
 - 任何“项目可归档”表述都不得暗示项目包含有绝对路径；本机位置索引是私有、可重建状态。
 - 新增输入格式、输出格式、相机模型或 CI 触发条件时，应同时更新本文件、README 和对应测试。
+
+## 10. 可安装发行物
+
+`win-unpacked/`、`.app` 构建目录和 AppImage 展开目录都只是中间状态，不构成发行物。可交付对象严格限定为 Windows x64 NSIS、macOS x64/arm64 DMG 与 Linux x64 AppImage。它们共享稳定的 `com.filmlab.desktop` 身份和 `package.json` 版本，sidecar 固定置于 `resources/raw-worker/<platform>-<arch>/`。
+
+干净构建必须完成三层验证：打包前 sidecar 协议探测；打包后资源存在性与字节身份验证；安装/挂载/展开后从发行可执行文件启动隐藏 renderer 并再次探测 sidecar。带私有素材的 Windows/macOS runner 还必须通过安装后的应用重复真实 A7R V ARW 导入、跨进程项目恢复/重连、TIFF 母版导出及 GPU/CPU 回退，开发态 Electron 的通过结果不能替代它。
+
+普通分支和 pull request 产生的包是未签名验证构建。`v*` 标签才是正式发行边界：Windows 安装器、主程序和 sidecar 必须通过 Authenticode；macOS `.app` 与 sidecar 必须通过 Developer ID 严格验证、Gatekeeper 评估及 stapled notarization ticket；任一密钥缺失或验证失败都中止。矩阵全部通过后才生成 `SHA256SUMS` 并发布 GitHub Release。平台命令和升级/卸载策略见 [`release.md`](release.md)。

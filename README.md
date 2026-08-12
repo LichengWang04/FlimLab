@@ -126,6 +126,6 @@ npm run acceptance:a7rv
 
 CI 工作流 [`.github/workflows/raw-sidecar-release.yml`](.github/workflows/raw-sidecar-release.yml) 在 Windows x64、macOS x64/arm64 和 Linux x64 分别构建静态 LibRaw sidecar，并把产物直接写到 `native/raw-worker/out/<platform>-<arch>/`。每个产物都会执行 JSON Lines `ping` 验证，要求协议版本、缓存格式和 `supportedCfa: ["bayer-2x2"]` 均匹配；因此当前发布能力仍明确仅限 2×2 Bayer，未把 X-Trans、Foveon 或 sRAW 暗中列为支持。
 
-electron-builder 在打包前后验证当前目标对应的 sidecar，最终位置固定为 `resources/raw-worker/<platform>-<arch>/`。版本标签构建会强制 Windows/macOS 代码签名，缺少证书即失败，不会产生被标记为发布版的未签名包；常规 CI 同时上传 sidecar 和安装包用于验证。签名环境变量、许可证义务和 Linux 发布签名策略见 [`native/raw-worker/README.md`](native/raw-worker/README.md)。
+electron-builder 在打包前后验证当前目标对应的 sidecar，最终位置固定为 `resources/raw-worker/<platform>-<arch>/`。正式产物为 Windows NSIS、macOS x64/arm64 DMG 和 Linux x64 AppImage；每个干净构建都会安装或解包后启动应用并探测已安装 sidecar，真实 A7R V runner 还会通过安装后的可执行文件重复 ARW 导入与 TIFF 导出。版本标签构建强制 Authenticode、Developer ID 与 Apple notarization 门禁，缺少证书即失败；通过后生成校验和并发布 GitHub Release。完整命令、密钥、升级/卸载策略和验收边界见 [`docs/release.md`](docs/release.md)，sidecar 许可义务见 [`native/raw-worker/README.md`](native/raw-worker/README.md)。
 
 当前架构、色彩可信度、输出格式、项目重连和 CI 的统一验收口径见 [`docs/design.md`](docs/design.md)；测试素材策略见 [`docs/test-data.md`](docs/test-data.md)；版本变化见 [`CHANGELOG.md`](CHANGELOG.md)；开发参考、许可边界和第三方项目约束见 [`docs/references.md`](docs/references.md)。

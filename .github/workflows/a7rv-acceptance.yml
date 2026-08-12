@@ -83,6 +83,29 @@ jobs:
           --stability-cycles 10
           --require-gpu
 
+      - name: Build installable package
+        shell: bash
+        run: |
+          npm run build:release-assets
+          npx electron-builder --${{ matrix.platform == 'win32' && 'win' || 'mac' }} --${{ matrix.arch }} --publish never
+
+      - name: Install package and repeat real A7R V RAW smoke
+        shell: bash
+        run: |
+          if [[ "${{ matrix.platform }}" == "win32" ]]; then
+            package="$(find release -maxdepth 1 -iname '*.exe' -print -quit)"
+          else
+            package="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
+          fi
+          test -n "$package"
+          node scripts/verify-installed-release.cjs \
+            --package "$package" \
+            --fixture-root "$FILMLAB_A7RV_FIXTURE_ROOT" \
+            --formats tiff \
+            --stability-cycles 1 \
+            --work-root artifacts/installed-a7rv-work \
+            --report artifacts/installed-a7rv.json
+
       - name: Re-open masters with independent software
         shell: bash
         run: >-
@@ -94,10 +117,12 @@ jobs:
         if: always()
         with:
           name: a7rv-acceptance-${{ matrix.platform }}-${{ matrix.arch }}
-          path: artifacts/a7rv-e2e/*.json
+          path: |
+            artifacts/a7rv-e2e/*.json
+            artifacts/installed-a7rv.json
           if-no-files-found: warn
 
       - name: Remove private fixture copies and generated masters
         if: always()
         shell: bash
-        run: node -e "require('node:fs').rmSync('artifacts/a7rv-e2e-work',{recursive:true,force:true})"
+        run: node -e "for(const path of ['artifacts/a7rv-e2e-work','artifacts/installed-a7rv-work'])require('node:fs').rmSync(path,{recursive:true,force:true})"

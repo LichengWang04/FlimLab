@@ -6,6 +6,9 @@ FilmLab follows [Semantic Versioning](https://semver.org/). This file records us
 
 ### Added
 
+- Reproducible Windows NSIS, macOS DMG and Linux AppImage packages with generated FilmLab icons, version/publisher metadata and target-specific installation policy.
+- Installed-package smoke verification that launches the packaged renderer, pings the packaged RAW sidecar and, on private A7R V runners, repeats real ARW import/relink/export through the installed executable.
+- Tag release gates for Authenticode, Developer ID signing, Apple notarization tickets, checksums and GitHub Release publication.
 - Complete `.filmlab` directory lifecycle: new, open, read-only open, save as and recent projects.
 - Portable snapshots for every calibration profile referenced by a project.
 - Automatic/manual project backups, explicit schema migration confirmation and read-only recovery from corrupt projects.

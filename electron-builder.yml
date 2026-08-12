@@ -1,9 +1,12 @@
 appId: com.filmlab.desktop
 productName: FilmLab
+copyright: Copyright © 2026 Licheng Wang
 beforePack: ./scripts/verify-raw-sidecar.cjs
 afterPack: ./scripts/verify-raw-sidecar.cjs
 directories:
   output: release
+  buildResources: build
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 files:
   - out/**/*
   - package.json
@@ -22,14 +25,50 @@ win:
   # certificate, including the RAW sidecar. Tag builds require that certificate.
   signExts:
     - .exe
+  icon: build/generated/icon.ico
+  executableName: FilmLab
+  legalTrademarks: FilmLab
   target:
     - nsis
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: FilmLab
+  uninstallDisplayName: FilmLab ${version}
+  deleteAppDataOnUninstall: false
+  installerIcon: build/generated/icon.ico
+  uninstallerIcon: build/generated/icon.ico
 mac:
   # @electron/osx-sign walks executable files below Contents, so the sidecar
   # under Contents/Resources/raw-worker is signed with the app bundle.
   hardenedRuntime: true
+  notarize: true
+  category: public.app-category.photography
+  minimumSystemVersion: 13.0
+  icon: build/generated/icon.icns
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
   target:
     - dmg
+dmg:
+  sign: false
+  contents:
+    - x: 140
+      y: 220
+    - x: 420
+      y: 220
+      type: link
+      path: /Applications
 linux:
+  category: Graphics
+  maintainer: Licheng Wang
+  synopsis: Camera-scanned film negative workflow
+  description: Deterministic linear-light processing for camera-scanned film negatives.
+  executableName: filmlab
+  icon: build/generated/icon.png
   target:
     - AppImage

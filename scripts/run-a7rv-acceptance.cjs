@@ -13,6 +13,7 @@ const workRoot = resolve(options["work-root"] ?? join(repositoryRoot, "artifacts
 const reportRoot = resolve(options["report-dir"] ?? join(repositoryRoot, "artifacts", "a7rv-e2e"));
 const formats = (options.formats ?? "tiff,jpeg,heif,dng").split(",").filter(Boolean);
 const requireGpu = options["require-gpu"] === true;
+const appExecutable = options["app-executable"] === undefined ? undefined : resolve(options["app-executable"]);
 let acceptanceBaseline;
 
 void main().catch((error) => {
@@ -96,7 +97,7 @@ async function main() {
   });
   await runElectron(stabilitySpec, []);
 
-  const rendererPath = join(repositoryRoot, "out", "renderer", "index.html");
+  const rendererPath = appExecutable === undefined ? join(repositoryRoot, "out", "renderer", "index.html") : undefined;
   const gpuSpec = join(workRoot, "renderer-gpu-spec.json");
   const gpuReport = join(reportRoot, `${process.platform}-${process.arch}-renderer-gpu.json`);
   await writeSpec(gpuSpec, {
@@ -141,9 +142,10 @@ function performanceLimits() {
 }
 
 async function runElectron(specPath, extraArgs) {
-  const electron = require("electron");
+  const electron = appExecutable ?? require("electron");
+  const applicationArguments = appExecutable === undefined ? [...extraArgs, repositoryRoot] : extraArgs;
   await new Promise((resolvePromise, reject) => {
-    const child = spawn(electron, [...extraArgs, repositoryRoot], {
+    const child = spawn(electron, applicationArguments, {
       cwd: repositoryRoot,
       env: { ...process.env, FILMLAB_A7RV_ACCEPTANCE_SPEC: specPath },
       stdio: "inherit",
