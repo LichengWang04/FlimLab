@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import test from "node:test";
 
 const require = createRequire(import.meta.url);
@@ -17,14 +17,14 @@ const rawSidecar = require("../scripts/verify-raw-sidecar.cjs") as {
 };
 
 test("RAW release paths match the runtime resolver's platform-arch layout", () => {
+  const releaseRoot = resolve("FilmLab-release-root");
+  const workerPath = rawSidecar.sourceWorkerPath(releaseRoot, "darwin", "x64");
   assert.equal(rawSidecar.platformArch("win32", 1), "win32-x64");
   assert.equal(rawSidecar.platformArch("darwin", "arm64"), "darwin-arm64");
   assert.equal(rawSidecar.relativeWorkerPath("win32", "x64"), join("raw-worker", "win32-x64", "filmlab-raw-worker.exe"));
   assert.equal(rawSidecar.relativeWorkerPath("linux", "x64"), join("raw-worker", "linux-x64", "filmlab-raw-worker"));
-  assert.equal(
-    rawSidecar.sourceWorkerPath("C:/FilmLab", "darwin", "x64"),
-    join("C:/FilmLab", "native", "raw-worker", "out", "darwin-x64", "filmlab-raw-worker"),
-  );
+  assert.equal(workerPath, join(releaseRoot, "native", "raw-worker", "out", "darwin-x64", "filmlab-raw-worker"));
+  assert.equal(isAbsolute(workerPath), true);
 });
 
 test("RAW release path guard rejects architectures without a sidecar build", () => {

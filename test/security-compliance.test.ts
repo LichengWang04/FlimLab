@@ -53,6 +53,15 @@ test("distribution includes proprietary and complete third-party legal material"
   }
 });
 
+test("LGPL platform packages receive complete standard license fallbacks", async () => {
+  const generator = await readFile(new URL("../scripts/generate-compliance-assets.cjs", import.meta.url), "utf8");
+  const gpl = await readFile(new URL("../third-party/npm-license-fallbacks/GPL-3.0-only.LICENSE.txt", import.meta.url), "utf8");
+  const lgpl = await readFile(new URL("../third-party/npm-license-fallbacks/LGPL-3.0-or-later.LICENSE.txt", import.meta.url), "utf8");
+  assert.match(generator, /"LGPL-3\.0-or-later"[\s\S]*GPL-3\.0-only\.LICENSE\.txt[\s\S]*LGPL-3\.0-or-later\.LICENSE\.txt/);
+  assert.match(gpl, /GNU GENERAL PUBLIC LICENSE[\s\S]*Version 3, 29 June 2007/);
+  assert.match(lgpl, /GNU LESSER GENERAL PUBLIC LICENSE[\s\S]*Version 3, 29 June 2007/);
+});
+
 test("security workflow audits dependencies, emits SBOM and configures CodeQL", async () => {
   const workflow = await readFile(".github/workflows/security.yml", "utf8");
   assert.match(workflow, /npm audit --audit-level=high/);

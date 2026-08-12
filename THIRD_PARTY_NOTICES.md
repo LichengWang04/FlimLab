@@ -84,5 +84,9 @@ JPEG Group.
 | `universalify` | `2.0.1` | MIT |
 
 The generated license bundle copies the unmodified license/NOTICE files from
-every runtime npm package actually installed for the target platform. License
-expressions above are metadata, not a replacement for those texts.
+every runtime npm package actually installed for the target platform. Where an
+upstream platform tarball declares `LGPL-3.0-or-later` but omits license files,
+the bundle adds the standard unmodified GNU GPL v3 and LGPL v3 texts required
+by the LGPL. Those binaries and their corresponding build source are published
+by the [sharp-libvips project](https://github.com/lovell/sharp-libvips).
+License expressions above are metadata, not a replacement for those texts.

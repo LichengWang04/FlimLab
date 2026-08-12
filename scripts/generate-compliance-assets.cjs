@@ -9,6 +9,12 @@ const legalRoot = join(root, "build", "generated", "legal");
 const nativeLicenseRoot = join(root, "third-party", "native-licenses");
 const npmLicenseFallbackRoot = join(root, "third-party", "npm-license-fallbacks");
 const checkOnly = process.argv.includes("--check");
+const standardLicenseFallbacks = Object.freeze({
+  "LGPL-3.0-or-later": [
+    "GPL-3.0-only.LICENSE.txt",
+    "LGPL-3.0-or-later.LICENSE.txt",
+  ],
+});
 
 void main().catch((error) => {
   console.error(`Compliance asset generation failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -90,9 +96,17 @@ async function copyInstalledNpmLicenses(lock) {
       // their `files` allow-list. Never silently ship only the identifier:
       // require a repository-reviewed fallback named for the exact package
       // and version, then include it in every legal bundle.
-      const fallback = `${safeName(packageJson.name)}@${value.version}.LICENSE.txt`;
-      await copyRequired(join(npmLicenseFallbackRoot, fallback), join(legalRoot, "npm", directory, fallback));
-      copiedFiles.push(fallback);
+      const standardFallbacks = standardLicenseFallbacks[value.license];
+      if (standardFallbacks !== undefined) {
+        for (const fallback of standardFallbacks) {
+          await copyRequired(join(npmLicenseFallbackRoot, fallback), join(legalRoot, "npm", directory, fallback));
+          copiedFiles.push(fallback);
+        }
+      } else {
+        const fallback = `${safeName(packageJson.name)}@${value.version}.LICENSE.txt`;
+        await copyRequired(join(npmLicenseFallbackRoot, fallback), join(legalRoot, "npm", directory, fallback));
+        copiedFiles.push(fallback);
+      }
     } else {
       for (const file of candidates) await cp(join(packageRoot, file), join(legalRoot, "npm", directory, file));
     }
