@@ -83,3 +83,20 @@ test("legacy filename relink enriches the descriptor with a durable identity", a
   assert.equal(registry.getPath("frame-a"), firstPath);
   assert.equal(registry.getPath("frame-b"), secondPath);
 });
+
+test("directory relink rejects a same-size source whose content changed", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "filmlab-source-changed-"));
+  context.after(async () => rm(directory, { recursive: true, force: true }));
+  const original = join(directory, "original.ARW");
+  const changedDirectory = join(directory, "changed");
+  await mkdir(changedDirectory);
+  await writeFile(original, new Uint8Array([1, 2, 3, 4, 5, 6]));
+  const registry = new SourceRegistry();
+  const [asset] = await registry.register([original]);
+  registry.forget(asset.id);
+  await writeFile(join(changedDirectory, "renamed.ARW"), new Uint8Array([1, 2, 3, 4, 5, 7]));
+
+  const result = await registry.relinkDirectories([asset], [changedDirectory]);
+  assert.deepEqual(result.relinkedAssetIds, []);
+  assert.deepEqual(result.missingAssets.map((value) => value.id), [asset.id]);
+});

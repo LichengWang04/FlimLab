@@ -1,0 +1,103 @@
+name: Sony A7R V end-to-end acceptance
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a7rv-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  real-camera:
+    name: ${{ matrix.platform }}-${{ matrix.arch }} real ARW
+    runs-on: [self-hosted, filmlab-a7rv, "${{ matrix.runner_os }}", "${{ matrix.arch }}", gpu]
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner_os: windows
+            platform: win32
+            arch: x64
+            triplet: x64-windows-static
+          - runner_os: macos
+            platform: darwin
+            arch: x64
+            triplet: x64-osx
+          - runner_os: macos
+            platform: darwin
+            arch: arm64
+            triplet: arm64-osx
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgJsonGlob: '**/native/raw-worker/vcpkg.json'
+
+      - name: Install locked JavaScript dependencies
+        run: npm ci
+
+      - name: Verify private fixture mount and external compatibility tools
+        shell: bash
+        run: |
+          test -n "$FILMLAB_A7RV_FIXTURE_ROOT"
+          command -v exiftool
+          command -v magick
+
+      - name: Build native RAW sidecar
+        shell: bash
+        run: |
+          cmake -S native/raw-worker -B build/raw-worker/${{ matrix.platform }}-${{ matrix.arch }} \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_MANIFEST_DIR="$GITHUB_WORKSPACE/native/raw-worker" \
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DFILMLAB_RAW_WORKER_OUTPUT_DIR="$GITHUB_WORKSPACE/native/raw-worker/out/${{ matrix.platform }}-${{ matrix.arch }}"
+          cmake --build build/raw-worker/${{ matrix.platform }}-${{ matrix.arch }} --config Release --parallel
+
+      - name: Verify application and sidecar contracts
+        shell: bash
+        run: |
+          node scripts/verify-raw-sidecar.cjs --platform ${{ matrix.platform }} --arch ${{ matrix.arch }} --ping
+          npm run check
+          npm run build
+
+      - name: Run ARW, restart, relink, export, crash, GPU fallback and stability acceptance
+        shell: bash
+        run: >-
+          node scripts/run-a7rv-acceptance.cjs
+          --fixture-root "$FILMLAB_A7RV_FIXTURE_ROOT"
+          --stability-cycles 10
+          --require-gpu
+
+      - name: Re-open masters with independent software
+        shell: bash
+        run: >-
+          node scripts/verify-master-compatibility.cjs
+          --require-tools exiftool,magick
+          --require-native
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: a7rv-acceptance-${{ matrix.platform }}-${{ matrix.arch }}
+          path: artifacts/a7rv-e2e/*.json
+          if-no-files-found: warn
+
+      - name: Remove private fixture copies and generated masters
+        if: always()
+        shell: bash
+        run: node -e "require('node:fs').rmSync('artifacts/a7rv-e2e-work',{recursive:true,force:true})"

@@ -26,6 +26,7 @@ FilmLab 是面向个人翻拍胶片负片的 Electron 工作台。处理核心�
 
 - 智能几何与 GPU 预览：直尺拉直允许沿画面中应当水平或垂直的边缘拖出参考线，并把它校正为最近的平行轴；自动裁切直接贴合检测到的成像区内边界，不额外保留片基。1080p 画布优先使用高性能 WebGL2 纹理更新，GPU 不可用时自动回退到 Canvas2D。仓库保留 GPU 条带导出接口和容器写入器，但当前桌面验收路径有意使用 CPU 全精度确定性母版，避免输出像素依赖显卡或预览分辨率统计。
 - 自适应交互性能：控件变化先生成 960 边长快速预览，停止操作 180 ms 后自动细化到 1440 边长；两档线性中间结果分别缓存，避免色调调整重复执行密度反转。几何分析使用 1280 边长，最终母版仍从原始全分辨率数据计算。滑杆数值按输入事件即时更新，同一次拖动只写入一条撤销记录。
+- 真实 A7R V 验收：`npm run acceptance:a7rv` 使用外部 SHA-256 固定的 ARW 启动生产 Electron/utility/LibRaw 链路，覆盖预览、配方保存、独立机器状态重启、项目复制、移动/改名重连、内容篡改拒绝、utility 崩溃重启和 TIFF/JPEG/HEIF/DNG 全分辨率导出。每个母版会被独立重新打开并验证尺寸、位深、ICC、XMP 与 DNG 标签；同一入口还检查真实 WebGL2、`--disable-gpu` 的 Canvas2D 回退和多轮批量内存漂移。
 
 ## 科学边界与当前要求
 
@@ -108,15 +109,18 @@ npm run check
 npm run benchmark:preview
 npm run build
 npm run dev
+npm run acceptance:a7rv
 ```
 
 `npm run dev` 会启动完整的 Electron 工作台。需要在普通浏览器中做隔离的界面验收时，访问 `http://localhost:5173/?web-demo`；该入口使用内建演示负片，不会读取本地源文件，也不替代 Electron 的真实处理链路。
 
-`npm run check` 包含核心、项目隔离、标定配置/色卡矩阵、TIFF/ICC 和来源注册测试。`npm run dist` 使用 electron-builder 打包当前平台；发布前请按上面的路径提供对应 RAW sidecar。
+`npm run check` 包含核心、项目隔离、标定配置/色卡矩阵、TIFF/ICC、故障注入和来源注册测试。`npm run acceptance:a7rv` 还要求本机已经构建当前平台 sidecar，并在 `A7R5_RAW/` 放置清单匹配的私有素材；它会产生体积较大的忽略目录 `artifacts/`。`npm run dist` 使用 electron-builder 打包当前平台。
 
 仓库不提交真实相机 RAW、扫描母版或本地导出。Sony A7R V 回归素材采用外部本地保存和 SHA-256 身份清单；恢复及验证方法见 [`docs/test-data.md`](docs/test-data.md)。首次克隆后可执行 `git config core.hooksPath .githooks` 启用提交前的仓库卫生检查与完整测试。
 
 普通应用 CI 位于 [`.github/workflows/quality.yml`](.github/workflows/quality.yml)，所有 pull request、推送到 `main` 和手动触发都会在 Ubuntu/Windows、Node.js 24 上执行 `npm ci`、`npm run check` 与 `npm run build`。它没有路径过滤；RAW sidecar 的发布工作流是独立职责，不能替代普通代码 CI。
+
+真实相机工作流 [`.github/workflows/a7rv-acceptance.yml`](.github/workflows/a7rv-acceptance.yml) 每周及手动在带私有夹具挂载和 GPU 的自托管 Windows x64、macOS Intel、macOS Apple Silicon 机器运行。它要求 `exiftool` 和 ImageMagick 独立重开母版，并同时验证 GPU 与禁用 GPU 路径；只上传 JSON 报告，结束后删除 ARW 副本和母版。2026-08-12 已在 Windows x64 完成 9564×6376 四格式及 60 次真实 ARW 稳定性基线；macOS 两种架构的状态必须以该工作流实际报告为准，不能由 Windows 结果推定。
 
 ## RAW sidecar 的可分发构建
 

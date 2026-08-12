@@ -13,6 +13,7 @@ import {
   type WorkerCommand,
   type WorkerResponseMessage,
   type WorkerSuccessResult,
+  type WorkerTelemetry,
 } from "../shared/processing-contracts.ts";
 import imageWorkerModulePath from "./image-worker?modulePath";
 
@@ -35,6 +36,7 @@ export class ProcessingService {
   private readonly loadTasks = new Map<string, Promise<DecodedSourceSummary>>();
   private renderInFlight = false;
   private queuedRender: QueuedRender | undefined;
+  private latestTelemetry: WorkerTelemetry | undefined;
 
   public constructor(
     serviceName = "FilmLab Image Worker",
@@ -89,6 +91,46 @@ export class ProcessingService {
       throw new Error("图像处理进程返回了意外的预览响应。");
     }
     return response.result;
+  }
+
+  /** Decode through the exact utility-process/native path without rendering. */
+  public inspectSource(
+    assetId: string,
+    sourcePath: string,
+    previewMaxEdge?: number,
+    preferGpuBayer = false,
+  ): Promise<DecodedSourceSummary> {
+    return this.ensureLoaded(assetId, sourcePath, previewMaxEdge, preferGpuBayer);
+  }
+
+  public telemetry(): WorkerTelemetry | undefined {
+    return this.latestTelemetry;
+  }
+
+  /** Release a decoded raster after batch work so long runs remain bounded. */
+  public async release(assetId: string): Promise<void> {
+    this.loadedPaths.delete(assetId);
+    for (const key of this.loadTasks.keys()) {
+      if (key.startsWith(assetId + "\u0000")) this.loadTasks.delete(key);
+    }
+    if (this.worker === null) return;
+    const response = await this.send({ kind: "release", assetId });
+    if (response.kind !== "release") throw new Error("图像处理进程返回了意外的释放响应。");
+  }
+
+  public async simulateCrashForAcceptance(): Promise<void> {
+    if (process.env.FILMLAB_A7RV_ACCEPTANCE_SPEC === undefined) {
+      throw new Error("Utility crash injection is available only to the A7R V acceptance runner.");
+    }
+    let rejected = false;
+    try {
+      await this.send({ kind: "crash-for-acceptance", assetId: "acceptance-crash" });
+    } catch {
+      rejected = true;
+      // The expected utility-process exit rejects every in-flight request and
+      // clears loadedPaths; the next command must fork a clean worker.
+    }
+    if (!rejected) throw new Error("Acceptance worker did not crash when requested.");
   }
 
   public async exportTiff(
@@ -329,6 +371,7 @@ export class ProcessingService {
     }
     this.pending.delete(message.requestId);
     if (message.ok) {
+      this.latestTelemetry = message.telemetry;
       pending.resolve(message.response);
       return;
     }

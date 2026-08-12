@@ -161,6 +161,20 @@ TIFF、JPEG 和 HEIF 可以在三种可信度下导出，因为其 ICC 只声明
 
 RAW sidecar 发布工作流 [`.github/workflows/raw-sidecar-release.yml`](../.github/workflows/raw-sidecar-release.yml) 负责各平台 LibRaw 构建、协议探测、打包与签名约束。该工作流可以保留针对原生源、锁文件和工作流本身的路径过滤；它不替代普通代码 CI。
 
+真实 A7R V 验收工作流 [`.github/workflows/a7rv-acceptance.yml`](../.github/workflows/a7rv-acceptance.yml) 使用带授权私有素材挂载的自托管 Windows x64、macOS x64 和 macOS arm64 GPU 机器。生产构建通过环境指定的验收 spec 进入隐藏 Electron 模式，仍使用正式 `ProcessingService → utility process → image-worker → LibRaw sidecar`，不提供 Sharp/TIFF 替代解码。其验收顺序为：
+
+1. 验证 ARW 尺寸和 SHA-256，再解码 1440 边预览并严格核验 A7R V、ISO 100 PTC 和 decoder fingerprint。
+2. 保存含来源身份、逐帧配方和校准快照的目录项目；第二个 Electron 进程使用空白机器私有状态打开复制项目。
+3. 确认旧绝对路径不会跨机泄漏、同尺寸篡改文件被拒绝、移动且改名的原内容能以 SHA-256 重连。
+4. 主动终止 utility process，要求下一请求重新创建并成功解码；导出临时文件带 PID，重试同一目标时清理已死亡进程残留。ENOSPC 注入必须不发布目标且不留下 `.tmp/.raw`。
+5. 从真实 ARW 全尺寸重新计算并导出 TIFF、JPEG、10-bit HEIF 和线性 DNG；独立解析尺寸、位深、ICC/XMP、LinearRaw 与 DNG 必需标签，再由 Sharp/libvips、ExifTool、ImageMagick及可用的系统 ImageIO 重开。
+6. 隐藏 renderer 分别记录正常 GPU 的 WebGL2 backend 和 `--disable-gpu` 的 Canvas2D backend。每台机器必须报告实际后端，不能把 API 存在视为 GPU 通过。
+7. 六个真实 ARW 默认运行 10 轮共 60 次预览/释放，记录每轮时间、当前 RSS、观测峰值和首末漂移。批处理每完成一帧显式释放 utility raster，使内存规模由单帧峰值而非照片总数决定。
+
+DNG 容器验收使用动态匹配当前相机/decoder 的“验收专用单位变换”以通过设备身份门槛，其配置名称、拟合算法和 warning 都明确声明它不是色彩校准。该输出只能验证设备身份判定、容器、标签和软件解码兼容性，不能作为 A7R V 色彩准确性样张；颜色验收仍必须使用受控色卡拟合配置和独立参考值。
+
+性能门槛位于 [`test-data/a7rv-acceptance-baseline.json`](../test-data/a7rv-acceptance-baseline.json)。Windows x64 的已有报告不能替代 macOS Intel/Apple Silicon 运行；跨平台能力只有对应自托管任务产生通过报告后才成立。
+
 ## 9. 文档验收规则
 
 - 任何“颜色准确”“sRGB 母版”表述都必须同时说明可信度等级；未校准输出只能称为 sRGB 编码的可浏览/交付结果。

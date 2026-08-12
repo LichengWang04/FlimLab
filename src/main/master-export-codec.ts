@@ -1,8 +1,8 @@
 import { mkdir, open, readFile, rename, rm, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { randomUUID } from "node:crypto";
 
 import sharp from "sharp";
+import { assertWithinTestWriteLimit, atomicTemporaryPath, removeStaleOutputArtifacts } from "./atomic-output.ts";
 
 import type { MasterExportFormat } from "../shared/contracts.ts";
 import {
@@ -33,6 +33,8 @@ export interface StreamingMasterExportOptions {
   readonly height: number;
   readonly rowsPerStrip: number;
   readonly processingMetadata?: Readonly<Record<string, string | number | boolean>>;
+  /** Deterministic ENOSPC injection used only by acceptance tests. */
+  readonly testWriteLimitBytes?: number;
 }
 
 export interface DisplayLinearMasterExportOptions extends StreamingMasterExportOptions {
@@ -50,6 +52,7 @@ export async function createStreamingMasterWriter(
       rowsPerStrip: options.rowsPerStrip,
       container: options.format,
       processingMetadata: options.processingMetadata,
+      testWriteLimitBytes: options.testWriteLimitBytes,
     });
     return {
       appendStrip: (outputY, height, data) => writer.appendStrip(outputY, height, data),
@@ -116,12 +119,10 @@ class SharpStreamingWriter implements StreamingRgb16Writer {
   public static async create(options: StreamingMasterExportOptions): Promise<SharpStreamingWriter> {
     if (options.outputPath.trim().length === 0) throw new Error("导出路径不能为空。");
     const outputDirectory = dirname(options.outputPath);
-    const temporaryPath = join(
-      outputDirectory,
-      "." + basename(options.outputPath) + "." + randomUUID() + ".tmp",
-    );
+    const temporaryPath = atomicTemporaryPath(options.outputPath);
     const rawPath = temporaryPath + ".raw";
     await mkdir(outputDirectory, { recursive: true });
+    await removeStaleOutputArtifacts(options.outputPath);
     const rawHandle = await open(rawPath, "wx");
     return new SharpStreamingWriter(options, temporaryPath, rawPath, rawHandle);
   }
@@ -141,6 +142,7 @@ class SharpStreamingWriter implements StreamingRgb16Writer {
     const bytes = this.options.format === "jpeg"
       ? srgb16To8BitBuffer(data)
       : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+    assertWithinTestWriteLimit(this.options.testWriteLimitBytes, this.position + bytes.length);
     await this.rawHandle.write(bytes, 0, bytes.length, this.position);
     this.position += bytes.length;
     this.nextOutputY += height;

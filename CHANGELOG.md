@@ -10,10 +10,14 @@ FilmLab follows [Semantic Versioning](https://semver.org/). This file records us
 - Portable snapshots for every calibration profile referenced by a project.
 - Automatic/manual project backups, explicit schema migration confirmation and read-only recovery from corrupt projects.
 - Save-queue flushing and a final current-frame save before project switches and application exit.
+- Production Electron/LibRaw A7R V acceptance covering project restart/copy, identity relink, four full-resolution master formats, metadata validation, GPU/CPU renderer backends and multi-cycle stability.
+- Weekly/manual private-fixture matrix for Windows x64, macOS Intel and macOS Apple Silicon, with independent ExifTool/ImageMagick compatibility probes.
 
 ### Changed
 
 - Project and recent absolute paths remain only in the machine-private `project-sessions-v1.json`; renderer APIs use opaque session IDs.
+- `benchmark:raw` now drives a real ARW through Electron and the native sidecar instead of using Sharp to read a TIFF proxy.
+- Batch export releases each completed full-resolution raster; atomic output retries clean dead-process artifacts without touching live exports.
 
 ## [0.1.0] - 2026-08-12
 

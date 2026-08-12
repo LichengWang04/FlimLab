@@ -1,10 +1,10 @@
-import { randomUUID } from "node:crypto";
 import { mkdir, open, rename, rm, writeFile, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { deflate } from "node:zlib";
 
 import sharp from "sharp";
+import { assertWithinTestWriteLimit, atomicTemporaryPath, removeStaleOutputArtifacts } from "./atomic-output.ts";
 
 /**
  * RGB samples produced by FilmLab's tone stage. Values are linear-light,
@@ -33,6 +33,8 @@ export interface DisplayLinearTiffOptions extends DisplayLinearTiffSource {
   readonly bigtiff?: boolean;
   /** Extra provenance included in the default XMP packet. */
   readonly processingMetadata?: Readonly<Record<string, string | number | boolean>>;
+  /** Deterministic ENOSPC injection used only by acceptance tests. */
+  readonly testWriteLimitBytes?: number;
 }
 
 export type DisplayLinearTiffBufferOptions = Omit<DisplayLinearTiffOptions, "outputPath">;
@@ -151,13 +153,12 @@ export async function writeDisplayLinearTiff(
 
   const encoded = await encodeDisplayLinearTiff(options);
   const outputDirectory = dirname(options.outputPath);
-  const temporaryPath = join(
-    outputDirectory,
-    "." + basename(options.outputPath) + "." + randomUUID() + ".tmp",
-  );
+  const temporaryPath = atomicTemporaryPath(options.outputPath);
 
   await mkdir(outputDirectory, { recursive: true });
+  await removeStaleOutputArtifacts(options.outputPath);
   try {
+    assertWithinTestWriteLimit(options.testWriteLimitBytes, encoded.byteLength);
     await writeFile(temporaryPath, encoded, { flag: "wx" });
     await rename(temporaryPath, options.outputPath);
   } finally {
@@ -181,12 +182,11 @@ export async function writeSrgb16Tiff(
   }
   const encoded = await encodeSrgb16Tiff(options);
   const outputDirectory = dirname(options.outputPath);
-  const temporaryPath = join(
-    outputDirectory,
-    "." + basename(options.outputPath) + "." + randomUUID() + ".tmp",
-  );
+  const temporaryPath = atomicTemporaryPath(options.outputPath);
   await mkdir(outputDirectory, { recursive: true });
+  await removeStaleOutputArtifacts(options.outputPath);
   try {
+    assertWithinTestWriteLimit(options.testWriteLimitBytes, encoded.byteLength);
     await writeFile(temporaryPath, encoded, { flag: "wx" });
     await rename(temporaryPath, options.outputPath);
   } finally {
@@ -211,6 +211,8 @@ export interface StreamingSrgb16TiffOptions {
   readonly densityDpi?: number;
   readonly xmp?: string;
   readonly processingMetadata?: Readonly<Record<string, string | number | boolean>>;
+  /** Deterministic ENOSPC injection used only by acceptance tests. */
+  readonly testWriteLimitBytes?: number;
 }
 
 // This product includes DNG technology under license by Adobe.
@@ -257,11 +259,9 @@ export class StreamingSrgb16TiffWriter {
     const densityDpi = options.densityDpi ?? 300;
     assertDensity(densityDpi);
     const outputDirectory = dirname(options.outputPath);
-    const temporaryPath = join(
-      outputDirectory,
-      "." + basename(options.outputPath) + "." + randomUUID() + ".tmp",
-    );
+    const temporaryPath = atomicTemporaryPath(options.outputPath);
     await mkdir(outputDirectory, { recursive: true });
+    await removeStaleOutputArtifacts(options.outputPath);
     const handle = await open(temporaryPath, "wx");
     try {
       const header = Buffer.alloc(8);
@@ -303,6 +303,7 @@ export class StreamingSrgb16TiffWriter {
     const predicted = encodeHorizontalPredictor(data, this.options.width, height);
     const compressed = await deflateAsync(predicted);
     this.assertClassicOffset(this.position + compressed.length);
+    assertWithinTestWriteLimit(this.options.testWriteLimitBytes, this.position + compressed.length);
     await this.handle.write(compressed, 0, compressed.length, this.position);
     this.stripOffsets.push(this.position);
     this.stripByteCounts.push(compressed.length);

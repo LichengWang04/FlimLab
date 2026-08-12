@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inflateSync } from "node:zlib";
@@ -14,7 +14,8 @@ import {
   StreamingSrgb16TiffWriter,
   writeDisplayLinearTiff,
 } from "../src/main/tiff-codec.ts";
-import { createStreamingMasterWriter } from "../src/main/master-export-codec.ts";
+import { createStreamingMasterWriter, writeDisplayLinearMaster } from "../src/main/master-export-codec.ts";
+import { validateMasterArtifact } from "../src/main/master-artifact-validator.ts";
 import { unpackEncodedMasterPixels } from "../src/renderer/src/gpu-master-readback.ts";
 
 test("display-linear samples are gamma encoded and quantised to 16-bit sRGB", () => {
@@ -147,6 +148,8 @@ test("streaming TIFF writer emits valid inline offsets for a single strip", asyn
   await writer.finish();
 
   assert.deepEqual(Array.from(readDeflatedRgb16Strips(await readFile(outputPath))), Array.from(samples));
+  const validation = await validateMasterArtifact(outputPath, "tiff", { width: 2, height: 1 });
+  assert.equal(validation.hasIcc, true);
 });
 
 test("GPU master readback keeps encoded tile rows in top-to-bottom order", () => {
@@ -187,6 +190,8 @@ test("linear DNG export writes required DNG identity and LinearRaw tags", async 
   assert.ok(tags.has(50708), "UniqueCameraModel is required");
   assert.ok(tags.has(50721), "ColorMatrix1 is required for RGB DNG");
   assert.deepEqual(Array.from(readDeflatedRgb16Strips(dng)), Array.from(samples));
+  const validation = await validateMasterArtifact(outputPath, "dng", { width: 2, height: 2 });
+  assert.deepEqual(validation.dngTags, [50706, 50707, 50708, 50721]);
 });
 
 test("streaming JPG and HEIF exports preserve dimensions and advertised depth", async (context) => {
@@ -220,7 +225,74 @@ test("streaming JPG and HEIF exports preserve dimensions and advertised depth", 
     assert.equal(metadata.height, 3);
     assert.match(metadata.xmpAsString ?? "", /device-matched-linear-srgb-d65/);
     if (format === "heif") assert.equal(metadata.bitsPerSample, expectedBits);
+    const validation = await validateMasterArtifact(outputPath, format, {
+      width: 4,
+      height: 3,
+      xmpIncludes: ["device-matched-linear-srgb-d65"],
+    });
+    assert.equal(validation.hasIcc, true);
   }
+});
+
+test("a retry removes export artifacts owned by a dead process", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "filmlab-crash-recovery-"));
+  context.after(async () => rm(directory, { recursive: true, force: true }));
+  const outputPath = join(directory, "recovered.jpg");
+  await writeFile(join(directory, ".recovered.jpg.99999999.crashed.tmp"), "partial");
+  await writeFile(join(directory, ".recovered.jpg.99999999.crashed.tmp.raw"), "partial");
+
+  const writer = await createStreamingMasterWriter({
+    outputPath,
+    format: "jpeg",
+    width: 1,
+    height: 1,
+    rowsPerStrip: 1,
+  });
+  await writer.appendStrip(0, 1, new Uint16Array([1, 2, 3]));
+  await writer.finish();
+
+  assert.deepEqual((await readdir(directory)).filter((name) => name.includes(".tmp")), []);
+  await access(outputPath);
+});
+
+test("disk exhaustion leaves no published or temporary master", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "filmlab-enospc-"));
+  context.after(async () => rm(directory, { recursive: true, force: true }));
+  const outputPath = join(directory, "insufficient.jpg");
+
+  await assert.rejects(
+    writeDisplayLinearMaster({
+      outputPath,
+      format: "jpeg",
+      width: 2,
+      height: 2,
+      rowsPerStrip: 1,
+      data: new Float32Array(12).fill(0.5),
+      testWriteLimitBytes: 2,
+    }),
+    (error: unknown) => typeof error === "object" && error !== null && "code" in error
+      && (error as { code?: unknown }).code === "ENOSPC",
+  );
+  await assert.rejects(access(outputPath), /ENOENT/);
+  assert.deepEqual(await readdir(directory), []);
+});
+
+test("cancelling a streaming master removes every unpublished artifact", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "filmlab-export-cancel-"));
+  context.after(async () => rm(directory, { recursive: true, force: true }));
+  const outputPath = join(directory, "cancelled.avif");
+  const writer = await createStreamingMasterWriter({
+    outputPath,
+    format: "heif",
+    width: 2,
+    height: 2,
+    rowsPerStrip: 1,
+  });
+  await writer.appendStrip(0, 1, new Uint16Array(6).fill(12_345));
+  await writer.cancel();
+
+  assert.deepEqual(await readdir(directory), []);
+  await assert.rejects(access(outputPath), /ENOENT/);
 });
 
 function readDeflatedRgb16Strip(tiff: Buffer): Uint16Array {

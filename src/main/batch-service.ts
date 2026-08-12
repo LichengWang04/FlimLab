@@ -104,6 +104,11 @@ export class BatchService {
             currentAssetId: undefined,
           });
           continue;
+        } finally {
+          // Full-resolution A7R V rasters are hundreds of MiB. Batch work is
+          // deliberately sequential, so retaining a completed frame only
+          // turns a bounded queue into memory growth proportional to its size.
+          await this.processing.release(source.item.assetId).catch(() => undefined);
         }
         job = this.requireJob(id);
         this.jobs.set(id, { ...job, completed: job.completed + 1, currentAssetId: undefined });

@@ -73,17 +73,31 @@ export interface WorkerCalibrateCardMessage extends WorkerMessageBase {
   readonly processing?: ProcessingRecipe;
 }
 
+export interface WorkerReleaseMessage extends WorkerMessageBase {
+  readonly kind: "release";
+  readonly assetId: string;
+}
+
+export interface WorkerCrashMessage extends WorkerMessageBase {
+  readonly kind: "crash-for-acceptance";
+  readonly assetId: string;
+}
+
 export type WorkerMessage =
   | WorkerLoadMessage
   | WorkerRenderMessage
   | WorkerExportTiffMessage
-  | WorkerCalibrateCardMessage;
+  | WorkerCalibrateCardMessage
+  | WorkerReleaseMessage
+  | WorkerCrashMessage;
 
 export type WorkerCommand =
   | Omit<WorkerLoadMessage, "requestId">
   | Omit<WorkerRenderMessage, "requestId">
   | Omit<WorkerExportTiffMessage, "requestId">
-  | Omit<WorkerCalibrateCardMessage, "requestId">;
+  | Omit<WorkerCalibrateCardMessage, "requestId">
+  | Omit<WorkerReleaseMessage, "requestId">
+  | Omit<WorkerCrashMessage, "requestId">;
 
 export interface DecodedSourceSummary {
   readonly assetId: string;
@@ -132,11 +146,20 @@ export type WorkerSuccessResult =
   | { readonly kind: "load"; readonly result: DecodedSourceSummary }
   | { readonly kind: "render"; readonly result: PreviewResult }
   | { readonly kind: "export-tiff"; readonly result: TiffExportSummary }
-  | { readonly kind: "calibrate-card"; readonly result: ColorCardFitSummary };
+  | { readonly kind: "calibrate-card"; readonly result: ColorCardFitSummary }
+  | { readonly kind: "release" };
+
+export interface WorkerTelemetry {
+  /** Highest resident set observed at command boundaries in this worker. */
+  readonly observedPeakRssBytes: number;
+  readonly rssBytes: number;
+  readonly heapUsedBytes: number;
+}
 
 export interface WorkerSuccessMessage extends WorkerMessageBase {
   readonly ok: true;
   readonly response: WorkerSuccessResult;
+  readonly telemetry?: WorkerTelemetry;
 }
 
 export interface WorkerFailureMessage extends WorkerMessageBase {

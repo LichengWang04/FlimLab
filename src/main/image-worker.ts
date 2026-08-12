@@ -115,6 +115,7 @@ let assetGeneration = 0;
 const previewStageCache = new Map<string, PipelineSceneResult>();
 const maximumPreviewStageCacheEntries = 2;
 let rawSidecarSession: RawSidecarSession | undefined;
+let observedPeakRssBytes = 0;
 const parentPort = process.parentPort;
 
 if (parentPort === undefined) {
@@ -136,6 +137,9 @@ async function handleMessage(value: unknown): Promise<void> {
     return;
   }
   try {
+    if (value.kind === "crash-for-acceptance") {
+      process.exit(86);
+    }
     if (value.kind === "load") {
       const summary = await loadAsset(
         value.assetId,
@@ -155,6 +159,12 @@ async function handleMessage(value: unknown): Promise<void> {
     if (value.kind === "calibrate-card") {
       const result = calibrateColorCard(value.assetId, value.processing);
       postSuccess(value.requestId, { kind: "calibrate-card", result });
+      return;
+    }
+    if (value.kind === "release") {
+      assets.delete(value.assetId);
+      previewStageCache.clear();
+      postSuccess(value.requestId, { kind: "release" });
       return;
     }
     const result = await exportAsset(value.assetId, value);
@@ -1571,7 +1581,18 @@ function postSuccess(
   requestId: string,
   response: WorkerSuccessResponse,
 ): void {
-  parentPort?.postMessage({ requestId, ok: true, response });
+  const memory = process.memoryUsage();
+  observedPeakRssBytes = Math.max(observedPeakRssBytes, memory.rss);
+  parentPort?.postMessage({
+    requestId,
+    ok: true,
+    response,
+    telemetry: {
+      observedPeakRssBytes,
+      rssBytes: memory.rss,
+      heapUsedBytes: memory.heapUsed,
+    },
+  });
 }
 
 function postFailure(requestId: string, error: unknown): void {
@@ -1646,7 +1667,8 @@ type WorkerSuccessResponse =
         readonly camera?: SourceCameraIdentity;
       };
     }
-  | { readonly kind: "export-tiff"; readonly result: TiffExportSummary };
+  | { readonly kind: "export-tiff"; readonly result: TiffExportSummary }
+  | { readonly kind: "release" };
 
 type RawSidecarResponse =
   | {

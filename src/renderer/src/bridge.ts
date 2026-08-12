@@ -6,8 +6,9 @@ export function getFilmLabApi(): FilmLabApi {
     return window.filmlab;
   }
 
-  const webDemoRequested = window.location.protocol === "http:"
-    && new URLSearchParams(window.location.search).has("web-demo");
+  const search = new URLSearchParams(window.location.search);
+  const webDemoRequested = (window.location.protocol === "http:" && search.has("web-demo"))
+    || (window.location.protocol === "file:" && search.has("acceptance-web-demo"));
   if (webDemoRequested) {
     return createWebDemoApi();
   }

@@ -6,6 +6,7 @@ coverage/
 dist/
 out/
 release/
+artifacts/
 *.tsbuildinfo
 *.log
 .DS_Store

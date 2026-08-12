@@ -6,6 +6,7 @@ import { registerIpcHandlers } from "./ipc.ts";
 import { ProcessingService } from "./processing-service.ts";
 import { ProjectLifecycleService } from "./project-lifecycle-service.ts";
 import { SourceRegistry } from "./source-registry.ts";
+import { runA7rvAcceptanceFromEnvironment } from "./a7rv-e2e-runner.ts";
 
 installBrokenPipeGuards();
 
@@ -157,6 +158,16 @@ function runDevelopmentGpuSelfCheck(rendererUrl: string): void {
 }
 
 app.whenReady().then(() => {
+  const acceptanceSpec = process.env.FILMLAB_A7RV_ACCEPTANCE_SPEC;
+  if (acceptanceSpec !== undefined) {
+    void runA7rvAcceptanceFromEnvironment(acceptanceSpec)
+      .then(() => app.exit(0))
+      .catch((error: unknown) => {
+        console.error("[FilmLab A7R V acceptance failed]", error);
+        app.exit(1);
+      });
+    return;
+  }
   app.setAppUserModelId("com.filmlab.desktop");
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   const sourceRegistry = new SourceRegistry(join(app.getPath("userData"), "source-locations-v1.json"));

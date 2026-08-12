@@ -21,6 +21,7 @@ class RecordingProcessingService {
     readonly request: ExportRequest;
   }> = [];
   public maximumActive = 0;
+  public readonly releasedAssetIds: string[] = [];
   private active = 0;
 
   public async exportTiff(
@@ -36,6 +37,10 @@ class RecordingProcessingService {
     } finally {
       this.active -= 1;
     }
+  }
+
+  public async release(assetId: string): Promise<void> {
+    this.releasedAssetIds.push(assetId);
   }
 }
 
@@ -103,6 +108,7 @@ test("batch export keeps each frame's recipe and remains sequential", async () =
   assert.equal("outputDirectory" in completed, false);
   assert.equal(processing.maximumActive, 1);
   assert.deepEqual(processing.calls.map((call) => call.assetId), ["frame-a", "frame-b"]);
+  assert.deepEqual(processing.releasedAssetIds, ["frame-a", "frame-b"]);
 
   const first = processing.calls[0]?.request;
   const second = processing.calls[1]?.request;
@@ -147,6 +153,29 @@ test("batch export preserves an existing output by selecting a numbered name", a
     basename(processing.calls[0]?.request.outputPath ?? ""),
     "001-scan-positive-2.tiff",
   );
+});
+
+test("batch cancellation finishes at most the active file and starts no later source", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "filmlab-batch-cancel-"));
+  context.after(async () => rm(directory, { recursive: true, force: true }));
+  const processing = new RecordingProcessingService();
+  const service = new BatchService(processing as unknown as ProcessingService);
+  const item = {
+    mode: "generic" as const,
+    tone: { exposureStops: 0, contrast: 1, highlightCompression: 0, saturation: 1 },
+    processing: defaultProcessingRecipe,
+  };
+  const started = service.start([
+    { item: { ...item, assetId: "frame-a" }, sourcePath: "a.ARW", sourceName: "a.ARW" },
+    { item: { ...item, assetId: "frame-b" }, sourcePath: "b.ARW", sourceName: "b.ARW" },
+  ], directory);
+  await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  service.cancel(started.id);
+  const completed = await waitForTerminalJob(service, started.id);
+
+  assert.equal(completed.state, "cancelled");
+  assert.ok(processing.calls.length <= 1);
+  assert.equal(processing.calls.some((call) => call.assetId === "frame-b"), false);
 });
 
 async function waitForTerminalJob(
