@@ -353,7 +353,7 @@ async function previewDecoderIdentity(
       executable,
       details.size,
       details.mtimeMs,
-      preferGpuBayer ? "gpu-bayer-v1" : "bilinear-bayer-v1",
+      "edge-aware-bayer-v2",
     ].join(":"),
     rawExecutable: executable,
   };
@@ -411,10 +411,7 @@ function renderAsset(
     const gpuSource = cached.gpuBayer;
     const sourceWidth = gpuSource?.width ?? source.width;
     const sourceHeight = gpuSource?.height ?? source.height;
-    const baseRgb = request.gpuBaseRgb
-      ?? (request.processing?.filmBase?.kind === "reference"
-        ? request.processing.filmBase.rgb
-        : [1, 1, 1] as const);
+    const baseRgb = request.gpuBaseRgb ?? analysis.base.rgb;
     return {
       revision: request.revision,
       width: sourceWidth,
@@ -443,8 +440,8 @@ function renderAsset(
         rgb: baseRgb,
         sampleCount: 0,
         rejectedCount: 0,
-        method: "reference",
-        confidence: 1,
+        method: analysis.base.method,
+        confidence: analysis.base.confidence,
       },
       density: { dmin: 0, dmax: 0, range: 0 },
       colorTrust,
@@ -933,7 +930,7 @@ async function decodeRawSource(
       sourcePath,
       cachePath,
       options: {
-        demosaic: gpuBayer ? "gpu-bayer-v1" : "bilinear-bayer-v1",
+        demosaic: gpuBayer ? "gpu-edge-aware-bayer-v2" : "edge-aware-bayer-v2",
         maxEdge: previewMaxEdge,
       },
     });
@@ -1636,7 +1633,7 @@ interface RawSidecarRequest {
   readonly sourcePath: string;
   readonly cachePath: string;
   readonly options: {
-    readonly demosaic: "bilinear-bayer-v1" | "gpu-bayer-v1";
+    readonly demosaic: "edge-aware-bayer-v2" | "bilinear-bayer-v1" | "gpu-edge-aware-bayer-v2";
     readonly maxEdge?: number;
   };
 }

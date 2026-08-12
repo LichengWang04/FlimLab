@@ -42,8 +42,9 @@ namespace fs = std::filesystem;
 
 constexpr std::string_view kCacheFormat = "filmlab-rgb16le-v1";
 constexpr std::string_view kBayerCacheFormat = "filmlab-bayer16le-v1";
-constexpr std::string_view kDemosaicName = "bilinear-bayer-v1";
-constexpr std::string_view kGpuDemosaicName = "gpu-bayer-v1";
+constexpr std::string_view kDemosaicName = "edge-aware-bayer-v2";
+constexpr std::string_view kLegacyDemosaicName = "bilinear-bayer-v1";
+constexpr std::string_view kGpuDemosaicName = "gpu-edge-aware-bayer-v2";
 constexpr int kOutputChannels = 3;
 
 class ProtocolError final : public std::runtime_error {
@@ -298,6 +299,82 @@ void writeFailure(const Json& id, const std::string_view code, const std::string
   return weightedValue / weights;
 }
 
+[[nodiscard]] double normalizedMirroredSample(
+    const LibRaw& raw, const BayerLayout& layout, const int top, const int left,
+    const int height, const int width, const int y, const int x) {
+  return normalizedSample(raw, layout, top, left,
+                          mirrorIndex(y, height), mirrorIndex(x, width));
+}
+
+[[nodiscard]] double edgeAwareGreen(
+    const LibRaw& raw, const BayerLayout& layout, const int top, const int left,
+    const int height, const int width, const int y, const int x) {
+  if (canonicalColor(layout.rawColorAt(y, x)) == 1) {
+    return normalizedMirroredSample(raw, layout, top, left, height, width, y, x);
+  }
+  const double center = normalizedMirroredSample(raw, layout, top, left, height, width, y, x);
+  const double left1 = normalizedMirroredSample(raw, layout, top, left, height, width, y, x - 1);
+  const double right1 = normalizedMirroredSample(raw, layout, top, left, height, width, y, x + 1);
+  const double left2 = normalizedMirroredSample(raw, layout, top, left, height, width, y, x - 2);
+  const double right2 = normalizedMirroredSample(raw, layout, top, left, height, width, y, x + 2);
+  const double up1 = normalizedMirroredSample(raw, layout, top, left, height, width, y - 1, x);
+  const double down1 = normalizedMirroredSample(raw, layout, top, left, height, width, y + 1, x);
+  const double up2 = normalizedMirroredSample(raw, layout, top, left, height, width, y - 2, x);
+  const double down2 = normalizedMirroredSample(raw, layout, top, left, height, width, y + 2, x);
+  const double horizontal = (left1 + right1) * 0.5 + (2.0 * center - left2 - right2) * 0.25;
+  const double vertical = (up1 + down1) * 0.5 + (2.0 * center - up2 - down2) * 0.25;
+  const double horizontalGradient = std::abs(left1 - right1) + std::abs(2.0 * center - left2 - right2);
+  const double verticalGradient = std::abs(up1 - down1) + std::abs(2.0 * center - up2 - down2);
+  const double estimate = horizontalGradient < verticalGradient
+                              ? horizontal
+                              : verticalGradient < horizontalGradient ? vertical : (horizontal + vertical) * 0.5;
+  return std::clamp(estimate, 0.0, 1.0);
+}
+
+[[nodiscard]] double edgeAwareDemosaicChannel(
+    const LibRaw& raw, const BayerLayout& layout, const int top, const int left,
+    const int height, const int width, const int y, const int x,
+    const int targetColor) {
+  const int sourceColor = canonicalColor(layout.rawColorAt(y, x));
+  if (sourceColor == targetColor) {
+    return normalizedMirroredSample(raw, layout, top, left, height, width, y, x);
+  }
+  const double centerGreen = edgeAwareGreen(raw, layout, top, left, height, width, y, x);
+  if (targetColor == 1) return centerGreen;
+
+  double differences = 0.0;
+  int count = 0;
+  const auto accumulateDifference = [&](const int sampleY, const int sampleX) {
+    const int mirroredY = mirrorIndex(sampleY, height);
+    const int mirroredX = mirrorIndex(sampleX, width);
+    if (canonicalColor(layout.rawColorAt(mirroredY, mirroredX)) != targetColor) return;
+    const double color = normalizedSample(raw, layout, top, left, mirroredY, mirroredX);
+    const double green = edgeAwareGreen(raw, layout, top, left, height, width, mirroredY, mirroredX);
+    differences += color - green;
+    ++count;
+  };
+
+  if (sourceColor == 1) {
+    const bool targetIsHorizontal = canonicalColor(layout.rawColorAt(y, x + 1)) == targetColor;
+    if (targetIsHorizontal) {
+      accumulateDifference(y, x - 1);
+      accumulateDifference(y, x + 1);
+    } else {
+      accumulateDifference(y - 1, x);
+      accumulateDifference(y + 1, x);
+    }
+  } else {
+    accumulateDifference(y - 1, x - 1);
+    accumulateDifference(y - 1, x + 1);
+    accumulateDifference(y + 1, x - 1);
+    accumulateDifference(y + 1, x + 1);
+  }
+  if (count == 0) {
+    return demosaicChannel(raw, layout, top, left, height, width, y, x, targetColor);
+  }
+  return std::clamp(centerGreen + differences / static_cast<double>(count), 0.0, 1.0);
+}
+
 void appendLe16(std::vector<std::uint8_t>& row, const std::uint16_t value) {
   row.push_back(static_cast<std::uint8_t>(value & 0xffu));
   row.push_back(static_cast<std::uint8_t>((value >> 8u) & 0xffu));
@@ -393,9 +470,9 @@ void appendLe16(std::vector<std::uint8_t>& row, const std::uint16_t value) {
       throw ProtocolError("UNSUPPORTED_OPTION", "options.demosaic must be a supported string");
     }
     demosaic = options["demosaic"].get<std::string>();
-    if (demosaic != kDemosaicName && demosaic != kGpuDemosaicName) {
+    if (demosaic != kDemosaicName && demosaic != kLegacyDemosaicName && demosaic != kGpuDemosaicName) {
       throw ProtocolError("UNSUPPORTED_OPTION",
-                          "Only bilinear-bayer-v1 and gpu-bayer-v1 are supported");
+                          "Supported demosaic modes are edge-aware-bayer-v2, bilinear-bayer-v1 and gpu-edge-aware-bayer-v2");
     }
   }
   const bool gpuBayer = demosaic == kGpuDemosaicName;
@@ -520,11 +597,14 @@ void appendLe16(std::vector<std::uint8_t>& row, const std::uint16_t value) {
           appendLe16(row, unitToUInt16(
               normalizedSample(raw, layout, top, left, sourceY, sourceX)));
         } else {
-          appendLe16(row, unitToUInt16(demosaicChannel(
+          const auto demosaicFunction = demosaic == kLegacyDemosaicName
+                                            ? demosaicChannel
+                                            : edgeAwareDemosaicChannel;
+          appendLe16(row, unitToUInt16(demosaicFunction(
               raw, layout, top, left, height, width, sourceY, sourceX, 0)));
-          appendLe16(row, unitToUInt16(demosaicChannel(
+          appendLe16(row, unitToUInt16(demosaicFunction(
               raw, layout, top, left, height, width, sourceY, sourceX, 1)));
-          appendLe16(row, unitToUInt16(demosaicChannel(
+          appendLe16(row, unitToUInt16(demosaicFunction(
               raw, layout, top, left, height, width, sourceY, sourceX, 2)));
         }
       }
@@ -570,10 +650,12 @@ void appendLe16(std::vector<std::uint8_t>& row, const std::uint16_t value) {
       {"byteOrder", "little-endian"},
       {"bytes", bytes},
       {"sourceDomain", gpuBayer ? "camera-linear-bayer" : "camera-linear-rgb"},
-      {"decoderFingerprint", std::string("libraw-") + LibRaw::version() + "+" + demosaic},
+      {"decoderFingerprint", std::string("libraw-") + LibRaw::version() + "+" +
+                                 std::string(gpuBayer ? kDemosaicName : std::string_view(demosaic))},
       {"bayerPattern", gpuBayer ? rgbPattern : Json(nullptr)},
       {"sampleStride", sampleStride},
-      {"metadata", metadataFor(raw, layout, top, left, height, width, demosaic)},
+      {"metadata", metadataFor(raw, layout, top, left, height, width,
+                                gpuBayer ? kDemosaicName : std::string_view(demosaic))},
   };
 }
 

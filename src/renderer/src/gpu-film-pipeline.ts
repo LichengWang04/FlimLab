@@ -1458,7 +1458,13 @@ const bayerGeometryFragmentShader = `#version 300 es
   out vec4 outColor;
 
   ivec2 clampBayerPixel(ivec2 pixel) {
-    return clamp(pixel, ivec2(0), textureSize(u_image, 0) - ivec2(1));
+    ivec2 size = textureSize(u_image, 0);
+    ivec2 reflected = pixel;
+    if (reflected.x < 0) reflected.x = -reflected.x;
+    if (reflected.y < 0) reflected.y = -reflected.y;
+    if (reflected.x >= size.x) reflected.x = 2 * size.x - 2 - reflected.x;
+    if (reflected.y >= size.y) reflected.y = 2 * size.y - 2 - reflected.y;
+    return clamp(reflected, ivec2(0), size - ivec2(1));
   }
 
   int bayerChannel(ivec2 pixel) {
@@ -1470,34 +1476,65 @@ const bayerGeometryFragmentShader = `#version 300 es
     return float(texelFetch(u_image, clampBayerPixel(pixel), 0).r) / 65535.0;
   }
 
-  vec3 demosaicPixel(ivec2 pixel) {
+  float edgeAwareGreen(ivec2 pixel) {
+    if (bayerChannel(pixel) == 1) return bayerSample(pixel);
     float center = bayerSample(pixel);
-    float horizontal = (
-      bayerSample(pixel + ivec2(-1, 0))
-      + bayerSample(pixel + ivec2(1, 0))
-    ) * 0.5;
-    float vertical = (
-      bayerSample(pixel + ivec2(0, -1))
-      + bayerSample(pixel + ivec2(0, 1))
-    ) * 0.5;
-    float crossValue = (horizontal + vertical) * 0.5;
-    float diagonal = (
-      bayerSample(pixel + ivec2(-1, -1))
-      + bayerSample(pixel + ivec2(1, -1))
-      + bayerSample(pixel + ivec2(-1, 1))
-      + bayerSample(pixel + ivec2(1, 1))
-    ) * 0.25;
+    float left1 = bayerSample(pixel + ivec2(-1, 0));
+    float right1 = bayerSample(pixel + ivec2(1, 0));
+    float left2 = bayerSample(pixel + ivec2(-2, 0));
+    float right2 = bayerSample(pixel + ivec2(2, 0));
+    float up1 = bayerSample(pixel + ivec2(0, -1));
+    float down1 = bayerSample(pixel + ivec2(0, 1));
+    float up2 = bayerSample(pixel + ivec2(0, -2));
+    float down2 = bayerSample(pixel + ivec2(0, 2));
+    float horizontal = (left1 + right1) * 0.5 + (2.0 * center - left2 - right2) * 0.25;
+    float vertical = (up1 + down1) * 0.5 + (2.0 * center - up2 - down2) * 0.25;
+    float horizontalGradient = abs(left1 - right1) + abs(2.0 * center - left2 - right2);
+    float verticalGradient = abs(up1 - down1) + abs(2.0 * center - up2 - down2);
+    float estimate = horizontalGradient < verticalGradient
+      ? horizontal
+      : verticalGradient < horizontalGradient ? vertical : (horizontal + vertical) * 0.5;
+    return clamp(estimate, 0.0, 1.0);
+  }
+
+  float colorDifference(ivec2 pixel, int targetChannel) {
+    return bayerChannel(pixel) == targetChannel
+      ? bayerSample(pixel) - edgeAwareGreen(pixel)
+      : 0.0;
+  }
+
+  vec3 demosaicPixel(ivec2 pixel) {
     int channel = bayerChannel(pixel);
+    float center = bayerSample(pixel);
+    float green = edgeAwareGreen(pixel);
+    float red;
+    float blue;
     if (channel == 0) {
-      return vec3(center, crossValue, diagonal);
+      red = center;
+      blue = green + (
+        colorDifference(pixel + ivec2(-1, -1), 2)
+        + colorDifference(pixel + ivec2(1, -1), 2)
+        + colorDifference(pixel + ivec2(-1, 1), 2)
+        + colorDifference(pixel + ivec2(1, 1), 2)
+      ) * 0.25;
+    } else if (channel == 2) {
+      blue = center;
+      red = green + (
+        colorDifference(pixel + ivec2(-1, -1), 0)
+        + colorDifference(pixel + ivec2(1, -1), 0)
+        + colorDifference(pixel + ivec2(-1, 1), 0)
+        + colorDifference(pixel + ivec2(1, 1), 0)
+      ) * 0.25;
+    } else {
+      bool redIsHorizontal = bayerChannel(pixel + ivec2(1, 0)) == 0;
+      red = green + (redIsHorizontal
+        ? (colorDifference(pixel + ivec2(-1, 0), 0) + colorDifference(pixel + ivec2(1, 0), 0)) * 0.5
+        : (colorDifference(pixel + ivec2(0, -1), 0) + colorDifference(pixel + ivec2(0, 1), 0)) * 0.5);
+      blue = green + (redIsHorizontal
+        ? (colorDifference(pixel + ivec2(0, -1), 2) + colorDifference(pixel + ivec2(0, 1), 2)) * 0.5
+        : (colorDifference(pixel + ivec2(-1, 0), 2) + colorDifference(pixel + ivec2(1, 0), 2)) * 0.5);
     }
-    if (channel == 2) {
-      return vec3(diagonal, crossValue, center);
-    }
-    bool redIsHorizontal = bayerChannel(pixel + ivec2(1, 0)) == 0;
-    return redIsHorizontal
-      ? vec3(horizontal, center, vertical)
-      : vec3(vertical, center, horizontal);
+    return clamp(vec3(red, green, blue), 0.0, 1.0);
   }
 
   vec3 sampleDemosaicedBilinear(vec2 uv) {

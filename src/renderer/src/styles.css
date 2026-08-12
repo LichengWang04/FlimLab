@@ -37,9 +37,29 @@ button {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
   outline: 2px solid #73b7ff;
   outline-offset: 2px;
+}
+
+.skip-link {
+  position: fixed;
+  z-index: 1000;
+  top: 8px;
+  left: 8px;
+  padding: 8px 12px;
+  color: #101114;
+  background: #edf5ff;
+  border-radius: 6px;
+  transform: translateY(-160%);
+  transition: transform 120ms ease;
+}
+
+.skip-link:focus {
+  transform: translateY(0);
 }
 
 button:disabled {
@@ -1938,6 +1958,54 @@ button[aria-busy="true"] {
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
 }
 
+.shortcut-dialog {
+  display: grid;
+  gap: 16px;
+  width: min(500px, 100%);
+  padding: 22px;
+  background: #202329;
+  border: 1px solid rgba(226, 234, 245, 0.14);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+}
+
+.shortcut-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+
+.shortcut-list div {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(226, 234, 245, 0.08);
+}
+
+.shortcut-list dt,
+.shortcut-list dd {
+  margin: 0;
+  font-size: 12px;
+}
+
+.shortcut-list dt {
+  color: #cbd1da;
+}
+
+.shortcut-list dd {
+  color: #8fc5ff;
+  font-variant-numeric: tabular-nums;
+}
+
+.shortcut-dialog .dialog-actions {
+  grid-column: auto;
+}
+
+.update-summary {
+  border-top: 1px solid rgba(226, 234, 245, 0.08);
+}
+
 .dialog-icon {
   display: grid;
   width: 38px;
@@ -2014,6 +2082,15 @@ button[aria-busy="true"] {
   background: #d45555;
 }
 
+.compact-tool.danger {
+  color: #ffaaaa;
+}
+
+.compact-tool.danger:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(196, 71, 71, 0.72);
+}
+
 @media (max-width: 1180px) {
   .app-shell {
     grid-template-columns: 204px minmax(0, 1fr) 310px;
@@ -2025,6 +2102,17 @@ button[aria-busy="true"] {
 
   .project-title {
     display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
   }
 }
 

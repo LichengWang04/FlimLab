@@ -7,9 +7,8 @@ import {
   maximumBackgroundPreviewEdge,
   previewModes,
   previewViews,
-  type BatchTiffExportRequest,
+  type BatchExportRequest,
   type GpuMasterTiffBeginRequest,
-  type GpuMasterTiffExportRequest,
   type GpuMasterTiffStripRequest,
   type MasterExportFormat,
   type MasterTiffExportRequest,
@@ -20,6 +19,7 @@ import {
 } from "../shared/contracts.ts";
 import { createCalibrationProfileDocument } from "../core/calibration.ts";
 import type { CurveSet } from "../core/types.ts";
+import { colorTrustAllowsFormat, colorTrustMetadata, evaluateColorTrust } from "../shared/color-trust.ts";
 import { BatchService } from "./batch-service.ts";
 import { createGeneratedCalibrationCaptureIdentity } from "./calibration-capture.ts";
 import { CalibrationProfileService } from "./calibration-profile-service.ts";
@@ -32,7 +32,6 @@ import {
   createStreamingMasterWriter,
   type StreamingRgb16Writer,
 } from "./master-export-codec.ts";
-import { writeSrgb16Tiff } from "./tiff-codec.ts";
 
 const PREVIEW_CHANNEL = "preview:render";
 const PRECOMPUTE_PREVIEW_CHANNEL = "preview:precompute";
@@ -47,16 +46,20 @@ const CONFIRM_PROJECT_PENDING_CHANNEL = "project:confirm-pending";
 const CREATE_PROJECT_BACKUP_CHANNEL = "project:create-backup";
 const EXPORT_PNG_CHANNEL = "preview:export-png";
 const EXPORT_TIFF_CHANNEL = "master:export-tiff";
-const EXPORT_GPU_TIFF_CHANNEL = "master:export-gpu-tiff";
 const BEGIN_GPU_TIFF_CHANNEL = "master:begin-gpu-tiff";
 const APPEND_GPU_TIFF_STRIP_CHANNEL = "master:append-gpu-tiff-strip";
 const FINISH_GPU_TIFF_CHANNEL = "master:finish-gpu-tiff";
 const CANCEL_GPU_TIFF_CHANNEL = "master:cancel-gpu-tiff";
+const FALLBACK_GPU_TIFF_CHANNEL = "master:fallback-gpu-tiff";
 const IMPORT_CALIBRATION_CHANNEL = "calibration:import";
+const EXPORT_CALIBRATION_CHANNEL = "calibration:export";
+const DELETE_CALIBRATION_CHANNEL = "calibration:delete";
 const LIST_CALIBRATIONS_CHANNEL = "calibration:list";
+const LIST_CALIBRATION_VERSIONS_CHANNEL = "calibration:list-versions";
+const RESTORE_CALIBRATION_VERSION_CHANNEL = "calibration:restore-version";
 const GENERATE_CALIBRATION_CHANNEL = "calibration:generate-from-card";
 const RELINK_SOURCES_CHANNEL = "project:relink-sources";
-const START_BATCH_TIFF_CHANNEL = "batch:start-tiff";
+const START_BATCH_EXPORT_CHANNEL = "batch:start";
 const GET_BATCH_JOB_CHANNEL = "batch:get";
 const CANCEL_BATCH_JOB_CHANNEL = "batch:cancel";
 
@@ -76,6 +79,15 @@ export function registerIpcHandlers(
     readonly width: number;
     readonly height: number;
     readonly rowsPerStrip: number;
+    readonly outputPath: string;
+    readonly assetId: string;
+    readonly sourcePath: string;
+    readonly mode: import("../shared/contracts.ts").PreviewMode;
+    readonly tone: import("../shared/contracts.ts").PreviewTone;
+    readonly calibrationProfile?: import("../core/calibration.ts").CalibrationProfileDocument;
+    readonly processing?: ProcessingRecipe;
+    readonly dmaxOverride?: number;
+    readonly colorTrust: import("../shared/contracts.ts").ColorTrust;
   }>();
   ipcMain.removeHandler(PREVIEW_CHANNEL);
   ipcMain.removeHandler(PRECOMPUTE_PREVIEW_CHANNEL);
@@ -90,16 +102,20 @@ export function registerIpcHandlers(
   ipcMain.removeHandler(CREATE_PROJECT_BACKUP_CHANNEL);
   ipcMain.removeHandler(EXPORT_PNG_CHANNEL);
   ipcMain.removeHandler(EXPORT_TIFF_CHANNEL);
-  ipcMain.removeHandler(EXPORT_GPU_TIFF_CHANNEL);
   ipcMain.removeHandler(BEGIN_GPU_TIFF_CHANNEL);
   ipcMain.removeHandler(APPEND_GPU_TIFF_STRIP_CHANNEL);
   ipcMain.removeHandler(FINISH_GPU_TIFF_CHANNEL);
   ipcMain.removeHandler(CANCEL_GPU_TIFF_CHANNEL);
+  ipcMain.removeHandler(FALLBACK_GPU_TIFF_CHANNEL);
   ipcMain.removeHandler(IMPORT_CALIBRATION_CHANNEL);
+  ipcMain.removeHandler(EXPORT_CALIBRATION_CHANNEL);
+  ipcMain.removeHandler(DELETE_CALIBRATION_CHANNEL);
   ipcMain.removeHandler(LIST_CALIBRATIONS_CHANNEL);
+  ipcMain.removeHandler(LIST_CALIBRATION_VERSIONS_CHANNEL);
+  ipcMain.removeHandler(RESTORE_CALIBRATION_VERSION_CHANNEL);
   ipcMain.removeHandler(GENERATE_CALIBRATION_CHANNEL);
   ipcMain.removeHandler(RELINK_SOURCES_CHANNEL);
-  ipcMain.removeHandler(START_BATCH_TIFF_CHANNEL);
+  ipcMain.removeHandler(START_BATCH_EXPORT_CHANNEL);
   ipcMain.removeHandler(GET_BATCH_JOB_CHANNEL);
   ipcMain.removeHandler(CANCEL_BATCH_JOB_CHANNEL);
 
@@ -311,47 +327,19 @@ export function registerIpcHandlers(
     };
   });
 
-  ipcMain.handle(EXPORT_GPU_TIFF_CHANNEL, async (event, value: unknown) => {
-    assertTrustedSender(event, getMainWindow);
-    const request = parseGpuMasterTiffRequest(value);
-    const parent = getMainWindow();
-    if (parent === null) throw new Error("应用窗口不可用。");
-    const selection = await dialog.showSaveDialog(parent, {
-      title: "导出 GPU 16-bit TIFF 母版",
-      buttonLabel: "导出 TIFF",
-      defaultPath: normalizeTiffFileName(request.suggestedFileName),
-      filters: [{ name: "16-bit TIFF", extensions: ["tif", "tiff"] }],
-      properties: ["showOverwriteConfirmation"],
-    });
-    if (selection.canceled || selection.filePath === undefined) return { saved: false };
-    const outputPath = forceTiffExtension(selection.filePath);
-    await writeSrgb16Tiff({
-      width: request.width,
-      height: request.height,
-      data: request.srgb16,
-      outputPath,
-      processingMetadata: {
-        ...(request.processingMetadata ?? {}),
-        application: "FilmLab",
-        pipeline: "webgl2-tiled",
-        colorTrust: "profile-unverified",
-        colorTrustReason: "gpu-export-contract-has-no-device-verification",
-        colorAccuracyClaim: "not-device-characterized",
-      },
-    });
-    return {
-      saved: true,
-      fileName: basename(outputPath),
-      width: request.width,
-      height: request.height,
-    };
-  });
-
   ipcMain.handle(BEGIN_GPU_TIFF_CHANNEL, async (event, value: unknown) => {
     assertTrustedSender(event, getMainWindow);
     const request = parseGpuMasterTiffBeginRequest(value);
     const format = request.format ?? "tiff";
     const exportSpec = getMasterExportSpec(format);
+    const sourcePath = sourceRegistry.getPath(request.assetId);
+    if (sourcePath === undefined) throw new Error("GPU 母版的源文件尚未重新连接。");
+    const calibrationProfile = await getCalibrationProfile(request, calibrationProfiles);
+    const source = await processingService.inspectSource(request.assetId, sourcePath, undefined, true);
+    const colorTrust = evaluateColorTrust(request.mode, source, calibrationProfile);
+    if (!colorTrustAllowsFormat(format, colorTrust)) {
+      throw new Error("DNG 色彩母版仅支持相机与解码链均匹配的校准配置。");
+    }
     const parent = getMainWindow();
     if (parent === null) throw new Error("应用窗口不可用。");
     const selection = await dialog.showSaveDialog(parent, {
@@ -374,9 +362,8 @@ export function registerIpcHandlers(
         application: "FilmLab",
         pipeline: "webgl2-pbo-streaming",
         format,
-        colorTrust: "profile-unverified",
-        colorTrustReason: "gpu-export-contract-has-no-device-verification",
-        colorAccuracyClaim: "not-device-characterized",
+        calibrationProfileId: calibrationProfile?.id ?? "",
+        ...colorTrustMetadata(colorTrust),
       },
     });
     const sessionId = randomUUID();
@@ -387,8 +374,17 @@ export function registerIpcHandlers(
       width: request.width,
       height: request.height,
       rowsPerStrip: request.rowsPerStrip,
+      outputPath,
+      assetId: request.assetId,
+      sourcePath,
+      mode: request.mode,
+      tone: request.tone,
+      calibrationProfile,
+      processing: request.processing,
+      dmaxOverride: request.dmaxOverride,
+      colorTrust,
     });
-    return { saved: true, sessionId };
+    return { saved: true, sessionId, colorTrust };
   });
 
   ipcMain.handle(APPEND_GPU_TIFF_STRIP_CHANNEL, async (event, value: unknown) => {
@@ -410,22 +406,36 @@ export function registerIpcHandlers(
     const sessionId = parseGpuTiffSessionId(value);
     const session = gpuTiffSessions.get(sessionId);
     if (session === undefined) throw new Error("GPU TIFF streaming session does not exist.");
-    gpuTiffSessions.delete(sessionId);
     try {
       await session.writer.finish();
-    } catch (error) {
-      // Both streaming writers clean up their file handle and temporary
-      // files when finish() throws, but cancel() is idempotent and keeps
-      // that guarantee for future writers. Without it a failed finish
-      // would leak the handle and the .tmp files permanently.
+      gpuTiffSessions.delete(sessionId);
+    } catch {
       await session.writer.cancel().catch(() => undefined);
-      throw error;
+      gpuTiffSessions.delete(sessionId);
+      const exported = await processingService.exportTiff(session.assetId, session.sourcePath, {
+        outputPath: session.outputPath,
+        suggestedFileName: session.fileName,
+        format: session.format,
+        mode: session.mode,
+        tone: session.tone,
+        calibrationProfile: session.calibrationProfile,
+        processing: session.processing,
+        dmaxOverride: session.dmaxOverride,
+      });
+      return {
+        saved: true,
+        fileName: exported.fileName,
+        width: exported.width,
+        height: exported.height,
+        colorTrust: exported.colorTrust,
+      };
     }
     return {
       saved: true,
       fileName: session.fileName,
       width: session.width,
       height: session.height,
+      colorTrust: session.colorTrust,
     };
   });
 
@@ -438,6 +448,32 @@ export function registerIpcHandlers(
     await session.writer.cancel();
   });
 
+  ipcMain.handle(FALLBACK_GPU_TIFF_CHANNEL, async (event, value: unknown) => {
+    assertTrustedSender(event, getMainWindow);
+    const sessionId = parseGpuTiffSessionId(value);
+    const session = gpuTiffSessions.get(sessionId);
+    if (session === undefined) throw new Error("GPU 母版回退会话不存在。");
+    gpuTiffSessions.delete(sessionId);
+    await session.writer.cancel();
+    const exported = await processingService.exportTiff(session.assetId, session.sourcePath, {
+      outputPath: session.outputPath,
+      suggestedFileName: session.fileName,
+      format: session.format,
+      mode: session.mode,
+      tone: session.tone,
+      calibrationProfile: session.calibrationProfile,
+      processing: session.processing,
+      dmaxOverride: session.dmaxOverride,
+    });
+    return {
+      saved: true,
+      fileName: exported.fileName,
+      width: exported.width,
+      height: exported.height,
+      colorTrust: exported.colorTrust,
+    };
+  });
+
   ipcMain.handle(IMPORT_CALIBRATION_CHANNEL, async (event) => {
     assertTrustedSender(event, getMainWindow);
     const parent = getMainWindow();
@@ -447,9 +483,38 @@ export function registerIpcHandlers(
     return calibrationProfiles.importFromDialog(parent);
   });
 
+  ipcMain.handle(EXPORT_CALIBRATION_CHANNEL, async (event, value: unknown) => {
+    assertTrustedSender(event, getMainWindow);
+    const id = parseCalibrationProfileId(value);
+    const parent = getMainWindow();
+    if (parent === null) throw new Error("应用窗口不可用。");
+    return calibrationProfiles.exportToDialog(parent, id);
+  });
+
+  ipcMain.handle(DELETE_CALIBRATION_CHANNEL, async (event, value: unknown) => {
+    assertTrustedSender(event, getMainWindow);
+    return calibrationProfiles.delete(parseCalibrationProfileId(value));
+  });
+
   ipcMain.handle(LIST_CALIBRATIONS_CHANNEL, async (event) => {
     assertTrustedSender(event, getMainWindow);
     return calibrationProfiles.list();
+  });
+
+  ipcMain.handle(LIST_CALIBRATION_VERSIONS_CHANNEL, async (event, value: unknown) => {
+    assertTrustedSender(event, getMainWindow);
+    return calibrationProfiles.listVersions(parseCalibrationProfileId(value));
+  });
+
+  ipcMain.handle(RESTORE_CALIBRATION_VERSION_CHANNEL, async (event, value: unknown) => {
+    assertTrustedSender(event, getMainWindow);
+    if (typeof value !== "object" || value === null) throw new Error("标定配置版本请求无效。");
+    const record = value as Record<string, unknown>;
+    const id = parseCalibrationProfileId(record.id);
+    if (typeof record.version !== "string" || record.version.length > 64) {
+      throw new Error("标定配置版本请求无效。");
+    }
+    return calibrationProfiles.restoreVersion(id, record.version);
   });
 
   ipcMain.handle(GENERATE_CALIBRATION_CHANNEL, async (event, value: unknown) => {
@@ -501,13 +566,14 @@ export function registerIpcHandlers(
     };
   });
 
-  ipcMain.handle(START_BATCH_TIFF_CHANNEL, async (event, value: unknown) => {
+  ipcMain.handle(START_BATCH_EXPORT_CHANNEL, async (event, value: unknown) => {
     assertTrustedSender(event, getMainWindow);
-    const request = parseBatchTiffRequest(value);
+    const request = parseBatchExportRequest(value);
+    const exportSpec = getMasterExportSpec(request.format);
     const parent = getMainWindow();
     if (parent === null) throw new Error("应用窗口不可用。");
     const directory = await dialog.showOpenDialog(parent, {
-      title: "选择批处理 TIFF 输出文件夹",
+      title: "选择批处理 " + exportSpec.shortLabel + " 输出文件夹",
       buttonLabel: "开始批处理",
       properties: ["openDirectory", "createDirectory"],
     });
@@ -523,7 +589,7 @@ export function registerIpcHandlers(
         calibrationProfile: await getCalibrationProfile(item, calibrationProfiles),
       };
     }));
-    return batchService.start(sources, directory.filePaths[0]);
+    return batchService.start(sources, directory.filePaths[0], request.format);
   });
 
   ipcMain.handle(GET_BATCH_JOB_CHANNEL, async (event, jobId: unknown) => {
@@ -702,48 +768,6 @@ function parseMasterTiffRequest(value: unknown): MasterTiffExportRequest {
   };
 }
 
-function parseGpuMasterTiffRequest(value: unknown): GpuMasterTiffExportRequest {
-  if (typeof value !== "object" || value === null) {
-    throw new Error("GPU TIFF 导出请求无效。");
-  }
-  const record = value as Record<string, unknown>;
-  const width = record.width;
-  const height = record.height;
-  const data = record.srgb16;
-  if (
-    typeof record.suggestedFileName !== "string"
-    || record.suggestedFileName.length === 0
-    || record.suggestedFileName.length > 120
-    || !Number.isInteger(width)
-    || !Number.isInteger(height)
-    || (width as number) <= 0
-    || (height as number) <= 0
-    || (width as number) * (height as number) > 80_000_000
-    || !(data instanceof Uint16Array)
-    || data.length !== (width as number) * (height as number) * 3
-  ) {
-    throw new Error("GPU TIFF 像素缓冲区无效。");
-  }
-  const metadata = record.processingMetadata;
-  if (
-    metadata !== undefined
-    && (
-      typeof metadata !== "object"
-      || metadata === null
-      || Object.values(metadata).some((item) => !["string", "number", "boolean"].includes(typeof item))
-    )
-  ) {
-    throw new Error("GPU TIFF 元数据无效。");
-  }
-  return {
-    suggestedFileName: record.suggestedFileName,
-    width: width as number,
-    height: height as number,
-    srgb16: data,
-    processingMetadata: metadata as GpuMasterTiffExportRequest["processingMetadata"],
-  };
-}
-
 function parseGpuMasterTiffBeginRequest(value: unknown): GpuMasterTiffBeginRequest {
   if (typeof value !== "object" || value === null) {
     throw new Error("GPU TIFF streaming request is invalid.");
@@ -752,8 +776,21 @@ function parseGpuMasterTiffBeginRequest(value: unknown): GpuMasterTiffBeginReque
   const width = record.width;
   const height = record.height;
   const rowsPerStrip = record.rowsPerStrip;
+  const previewRequest: PreviewRequest = {
+    revision: 1,
+    assetId: typeof record.assetId === "string" ? record.assetId : "",
+    maxEdge: 256,
+    mode: record.mode as PreviewRequest["mode"],
+    view: "positive",
+    tone: record.tone as PreviewRequest["tone"],
+    calibrationProfileId: record.calibrationProfileId as string | undefined,
+    processing: record.processing as ProcessingRecipe | undefined,
+    dmaxOverride: record.dmaxOverride as number | undefined,
+  };
   if (
-    typeof record.suggestedFileName !== "string"
+    !isPreviewRequest(previewRequest)
+    || previewRequest.assetId === "demo-negative"
+    || typeof record.suggestedFileName !== "string"
     || record.suggestedFileName.length === 0
     || record.suggestedFileName.length > 120
     || !Number.isInteger(width)
@@ -770,8 +807,14 @@ function parseGpuMasterTiffBeginRequest(value: unknown): GpuMasterTiffBeginReque
     throw new Error("GPU TIFF streaming dimensions or metadata are invalid.");
   }
   return {
+    assetId: previewRequest.assetId,
     suggestedFileName: record.suggestedFileName,
     format: record.format as MasterExportFormat | undefined,
+    mode: previewRequest.mode,
+    tone: previewRequest.tone,
+    calibrationProfileId: previewRequest.calibrationProfileId,
+    processing: previewRequest.processing,
+    dmaxOverride: previewRequest.dmaxOverride,
     width: width as number,
     height: height as number,
     rowsPerStrip: rowsPerStrip as number,
@@ -825,9 +868,10 @@ function isSimpleMetadata(value: unknown): boolean {
   );
 }
 
-function parseBatchTiffRequest(value: unknown): BatchTiffExportRequest {
+function parseBatchExportRequest(value: unknown): BatchExportRequest {
   if (typeof value !== "object" || value === null) throw new Error("批处理请求无效。");
   const record = value as Record<string, unknown>;
+  if (record.format === undefined || !isMasterExportFormat(record.format)) throw new Error("批处理输出格式无效。");
   if (!Array.isArray(record.items) || record.items.length === 0 || record.items.length > 1_000) {
     throw new Error("批处理源文件列表无效。");
   }
@@ -863,7 +907,14 @@ function parseBatchTiffRequest(value: unknown): BatchTiffExportRequest {
   if (new Set(items.map((item) => item.assetId)).size !== items.length) {
     throw new Error("批处理源文件不能重复。");
   }
-  return { items };
+  return { format: record.format, items };
+}
+
+function parseCalibrationProfileId(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(value)) {
+    throw new Error("标定配置 ID 无效。");
+  }
+  return value;
 }
 
 function parseColorCardCalibrationRequest(value: unknown): { readonly assetId: string; readonly processing?: ProcessingRecipe } {
@@ -1043,23 +1094,4 @@ function forceMasterExtension(filePath: string, format: MasterExportFormat): str
   const extension = extname(filePath);
   const fileName = extension.length === 0 ? basename(filePath) : basename(filePath, extension);
   return join(dirname(filePath), fileName + "." + spec.defaultExtension);
-}
-
-function normalizeTiffFileName(value: string): string {
-  const sanitized = value
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 80);
-  const stem = sanitized.length === 0 ? "filmlab-positive" : sanitized;
-  return /\.tiff?$/i.test(stem) ? stem : stem + ".tiff";
-}
-
-function forceTiffExtension(filePath: string): string {
-  if (/\.tiff?$/i.test(filePath)) {
-    return filePath;
-  }
-  const extension = extname(filePath);
-  const fileName = extension.length === 0 ? basename(filePath) : basename(filePath, extension);
-  return join(dirname(filePath), fileName + ".tiff");
 }

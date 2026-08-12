@@ -1,6 +1,6 @@
 # FilmLab
 
-FilmLab 是面向个人翻拍胶片负片的 Electron 工作台。处理核心始终区分像素域，并把真实文件的解码、CPU 预览计算和权威母版导出放在独立的 Electron utility worker 中：渲染进程不会得到源文件路径；启用 WebGL2 预览时只会接收渲染所需的受控线性/Bayer 像素载荷。
+FilmLab 是面向个人翻拍胶片负片的 Electron 工作台。处理核心始终区分像素域，并把真实文件解码、CPU 回退母版和容器写入隔离在 Electron utility worker 中：渲染进程不会得到源文件路径；WebGL2 可接收受控的线性/Bayer 像素载荷，用于交互预览及分块 GPU 母版计算。
 
 ```text
 相机 RAW ── LibRaw sidecar ── camera-linear RGB ──┐
@@ -10,21 +10,21 @@ FilmLab 是面向个人翻拍胶片负片的 Electron 工作台。处理核心�
 
 ## 当前可用能力
 
-- RAW 解码协议：原生 `filmlab-raw-worker` 使用 LibRaw `unpack()`、每 CFA 黑电平扣除、白位归一化与固定 Bayer 线性去马赛克，输出 RGB16LE 相机线性缓存；不会读取内嵌 JPEG/缩略图，也不会调用 LibRaw 的渲染、自动白平衡、相机矩阵、降噪或 gamma 路径。
+- RAW 解码协议：原生 `filmlab-raw-worker` 使用 LibRaw `unpack()`、每 CFA 黑电平扣除、白位归一化与版本化的 `edge-aware-bayer-v2` 方向感知去马赛克，输出 RGB16LE 相机线性缓存；GPU 路径接收同一版本语义的 Bayer 载荷并执行方向感知插值。它不会读取内嵌 JPEG/缩略图，也不会调用 LibRaw 的渲染、自动白平衡、相机矩阵、降噪或 gamma 路径；旧 `bilinear-bayer-v1` 只保留为显式兼容输入。
 - Sony A7R V PTC 优化：当 RAW 元数据严格匹配 `ILCE-7RM5`、ISO 100，且每通道白位减黑位大于 8191 DN（用来排除 12-bit 模式）时，使用 Photons to Photos 的 14-bit 实测参数（读出噪声 1.368 DN、2.759 e⁻/DN、PRNU 0.38%）和该文件实际归一化范围建立信号相关噪声模型。在进入对数密度前，以一西格玛不确定度正则化接近噪声底的样本，减少浓密底片区域的随机彩色斑点；对中高信号的影响趋近于零，线性透射视图和色彩矩阵不受此步骤改变。ISO 320 高转换增益、12-bit RAW 及其他 ISO 不会复用 ISO 100 参数。
 - 16-bit TIFF 输入：只接收 16-bit TIFF；带 ICC 的 TIFF 会先色彩管理到 sRGB 原色并执行逆传递函数，得到线性透射率后再计算密度。无 ICC 的 TIFF 仍明确按已经线性化、完成光学校正的数据读取并给出提示；8-bit PNG/JPEG 与非 16-bit TIFF 会被拒绝。
 - 三种独立模式：通用、默认 C-41 预设、色卡标定配置。标定配置明确要求 `relative-density-log10 → linear-srgb-d65`，可携带三条反特性曲线、3×3 矩阵和可选 3D LUT。
-- 色卡配置导入：通过原生对话框导入、校验并保存 `filmlab.calibration-profile` JSON；配置只以安全摘要和 ID 暴露给界面。核心还支持导入 `.cube` 3D LUT 以及用至少 18 个色块做无截距的加权岭回归矩阵拟合。
+- 色卡配置生命周期：通过原生对话框导入、导出、删除并保存 `filmlab.calibration-profile` JSON；同一 ID 的新版本会原子归档旧版本，可在界面查看并恢复，篡改同一版本号内容会被拒绝。配置只以安全摘要和 ID 暴露给界面。核心还支持导入 `.cube` 3D LUT 以及用至少 18 个色块做无截距的加权岭回归矩阵拟合。
 - 色卡自动工作流：针对已旋正、透视校正的 6×4 ColorChecker Classic 照片，自动定位规则网格、在色块中央做 MAD 异常值剔除采样，并生成/保存可选用的矩阵标定配置；色块位置、采样和拟合都可在核心单独测试。当前自动生成的是单位特性曲线 + 色彩矩阵配置，针对特定胶卷仍应在受控拍摄条件下复核并导入完整特性曲线/LUT。
 - 几何配方：项目会持久保存并在预览/导出中执行片基 ROI、90° 定向、以画面直线为水平/垂直参考的 ±15° 直尺拉直、可拖动裁切和四角透视校正。项目保存源文件尺寸、最后修改时间和完整 SHA-256 内容指纹，但不保存绝对路径；同机重启后会验证本机私有位置索引并自动重连。
 - 无边框片基恢复：可在同卷任一保留未曝光边缘的帧上测量并冻结线性片基 RGB，再随完整配方复用到已经裁掉边缘的帧；若整卷都没有片基参考，可从线性透射画面的联合高透射上包络生成带置信度上限的临时估算。估算结果会冻结后再用于预览与母版，且界面持续提示它不能替代实测 Dmin。
-- 修复与批处理：在线性传输域提供可复核掩膜的除尘、划痕修复、保边降噪和阈值反遮罩锐化。TIFF 批处理是顺序队列，展示已完成数量并允许取消；取消会让正在进行的原子 TIFF 写入安全完成后停止后续项目。
+- 修复与批处理：在线性传输域提供可复核掩膜的除尘、划痕修复、保边降噪和阈值反遮罩锐化。TIFF、JPEG、HEIF 和 DNG 共用逐帧配方的顺序队列，展示格式、进度并允许取消；取消会让正在进行的原子写入安全完成后停止后续项目。DNG 批处理逐帧执行设备匹配门禁。
 - 项目工作流：可新建、打开、只读打开、另存和从最近列表恢复任意 `.filmlab` 目录项目；项目本地预设、最多 80 步处理配方撤销/重做、安全的来源身份重连及批量导出状态都已接入桌面界面。旧 schema 或损坏项目先以只读方式预览，只有明确确认迁移/备份恢复后才覆盖主文件；退出和切换项目前会刷新排队保存并立即保存最新编辑。
-- 多格式母版：当前桌面入口统一通过 utility worker 的全分辨率 CPU 确定性管线导出。支持 16-bit Deflate TIFF、8-bit JPEG、10-bit HEIF（AV1/AVIF）和 16-bit 线性 sRGB DNG；全部写入处理 XMP，显示编码格式同时嵌入 sRGB ICC。写入先落到同目录临时文件，再原子发布。
+- 多格式 GPU 母版：桌面入口优先由 WebGL2 以 256 像素分块执行全分辨率处理，并把有序条带送往 main/utility 容器写入器；GPU 建立、渲染、读回或写入失败会取消残留并在同一目标上重走 CPU 全精度管线。支持 16-bit Deflate TIFF、8-bit JPEG、10-bit HEIF（AV1/AVIF）和 16-bit 线性 sRGB DNG；全部写入处理 XMP，显示编码格式同时嵌入 sRGB ICC。写入先落到同目录临时文件，再原子发布。
 - 输出色彩可信度：通用和默认预设始终标为“未校准”；校准模式只有在来源相机型号与解码器指纹都匹配配置时才是“设备匹配”，其余情况标为“配置未验证”。sRGB ICC 只声明交付编码，不证明上游相机颜色准确；DNG 因此仅允许设备匹配输出。
 - 现代桌面工作台：可选择真实帧、导入色卡配置、预览三种视图，并对真实源文件直接导出 TIFF、JPEG、HEIF 或符合条件的 DNG 母版。
 
-- 智能几何与 GPU 预览：直尺拉直允许沿画面中应当水平或垂直的边缘拖出参考线，并把它校正为最近的平行轴；自动裁切直接贴合检测到的成像区内边界，不额外保留片基。1080p 画布优先使用高性能 WebGL2 纹理更新，GPU 不可用时自动回退到 Canvas2D。仓库保留 GPU 条带导出接口和容器写入器，但当前桌面验收路径有意使用 CPU 全精度确定性母版，避免输出像素依赖显卡或预览分辨率统计。
+- 智能几何与 GPU 预览/母版：直尺拉直允许沿画面中应当水平或垂直的边缘拖出参考线，并把它校正为最近的平行轴；自动裁切直接贴合检测到的成像区内边界，不额外保留片基。预览和母版优先使用 WebGL2；预览不可用时回退 Canvas2D，母版任一 GPU 阶段失败时回退 utility CPU 管线。GPU 母版不宣称跨显卡逐位一致，色彩可信度仍由来源与校准身份决定。
 - 自适应交互性能：控件变化先生成 960 边长快速预览，停止操作 180 ms 后自动细化到 1440 边长；两档线性中间结果分别缓存，避免色调调整重复执行密度反转。几何分析使用 1280 边长，最终母版仍从原始全分辨率数据计算。滑杆数值按输入事件即时更新，同一次拖动只写入一条撤销记录。
 - 真实 A7R V 验收：`npm run acceptance:a7rv` 使用外部 SHA-256 固定的 ARW 启动生产 Electron/utility/LibRaw 链路，覆盖预览、配方保存、独立机器状态重启、项目复制、移动/改名重连、内容篡改拒绝、utility 崩溃重启和 TIFF/JPEG/HEIF/DNG 全分辨率导出。每个母版会被独立重新打开并验证尺寸、位深、ICC、XMP 与 DNG 标签；同一入口还检查真实 WebGL2、`--disable-gpu` 的 Canvas2D 回退和多轮批量内存漂移。
 
@@ -128,6 +128,6 @@ npm run acceptance:a7rv
 
 CI 工作流 [`.github/workflows/raw-sidecar-release.yml`](.github/workflows/raw-sidecar-release.yml) 在 Windows x64、macOS x64/arm64 和 Linux x64 分别构建静态 LibRaw sidecar，并把产物直接写到 `native/raw-worker/out/<platform>-<arch>/`。每个产物都会执行 JSON Lines `ping` 验证，要求协议版本、缓存格式和 `supportedCfa: ["bayer-2x2"]` 均匹配；因此当前发布能力仍明确仅限 2×2 Bayer，未把 X-Trans、Foveon 或 sRAW 暗中列为支持。
 
-electron-builder 在打包前后验证当前目标对应的 sidecar，最终位置固定为 `resources/raw-worker/<platform>-<arch>/`。正式产物为 Windows NSIS、macOS x64/arm64 DMG 和 Linux x64 AppImage；每个干净构建都会安装或解包后启动应用并探测已安装 sidecar，真实 A7R V runner 还会通过安装后的可执行文件重复 ARW 导入与 TIFF 导出。版本标签构建强制 Authenticode、Developer ID 与 Apple notarization 门禁，缺少证书即失败；通过后生成校验和并发布 GitHub Release。完整命令、密钥、升级/卸载策略和验收边界见 [`docs/release.md`](docs/release.md)，sidecar 许可义务见 [`native/raw-worker/README.md`](native/raw-worker/README.md)。
+electron-builder 在打包前后验证当前目标对应的 sidecar，最终位置固定为 `resources/raw-worker/<platform>-<arch>/`。正式产物为 Windows NSIS、macOS x64/arm64 DMG + ZIP（ZIP 为自动更新载荷）和 Linux x64 AppImage；每个干净构建都会安装或解包后启动应用并探测已安装 sidecar。版本标签构建强制 Authenticode、Developer ID 与 Apple notarization 门禁，缺少证书即失败；通过后生成更新清单、校验和并发布 GitHub Release。安装版会从该仓库 Release 检查更新，下载后由用户确认安装；Windows 在缓存过上一已知良好安装包时支持显式回滚，并在新版本连续两次未显示主窗口时自动回滚。完整命令、边界见 [`docs/release.md`](docs/release.md)。
 
-当前架构、色彩可信度、输出格式、项目重连和 CI 的统一验收口径见 [`docs/design.md`](docs/design.md)；许可与第三方边界见 [`LICENSE`](LICENSE)、[`NOTICE`](NOTICE) 和 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)；隐私、安全与支持政策见 [`PRIVACY.md`](PRIVACY.md)、[`SECURITY.md`](SECURITY.md) 和 [`SUPPORT.md`](SUPPORT.md)；故障诊断与迁移见 [`docs/diagnostics.md`](docs/diagnostics.md) 和 [`docs/migration.md`](docs/migration.md)。测试素材策略见 [`docs/test-data.md`](docs/test-data.md)，版本变化见 [`CHANGELOG.md`](CHANGELOG.md)，外部参考边界见 [`docs/references.md`](docs/references.md)。
+完整操作和快捷键见 [`docs/user-manual.md`](docs/user-manual.md)。当前架构、色彩可信度、输出格式、项目重连和 CI 的统一验收口径见 [`docs/design.md`](docs/design.md)；许可与第三方边界见 [`LICENSE`](LICENSE)、[`NOTICE`](NOTICE) 和 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)；隐私、安全与支持政策见 [`PRIVACY.md`](PRIVACY.md)、[`SECURITY.md`](SECURITY.md) 和 [`SUPPORT.md`](SUPPORT.md)；故障诊断与迁移见 [`docs/diagnostics.md`](docs/diagnostics.md) 和 [`docs/migration.md`](docs/migration.md)。

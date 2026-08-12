@@ -7,6 +7,7 @@ import { ProcessingService } from "./processing-service.ts";
 import { ProjectLifecycleService } from "./project-lifecycle-service.ts";
 import { SourceRegistry } from "./source-registry.ts";
 import { runA7rvAcceptanceFromEnvironment } from "./a7rv-e2e-runner.ts";
+import { UpdateService } from "./update-service.ts";
 
 installBrokenPipeGuards();
 
@@ -15,6 +16,7 @@ let processingService: ProcessingService | null = null;
 let backgroundProcessingService: ProcessingService | null = null;
 let gpuSelfCheckWindow: BrowserWindow | null = null;
 let cleanupIpcHandlers: (() => Promise<void>) | undefined;
+let updateService: UpdateService | null = null;
 
 /**
  * electron-vite can outlive the terminal/launcher that owns its stdio pipes.
@@ -56,7 +58,10 @@ function createMainWindow(): void {
   });
 
   mainWindow = window;
-  window.once("ready-to-show", () => window.show());
+  window.once("ready-to-show", () => {
+    window.show();
+    void updateService?.markHealthy();
+  });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   const confirmClose = (event: IpcMainEvent): void => {
     if (event.sender.id !== window.webContents.id) return;
@@ -157,7 +162,7 @@ function runDevelopmentGpuSelfCheck(rendererUrl: string): void {
   void checkWindow.loadURL(url.toString());
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const acceptanceSpec = process.env.FILMLAB_A7RV_ACCEPTANCE_SPEC;
   if (acceptanceSpec !== undefined) {
     void runA7rvAcceptanceFromEnvironment(acceptanceSpec)
@@ -198,7 +203,16 @@ app.whenReady().then(() => {
     backgroundProcessingService,
     calibrationProfiles,
   );
+  updateService = new UpdateService(() => mainWindow);
+  try {
+    if (await updateService.initialize()) return;
+  } catch (error: unknown) {
+    // An unavailable feed/cache must never prevent the local-first editor
+    // from opening. The updater will remain idle for this process.
+    console.warn("[FilmLab] update service could not initialize", error);
+  }
   createMainWindow();
+  setTimeout(() => void updateService?.check(), 8_000);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -219,4 +233,5 @@ app.on("before-quit", () => {
   backgroundProcessingService?.shutdown();
   processingService = null;
   backgroundProcessingService = null;
+  updateService = null;
 });

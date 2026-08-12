@@ -232,18 +232,15 @@ export interface MasterTiffExportResult {
   readonly colorTrust?: ColorTrust;
 }
 
-export interface GpuMasterTiffExportRequest {
-  readonly suggestedFileName: string;
-  readonly width: number;
-  readonly height: number;
-  /** GPU-encoded, gamma-correct 16-bit sRGB samples in interleaved RGB order. */
-  readonly srgb16: Uint16Array;
-  readonly processingMetadata?: Readonly<Record<string, string | number | boolean>>;
-}
-
 export interface GpuMasterTiffBeginRequest {
+  readonly assetId: string;
   readonly suggestedFileName: string;
   readonly format?: MasterExportFormat;
+  readonly mode: PreviewMode;
+  readonly tone: PreviewTone;
+  readonly calibrationProfileId?: string;
+  readonly processing?: ProcessingRecipe;
+  readonly dmaxOverride?: number;
   readonly width: number;
   readonly height: number;
   readonly rowsPerStrip: number;
@@ -253,6 +250,7 @@ export interface GpuMasterTiffBeginRequest {
 export interface GpuMasterTiffBeginResult {
   readonly saved: boolean;
   readonly sessionId?: string;
+  readonly colorTrust?: ColorTrust;
 }
 
 export interface GpuMasterTiffStripRequest {
@@ -267,10 +265,21 @@ export interface GpuMasterTiffStripRequest {
 /** A renderer-safe description; calibration source files stay in userData. */
 export interface CalibrationProfileSummary {
   readonly id: string;
+  readonly version: string;
+  readonly createdAt: string;
   readonly calibrationId: string;
   readonly captureFingerprint: string;
   readonly label: string;
   readonly hasLut: boolean;
+}
+
+export interface CalibrationProfileVersionSummary extends CalibrationProfileSummary {
+  readonly current: boolean;
+}
+
+export interface CalibrationProfileExportResult {
+  readonly saved: boolean;
+  readonly fileName?: string;
 }
 
 export interface ColorCardCalibrationResult {
@@ -335,7 +344,7 @@ export interface ProjectSaveResult {
 
 export type BatchJobState = "queued" | "running" | "completed" | "cancelled" | "failed";
 
-export interface BatchTiffExportItem {
+export interface BatchExportItem {
   readonly assetId: string;
   readonly mode: PreviewMode;
   readonly tone: PreviewTone;
@@ -344,12 +353,14 @@ export interface BatchTiffExportItem {
   readonly dmaxOverride?: number;
 }
 
-export interface BatchTiffExportRequest {
-  readonly items: readonly BatchTiffExportItem[];
+export interface BatchExportRequest {
+  readonly format: MasterExportFormat;
+  readonly items: readonly BatchExportItem[];
 }
 
 export interface BatchJobSummary {
   readonly id: string;
+  readonly format: MasterExportFormat;
   readonly state: BatchJobState;
   readonly total: number;
   readonly completed: number;
@@ -357,6 +368,25 @@ export interface BatchJobSummary {
   readonly failedAssetIds: readonly string[];
   readonly cancelRequested: boolean;
   readonly error?: string;
+}
+
+export type UpdateState =
+  | "disabled"
+  | "idle"
+  | "checking"
+  | "up-to-date"
+  | "available"
+  | "downloading"
+  | "downloaded"
+  | "error";
+
+export interface UpdateStatus {
+  readonly state: UpdateState;
+  readonly currentVersion: string;
+  readonly availableVersion?: string;
+  readonly downloadPercent?: number;
+  readonly rollbackVersion?: string;
+  readonly message?: string;
 }
 
 export interface FilmLabApi {
@@ -379,16 +409,25 @@ export interface FilmLabApi {
   readonly confirmClose: () => void;
   readonly exportPreviewPng: (request: PreviewPngExportRequest) => Promise<PreviewPngExportResult>;
   readonly exportMasterTiff: (request: MasterTiffExportRequest) => Promise<MasterTiffExportResult>;
-  readonly exportGpuMasterTiff: (request: GpuMasterTiffExportRequest) => Promise<MasterTiffExportResult>;
   readonly beginGpuMasterTiff: (request: GpuMasterTiffBeginRequest) => Promise<GpuMasterTiffBeginResult>;
   readonly appendGpuMasterTiffStrip: (request: GpuMasterTiffStripRequest) => Promise<void>;
   readonly finishGpuMasterTiff: (sessionId: string) => Promise<MasterTiffExportResult>;
   readonly cancelGpuMasterTiff: (sessionId: string) => Promise<void>;
+  readonly fallbackGpuMasterTiff: (sessionId: string) => Promise<MasterTiffExportResult>;
   readonly importCalibrationProfile: () => Promise<CalibrationProfileSummary | undefined>;
+  readonly exportCalibrationProfile: (id: string) => Promise<CalibrationProfileExportResult>;
+  readonly deleteCalibrationProfile: (id: string) => Promise<boolean>;
   readonly listCalibrationProfiles: () => Promise<readonly CalibrationProfileSummary[]>;
+  readonly listCalibrationProfileVersions: (id: string) => Promise<readonly CalibrationProfileVersionSummary[]>;
+  readonly restoreCalibrationProfileVersion: (id: string, version: string) => Promise<CalibrationProfileSummary>;
   readonly generateCalibrationFromColorCard: (assetId: string, processing?: ProcessingRecipe) => Promise<ColorCardCalibrationResult>;
   readonly relinkProjectSources: (assets: readonly SourceAsset[]) => Promise<ProjectRelinkResult>;
-  readonly startBatchTiffExport: (request: BatchTiffExportRequest) => Promise<BatchJobSummary | undefined>;
+  readonly startBatchExport: (request: BatchExportRequest) => Promise<BatchJobSummary | undefined>;
   readonly getBatchJob: (jobId: string) => Promise<BatchJobSummary | undefined>;
   readonly cancelBatchJob: (jobId: string) => Promise<BatchJobSummary | undefined>;
+  readonly getUpdateStatus: () => Promise<UpdateStatus>;
+  readonly checkForUpdates: () => Promise<UpdateStatus>;
+  readonly installUpdate: () => Promise<void>;
+  readonly rollbackUpdate: () => Promise<void>;
+  readonly onUpdateStatus: (listener: (status: UpdateStatus) => void) => () => void;
 }

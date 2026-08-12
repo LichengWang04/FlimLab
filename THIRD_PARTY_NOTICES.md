@@ -58,14 +58,30 @@ JPEG Group.
 | `@img/sharp-win32-arm64` | `0.35.3` | Apache-2.0 AND LGPL-3.0-or-later |
 | `@img/sharp-win32-ia32` | `0.35.3` | Apache-2.0 AND LGPL-3.0-or-later |
 | `@img/sharp-win32-x64` | `0.35.3` | Apache-2.0 AND LGPL-3.0-or-later |
+| `argparse` | `2.0.1` | Python-2.0 |
+| `builder-util-runtime` | `9.7.0` | MIT |
+| `debug` | `4.4.3` | MIT |
 | `detect-libc` | `2.1.2` | Apache-2.0 |
+| `electron-updater` | `6.8.9` | MIT |
+| `fs-extra` | `10.1.0` | MIT |
+| `graceful-fs` | `4.2.11` | ISC |
+| `js-yaml` | `4.3.1` | MIT |
+| `jsonfile` | `6.2.1` | MIT |
+| `lazy-val` | `1.0.5` | MIT |
+| `lodash.escaperegexp` | `4.1.2` | MIT |
+| `lodash.isequal` | `4.5.0` | MIT |
 | `lucide-react` | `1.24.0` | ISC |
+| `ms` | `2.1.3` | MIT |
 | `react` | `19.2.7` | MIT |
 | `react-dom` | `19.2.7` | MIT |
+| `sax` | `1.6.0` | BlueOak-1.0.0 |
 | `scheduler` | `0.27.0` | MIT |
 | `sharp` | `0.35.3` | Apache-2.0 |
+| `semver` | `7.7.4` | ISC |
 | `semver` | `7.8.5` | ISC |
+| `tiny-typed-emitter` | `2.1.0` | MIT |
 | `tslib` | `2.8.1` | 0BSD |
+| `universalify` | `2.0.1` | MIT |
 
 The generated license bundle copies the unmodified license/NOTICE files from
 every runtime npm package actually installed for the target platform. License

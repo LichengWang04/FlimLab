@@ -1,6 +1,6 @@
 # FilmLab 发行与安装契约
 
-FilmLab 只交付各宿主平台的原生包：Windows x64 NSIS、macOS x64/arm64 DMG 和 Linux x64 AppImage。`win-unpacked/` 等构建目录只是验证中间产物，不属于发行包。
+FilmLab 只交付各宿主平台的原生包：Windows x64 NSIS、macOS x64/arm64 DMG + ZIP 和 Linux x64 AppImage。ZIP 是 macOS 自动更新载荷，DMG 是人工安装介质；`win-unpacked/` 等构建目录只是验证中间产物，不属于发行包。
 
 ## 本机构建与验证
 
@@ -32,7 +32,7 @@ npm run verify:installed-release -- --package release/FilmLab-0.1.0-win-x64.exe
 - Windows：`WIN_CSC_LINK`、`WIN_CSC_KEY_PASSWORD`。安装器、主程序和已打包 RAW worker 的 Authenticode 状态都必须为 Valid。
 - macOS：`MAC_CSC_LINK`、`MAC_CSC_KEY_PASSWORD` 用于 Developer ID；`APPLE_API_KEY`、`APPLE_API_KEY_ID`、`APPLE_API_ISSUER` 用于 notarization。
 
-缺少密钥或签名验证失败会中止标签构建。矩阵全部通过后，工作流才发布 NSIS、两种架构 DMG、AppImage、更新元数据、CycloneDX SBOM 和 `SHA256SUMS` 到 GitHub Release。公开仓库自动用 `actions/attest@v4` 绑定包与 SBOM；私有仓库只有在支持 GitHub artifact attestations 的计划上设置 `FILMLAB_ATTESTATIONS_ENABLED=true` 后启用。非标签 CI 产物明确只是未签名验证包，不能称为正式发行版。
+缺少密钥或签名验证失败会中止标签构建。矩阵全部通过后，工作流才发布 NSIS、两种架构 DMG/ZIP、AppImage、`latest*.yml` 更新元数据、blockmap、CycloneDX SBOM 和 `SHA256SUMS` 到 GitHub Release。公开仓库自动用 `actions/attest@v4` 绑定包与 SBOM；私有仓库只有在支持 GitHub artifact attestations 的计划上设置 `FILMLAB_ATTESTATIONS_ENABLED=true` 后启用。非标签 CI 产物明确只是未签名验证包，不能称为正式发行版。
 
 `.github/workflows/a7rv-acceptance.yml` 是私有素材发行门禁。Windows/macOS 自托管 runner 先验证开发构建，再生成原生包、安装它，并通过安装后的程序重复真实 A7R V 冒烟。只有对应平台报告通过才能声明该平台受支持；Windows 结果不能推定 macOS 兼容。
 
@@ -44,5 +44,11 @@ npm run verify:installed-release -- --package release/FilmLab-0.1.0-win-x64.exe
 - Windows：每用户辅助安装，可修改目录，创建开始菜单/桌面快捷方式，原位升级，卸载保留设置。
 - macOS：Photography 分类，最低 macOS 13，hardened runtime，DMG 内提供 Applications 链接。
 - Linux：Graphics 分类 AppImage。AppImage 是便携包，因此安装验证定义为展开不可变文件系统并启动 `AppRun`。
+
+## 自动更新与回滚
+
+安装版读取 `electron-builder.yml` 中的 GitHub provider（`LichengWang04/FlimLab`）；企业镜像可在启动进程设置 `FILMLAB_UPDATE_URL` 指向兼容的 HTTPS generic feed。开发构建禁用检查。更新会自动下载，但只有用户在项目菜单确认后才刷新保存队列并调用安装器，不会在应用仍有未保存修改时静默退出。
+
+每次下载的安装包复制到 `<userData>/updates/installers/`，状态原子写入 `state-v1.json`。主窗口成功显示后才把当前版本标记为已知良好。Windows 只在目标版本的 NSIS 已存在且非空时显示回滚；新安装版本连续两次在窗口显示前失败时启动该缓存安装器。初次安装通常没有上一版本安装包，所以不会虚构回滚能力。macOS/Linux 保留更新信息但不自行改写应用目录，回滚需从 GitHub Release 下载已签名旧版。发布者必须保留仍受支持的旧版 Release，且回滚后项目 schema 是否可降级仍受 [`migration.md`](migration.md) 约束。
 
 项目在 npm 元数据中保持 `private`/`UNLICENSED`，根 [`LICENSE`](../LICENSE) 给出正式的保留权利条款；发布安装器不会自动授予源代码再分发权。第三方权利不受该条款限制。FilmLab 对静态 LibRaw 0.22.1 明确选择 CDDL-1.0，每个包必须通过打包后钩子验证 `resources/legal/` 中的 CDDL、版权、源码获取说明、平台 npm 许可证和 SBOM。发布维护者必须同步更新 [`NOTICE`](../NOTICE)、[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) 与原生组件清单。

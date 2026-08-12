@@ -18,14 +18,21 @@ FilmLab follows [Semantic Versioning](https://semver.org/). This file records us
 - Save-queue flushing and a final current-frame save before project switches and application exit.
 - Production Electron/LibRaw A7R V acceptance covering project restart/copy, identity relink, four full-resolution master formats, metadata validation, GPU/CPU renderer backends and multi-cycle stability.
 - Weekly/manual private-fixture matrix for Windows x64, macOS Intel and macOS Apple Silicon, with independent ExifTool/ImageMagick compatibility probes.
+- Four-format TIFF/JPEG/HEIF/DNG batch export with per-frame recipes, safe names, progress, cancellation and per-frame DNG trust gates.
+- Calibration profile export, immutable version history, restore and deletion across main-process IPC and the desktop inspector.
+- GitHub Release update checks, user-confirmed installation, cached Windows last-known-good rollback and failed-startup recovery.
+- Keyboard command map, skip navigation, live status announcements, reduced-motion support and a complete user manual.
+- Versioned `edge-aware-bayer-v2` CPU/WebGL demosaic with the legacy bilinear algorithm retained only as an explicit compatibility path.
+- Full-resolution tiled WebGL2 master export as the default desktop path, with source/trust revalidation and same-target CPU fallback.
 
 ### Changed
 
-- Production renderer CSP now denies every network connection; Vite development permits loopback HMR only.
+- Production renderer CSP still denies every network connection; only the packaged main-process updater can contact GitHub Release or an administrator-configured mirror. Vite development permits loopback HMR only.
 - Locked build dependencies were refreshed within existing constraints to resolve all npm advisories reported on 2026-08-13.
 - Project and recent absolute paths remain only in the machine-private `project-sessions-v1.json`; renderer APIs use opaque session IDs.
 - `benchmark:raw` now drives a real ARW through Electron and the native sidecar instead of using Sharp to read a TIFF proxy.
 - Batch export releases each completed full-resolution raster; atomic output retries clean dead-process artifacts without touching live exports.
+- Decoder fingerprints now use `edge-aware-bayer-v2`; existing v1 calibration profiles intentionally become unverified until regenerated or explicitly revalidated.
 
 ## [0.1.0] - 2026-08-12
 

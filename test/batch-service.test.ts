@@ -101,6 +101,7 @@ test("batch export keeps each frame's recipe and remains sequential", async () =
   const completed = await waitForTerminalJob(service, started.id);
 
   assert.equal(completed.state, "completed");
+  assert.equal(completed.format, "tiff");
   assert.equal(completed.total, 2);
   assert.equal(completed.completed, 2);
   assert.deepEqual(completed.failedAssetIds, []);
@@ -113,6 +114,7 @@ test("batch export keeps each frame's recipe and remains sequential", async () =
   const first = processing.calls[0]?.request;
   const second = processing.calls[1]?.request;
   assert.equal(first?.mode, "generic");
+  assert.equal(first?.format, "tiff");
   assert.equal(first?.tone.exposureStops, -0.4);
   assert.equal(first?.processing?.geometry.rotation, 90);
   assert.equal(first?.calibrationProfile, undefined);
@@ -122,6 +124,38 @@ test("batch export keeps each frame's recipe and remains sequential", async () =
   assert.equal(second?.processing?.geometry.straighten, 1.25);
   assert.equal(second?.calibrationProfile, calibrationProfile);
   assert.equal(basename(second?.outputPath ?? ""), "002-b-positive.tiff");
+});
+
+test("batch export selects the codec and safe extension for every master format", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "filmlab-batch-formats-"));
+  context.after(async () => rm(directory, { recursive: true, force: true }));
+  const formats = [
+    ["tiff", ".tiff"],
+    ["jpeg", ".jpg"],
+    ["heif", ".avif"],
+    ["dng", ".dng"],
+  ] as const;
+  for (const [format, extension] of formats) {
+    const processing = new RecordingProcessingService();
+    const service = new BatchService(processing as unknown as ProcessingService);
+    const started = service.start([{
+      item: {
+        assetId: "frame-" + format,
+        mode: "calibrated",
+        tone: { exposureStops: 0, contrast: 1, highlightCompression: 0, saturation: 1 },
+        calibrationProfileId: "profile-a",
+        processing: defaultProcessingRecipe,
+      },
+      sourcePath: "C:\\sources\\scan.arw",
+      sourceName: "scan.arw",
+      calibrationProfile: { id: "profile-a" } as CalibrationProfileDocument,
+    }], directory, format);
+    const completed = await waitForTerminalJob(service, started.id);
+    assert.equal(completed.state, "completed");
+    assert.equal(completed.format, format);
+    assert.equal(processing.calls[0]?.request.format, format);
+    assert.equal(basename(processing.calls[0]?.request.outputPath ?? "").endsWith(extension), true);
+  }
 });
 
 test("batch export preserves an existing output by selecting a numbered name", async (context) => {

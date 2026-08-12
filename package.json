@@ -7,14 +7,14 @@
   },
   "license": "UNLICENSED",
   "type": "module",
-  "main": "./out/main/index.js",
+  "main": "./out/main/index.cjs",
   "description": "A deterministic, linear-light core for camera-scanned film negatives.",
   "scripts": {
     "check:repo": "node scripts/check-repository-hygiene.cjs",
     "check:repo:staged": "node scripts/check-repository-hygiene.cjs --staged",
     "precommit": "npm run check:repo:staged && npm run check",
     "verify:test-data": "node scripts/verify-local-test-data.cjs",
-    "test": "node --experimental-strip-types --test test/photon-transfer.test.ts test/core.test.ts test/repair.test.ts test/color-card.test.ts test/color-trust.test.ts test/project-service.test.ts test/project-lifecycle-service.test.ts test/frame-recipes.test.ts test/precompute-plan.test.ts test/batch-service.test.ts test/calibration.test.ts test/tiff-codec.test.ts test/input-color.test.ts test/source-registry.test.ts test/calibration-profile-service.test.ts test/raw-sidecar-release.test.ts test/a7rv-acceptance.test.ts test/security-compliance.test.ts test/preview-service.test.ts test/preview-interaction.test.ts test/preview-layout.test.ts test/image-worker-performance.test.ts test/decoded-preview-cache.test.ts test/web-demo.test.ts test/waveform.test.ts",
+    "test": "node --experimental-strip-types --test test/photon-transfer.test.ts test/core.test.ts test/repair.test.ts test/color-card.test.ts test/color-trust.test.ts test/project-service.test.ts test/project-lifecycle-service.test.ts test/frame-recipes.test.ts test/precompute-plan.test.ts test/batch-service.test.ts test/calibration.test.ts test/tiff-codec.test.ts test/input-color.test.ts test/source-registry.test.ts test/calibration-profile-service.test.ts test/raw-sidecar-release.test.ts test/a7rv-acceptance.test.ts test/security-compliance.test.ts test/application-completeness.test.ts test/preview-service.test.ts test/preview-interaction.test.ts test/preview-layout.test.ts test/image-worker-performance.test.ts test/decoded-preview-cache.test.ts test/web-demo.test.ts test/waveform.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm run test && npm run check:compliance",
     "check:compliance": "node scripts/generate-compliance-assets.cjs --check",
@@ -47,6 +47,7 @@
     "vite": "^7.3.6"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "lucide-react": "^1.24.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

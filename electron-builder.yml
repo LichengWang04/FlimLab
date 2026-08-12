@@ -7,6 +7,12 @@ directories:
   output: release
   buildResources: build
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+publish:
+  provider: github
+  owner: LichengWang04
+  repo: FlimLab
+  releaseType: release
+generateUpdatesFilesForAllChannels: true
 files:
   - out/**/*
   - package.json
@@ -24,6 +30,8 @@ extraResources:
     to: legal
     filter:
       - "**/*"
+  - from: docs/user-manual.md
+    to: docs/user-manual.md
 win:
   # electron-builder signs .exe extra resources with the configured Windows
   # certificate, including the RAW sidecar. Tag builds require that certificate.
@@ -58,6 +66,7 @@ mac:
   entitlementsInherit: build/entitlements.mac.plist
   target:
     - dmg
+    - zip
 dmg:
   sign: false
   contents:

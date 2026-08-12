@@ -7,6 +7,7 @@ const { basename, join, resolve } = require("node:path");
 const root = resolve(__dirname, "..");
 const legalRoot = join(root, "build", "generated", "legal");
 const nativeLicenseRoot = join(root, "third-party", "native-licenses");
+const npmLicenseFallbackRoot = join(root, "third-party", "npm-license-fallbacks");
 const checkOnly = process.argv.includes("--check");
 
 void main().catch((error) => {
@@ -81,11 +82,21 @@ async function copyInstalledNpmLicenses(lock) {
       .filter((entry) => entry.isFile() && /^(licen[cs]e|copying|notice)(\.|$)/i.test(entry.name))
       .map((entry) => entry.name)
       .sort();
-    if (candidates.length === 0) throw new Error(`Installed runtime package has no license file: ${packageJson.name}@${value.version}`);
     const directory = `${safeName(packageJson.name)}@${value.version}`;
     await mkdir(join(legalRoot, "npm", directory), { recursive: true });
-    for (const file of candidates) await cp(join(packageRoot, file), join(legalRoot, "npm", directory, file));
-    results.push({ name: packageJson.name, version: value.version, license: value.license, files: candidates.map((file) => `${directory}/${file}`) });
+    const copiedFiles = [...candidates];
+    if (candidates.length === 0) {
+      // Some npm tarballs declare a valid SPDX license but omit the text from
+      // their `files` allow-list. Never silently ship only the identifier:
+      // require a repository-reviewed fallback named for the exact package
+      // and version, then include it in every legal bundle.
+      const fallback = `${safeName(packageJson.name)}@${value.version}.LICENSE.txt`;
+      await copyRequired(join(npmLicenseFallbackRoot, fallback), join(legalRoot, "npm", directory, fallback));
+      copiedFiles.push(fallback);
+    } else {
+      for (const file of candidates) await cp(join(packageRoot, file), join(legalRoot, "npm", directory, file));
+    }
+    results.push({ name: packageJson.name, version: value.version, license: value.license, files: copiedFiles.map((file) => `${directory}/${file}`) });
   }
   return results.sort((left, right) => `${left.name}@${left.version}`.localeCompare(`${right.name}@${right.version}`));
 }

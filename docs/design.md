@@ -4,7 +4,7 @@
 
 ## 1. 设计目标与非目标
 
-FilmLab 面向个人翻拍胶片负片，核心目标是：保留线性处理域、让预览和母版使用同一套配方、隔离真实文件路径与权威 CPU 母版栅格、保存可长期核验的来源身份，并明确区分“可浏览的 sRGB 编码”与“设备匹配的颜色结果”。
+FilmLab 面向个人翻拍胶片负片，核心目标是：保留线性处理域、让预览与 GPU/CPU 母版使用同一套配方、隔离真实文件路径和写盘权限、保存可长期核验的来源身份，并明确区分“可浏览的 sRGB 编码”与“设备匹配的颜色结果”。
 
 当前不承诺：
 
@@ -12,7 +12,7 @@ FilmLab 面向个人翻拍胶片负片，核心目标是：保留线性处理域
 - PTC 噪声模型可以替代相机光谱响应或色卡矩阵；
 - X-Trans、Foveon、sRAW 或任意非 2×2 Bayer RAW 可解码；
 - DNG 是原始传感器马赛克的再封装；当前 DNG 是处理后的 16-bit 线性 sRGB 正像；
-- GPU 预览与不同显卡上的母版像素逐位一致；当前母版因此走 CPU 确定性路径。
+- 不同显卡上的 GPU 母版像素逐位一致；正式路径允许浮点实现差异，并保留同配方 CPU 回退。
 
 ## 2. 进程与数据边界
 
@@ -36,7 +36,7 @@ Utility worker ── RAW sidecar / TIFF codec
   └─ 返回缩小结果或写入目标文件
 ```
 
-渲染进程不接收源文件绝对路径，也不持有 CPU 权威母版的全分辨率输出栅格。GPU 交互预览会把受控的 decoder-linear RGB 或 Bayer 载荷交给渲染器并缓存在 WebGL 纹理中；载荷可能保持解码分辨率，但不包含路径或文件读取能力，也不作为当前最终母版来源。
+渲染进程不接收源文件绝对路径。GPU 预览与母版会把受控的 decoder-linear RGB 或 Bayer 载荷交给渲染器并缓存在 WebGL 纹理中；母版按 256 像素高的条带读回，不在 renderer 组装完整输出栅格。载荷不包含路径或文件读取能力，写盘与原子发布仍由 main/utility 边界完成。
 
 ## 3. 像素域与处理顺序
 
@@ -61,7 +61,7 @@ RAW CFA
 
 ## 4. RAW 与 Sony A7R V PTC
 
-RAW sidecar 只调用 LibRaw `unpack()` 获取传感器数据，并执行 FilmLab 自己的固定 2×2 Bayer 线性去马赛克。它不读取内嵌 JPEG，不使用 LibRaw 自动白平衡、相机色彩矩阵、降噪、gamma 或显示渲染路径。解码器版本和去马赛克版本共同形成 `decoderFingerprint`，供标定可信度核验。
+RAW sidecar 只调用 LibRaw `unpack()` 获取传感器数据，并执行 FilmLab 自己版本化的 2×2 Bayer 去马赛克。默认 `edge-aware-bayer-v2` 以水平/垂直梯度和二阶校正估计绿色，再以内插色差恢复红蓝；GPU 的 `gpu-edge-aware-bayer-v2` 接收单通道 Bayer 后执行同一算法语义。旧双线性模式只作为显式兼容选项。它不读取内嵌 JPEG，不使用 LibRaw 自动白平衡、相机色彩矩阵、降噪、gamma 或显示渲染路径。LibRaw 版本与算法版本共同形成 `decoderFingerprint`；从 v1 升级到 v2 会使旧配置降为 `profile-unverified`，必须重新标定而不能默认为等价。
 
 A7R V PTC 模型只在以下条件全部满足时启用：
 
@@ -91,9 +91,12 @@ TIFF、JPEG 和 HEIF 可以在三种可信度下导出，因为其 ICC 只声明
 当前桌面入口的职责划分如下：
 
 - WebGL2 负责交互预览；不可用时回退 Canvas2D。
-- utility worker 的 CPU 全分辨率管线是当前权威母版路径。它重新计算片基、白点和配方，不复用预览分辨率统计。
-- GPU 条带导出 IPC 和容器写入器已经实现，供受控实验或后续优化使用；它们不是当前界面的默认验收路径。
+- 母版优先重新请求全分辨率 GPU 源，按输出几何进行 256 行分块渲染和有序读回；main 在开始会话前重新核验来源、配置与色彩可信度，renderer 不能自行授予 DNG 权限。
+- GPU 会话建立失败时直接请求 CPU 导出；建立后任一渲染、读回或容器写入失败会取消临时写入，并以保存的同一配方、目标和可信度重新执行 utility CPU 全精度路径。
+- GPU 结果是正式交付路径但不是跨 GPU 的逐位确定性参考。容器标签、尺寸、可信度与误差上限必须验收；需要逐位回归时使用 CPU 路径。
 - TIFF/DNG 写入器支持连续条带；JPEG/HEIF 先把条带暂存为原始样本，再由 Sharp 完成编码，因此不应描述为全程恒定内存流式编码。
+
+单帧与批量入口支持同一组 TIFF、JPEG、HEIF、DNG 格式。批量任务顺序执行，逐帧携带自己的模式、处理配方、Dmax 和校准快照；完成后释放全分辨率资源。DNG 仍逐帧要求 `device-matched`，不能因同一批次里其他帧匹配而放宽。
 
 | 格式 | 像素编码 | 元数据 | 使用限制 |
 | --- | --- | --- | --- |
@@ -178,13 +181,13 @@ DNG 容器验收使用动态匹配当前相机/decoder 的“验收专用单位�
 ## 9. 文档验收规则
 
 - 任何“颜色准确”“sRGB 母版”表述都必须同时说明可信度等级；未校准输出只能称为 sRGB 编码的可浏览/交付结果。
-- 任何“GPU 导出”表述都必须区分已存在的条带接口与当前桌面默认 CPU 母版路径。
+- 任何“GPU 导出”表述都必须同时说明正式 GPU 优先路径、CPU 回退和不保证跨显卡逐位一致。
 - 任何“项目可归档”表述都不得暗示项目包含有绝对路径；本机位置索引是私有、可重建状态。
 - 新增输入格式、输出格式、相机模型或 CI 触发条件时，应同时更新本文件、README 和对应测试。
 
 ## 10. 可安装发行物
 
-`win-unpacked/`、`.app` 构建目录和 AppImage 展开目录都只是中间状态，不构成发行物。可交付对象严格限定为 Windows x64 NSIS、macOS x64/arm64 DMG 与 Linux x64 AppImage。它们共享稳定的 `com.filmlab.desktop` 身份和 `package.json` 版本，sidecar 固定置于 `resources/raw-worker/<platform>-<arch>/`。
+`win-unpacked/`、`.app` 构建目录和 AppImage 展开目录都只是中间状态，不构成发行物。可交付对象严格限定为 Windows x64 NSIS、macOS x64/arm64 DMG + 自动更新 ZIP 与 Linux x64 AppImage。它们共享稳定的 `com.filmlab.desktop` 身份和 `package.json` 版本，sidecar 固定置于 `resources/raw-worker/<platform>-<arch>/`。
 
 干净构建必须完成三层验证：打包前 sidecar 协议探测；打包后资源存在性与字节身份验证；安装/挂载/展开后从发行可执行文件启动隐藏 renderer 并再次探测 sidecar。带私有素材的 Windows/macOS runner 还必须通过安装后的应用重复真实 A7R V ARW 导入、跨进程项目恢复/重连、TIFF 母版导出及 GPU/CPU 回退，开发态 Electron 的通过结果不能替代它。
 
@@ -192,7 +195,13 @@ DNG 容器验收使用动态匹配当前相机/decoder 的“验收专用单位�
 
 ## 11. 隐私、安全与供应链边界
 
-生产 renderer 的 CSP 以 `default-src 'none'` 为基线并设置 `connect-src 'none'`，应用没有遥测、联网更新或崩溃上传。Vite 开发模式只对 localhost/127.0.0.1 的 HTTP/WebSocket 放行热更新。Electron 继续禁止 Node integration、权限请求、外部窗口与导航；源路径只在 main/utility/sidecar 边界内处理。
+生产 renderer 的 CSP 以 `default-src 'none'` 为基线并设置 `connect-src 'none'`，应用没有遥测或崩溃上传。发行更新只由 main 进程的 `electron-updater` 读取 GitHub Release 更新清单，renderer 只能通过窄 IPC 检查状态、确认安装或请求已知良好回滚。下载完成不会静默重启；安装前刷新项目保存队列。Windows 仅在上一稳定 NSIS 已缓存时提供回滚，新版本连续两次未显示主窗口会触发静默恢复；macOS/Linux 不尝试危险的应用目录改写，而明确要求从发行页重装。Vite 开发模式只对 localhost/127.0.0.1 的 HTTP/WebSocket 放行热更新。Electron 继续禁止 Node integration、权限请求、外部窗口与导航。
+
+## 12. 校准生命周期、键盘与无障碍
+
+机内校准库以 ID 为身份、`version` 为不可变内容边界。导入相同 ID 的新版本前先归档当前 JSON；相同 ID/version 但内容不同必须拒绝。导出只产生已重新序列化的有效文档，恢复历史版本会先归档当前版本，删除同时移除当前文件和历史目录。项目引用仍保存独立快照，因此删除机内配置不会改写已有项目。
+
+所有核心操作必须可通过键盘完成：Ctrl/⌘+O 导入、Ctrl/⌘+Shift+O 打开项目、Ctrl/⌘+S 立即保存、Ctrl/⌘+E 单帧导出、Ctrl/⌘+Shift+E 批量导出、Ctrl/⌘+Z/Y 撤销/重做、Alt+左右切帧、F1 帮助。文本输入控件不截获编辑快捷键。界面提供跳转主内容链接、可见焦点、状态 live region、语义化 modal，以及 `prefers-reduced-motion` 降低动画；完整用户操作见 [`user-manual.md`](user-manual.md)。
 
 FilmLab 原创内容使用根 `LICENSE` 的专有保留权利条款；npm 包保持 `private`/`UNLICENSED`。静态 LibRaw 0.22.1 分发明确选择 CDDL-1.0，并随包提供原文、版权、精确源码 archive SHA-512、vcpkg baseline 与构建配方。平台实际安装的 npm 许可证、原生组件清单和 CycloneDX SBOM 一并写入 `resources/legal/`，缺失时 `afterPack` 必须失败。
 

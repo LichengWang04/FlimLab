@@ -10,6 +10,7 @@ import {
   Film,
   FolderOpen,
   GripVertical,
+  HelpCircle,
   Image,
   Layers,
   MoreHorizontal,
@@ -17,6 +18,7 @@ import {
   Pencil,
   Pipette,
   Redo2,
+  RefreshCw,
   RotateCcw,
   Ruler,
   Settings2,
@@ -45,14 +47,17 @@ import type {
   PreviewResult,
   PreviewView,
   CalibrationProfileSummary,
+  CalibrationProfileVersionSummary,
   BatchJobSummary,
   MasterExportFormat,
+  MasterTiffExportResult,
   ProcessingRecipe,
   ProjectLoadResult,
   ProjectSessionSummary,
   RecentProjectSummary,
   SourceAsset,
   ColorTrust,
+  UpdateStatus,
 } from "../../shared/contracts.ts";
 import { defaultProcessingRecipe } from "../../shared/contracts.ts";
 import {
@@ -71,10 +76,12 @@ import {
   type PreviewRenderBackend,
 } from "./gpu-preview.ts";
 import {
+  computeGeometryLayout,
   fitPreviewIntoBounds,
   resolvePreviewDisplaySize,
   type PreviewDisplaySize,
 } from "./preview-layout.ts";
+import { renderGpuMasterInTiles, type GpuFilmFrame } from "./gpu-film-pipeline.ts";
 import {
   createFramePrecomputePlan,
   createFramePrecomputePlanKey,
@@ -210,6 +217,7 @@ export function App(): ReactNode {
   const [linkedAssetIds, setLinkedAssetIds] = useState<ReadonlySet<string>>(() => new Set());
   const [calibrationProfiles, setCalibrationProfiles] = useState<readonly CalibrationProfileSummary[]>([]);
   const [calibrationProfileId, setCalibrationProfileId] = useState<string | undefined>();
+  const [calibrationVersions, setCalibrationVersions] = useState<readonly CalibrationProfileVersionSummary[]>([]);
   const [colorCardAssetId, setColorCardAssetId] = useState<string | undefined>();
   const [projectPresets, setProjectPresets] = useState<readonly ProjectPreset[]>([]);
   const [projectStatus, setProjectStatus] = useState("正在恢复");
@@ -228,6 +236,11 @@ export function App(): ReactNode {
   const [rollMenuId, setRollMenuId] = useState<string | undefined>();
   const [rollDialog, setRollDialog] = useState<RollDialogState | null>(null);
   const [frameDeleteDialog, setFrameDeleteDialog] = useState<FrameDeleteDialogState | null>(null);
+  const [isShortcutHelpOpen, setIsShortcutHelpOpen] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({
+    state: "idle",
+    currentVersion: "—",
+  });
   const [draggedFrameId, setDraggedFrameId] = useState<string | undefined>();
   const [dropTargetFrameId, setDropTargetFrameId] = useState<string | undefined>();
   const [librarySplit, setLibrarySplit] = useState(loadLibrarySplit);
@@ -689,6 +702,24 @@ export function App(): ReactNode {
   }, [api]);
 
   useEffect(() => {
+    let active = true;
+    const unsubscribe = api.onUpdateStatus((status) => {
+      if (active) setUpdateStatus(status);
+    });
+    void api.getUpdateStatus()
+      .then((status) => {
+        if (active) setUpdateStatus(status);
+      })
+      .catch((error: unknown) => {
+        if (active) setNotice(error instanceof Error ? error.message : "无法读取更新状态");
+      });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [api]);
+
+  useEffect(() => {
     if (!projectLoaded || projectSession === undefined || projectSession.readOnly) return;
     const nextSaveRevision = saveRevision.current + 1;
     saveRevision.current = nextSaveRevision;
@@ -994,6 +1025,20 @@ export function App(): ReactNode {
     }, 450);
     return () => window.clearInterval(timer);
   }, [api, batchJob]);
+
+  useEffect(() => {
+    if (calibrationProfileId === undefined) {
+      setCalibrationVersions([]);
+      return;
+    }
+    let cancelled = false;
+    void api.listCalibrationProfileVersions(calibrationProfileId).then((versions) => {
+      if (!cancelled) setCalibrationVersions(versions);
+    }).catch((error: unknown) => {
+      if (!cancelled) setNotice(error instanceof Error ? error.message : "无法读取标定配置版本");
+    });
+    return () => { cancelled = true; };
+  }, [api, calibrationProfileId, calibrationProfiles]);
 
   const updateRollTitle = (rollId: string, title: string): void => {
     setRolls((current) => current.map((roll) => roll.id === rollId ? { ...roll, title } : roll));
@@ -1817,25 +1862,31 @@ export function App(): ReactNode {
       return;
     }
     try {
-      const job = await api.startBatchTiffExport({
-        items: assetIds.map((assetId) => {
-          const recipe = activeRoll.uniformRecipe?.recipe
-            ?? (assetId === activeAssetId
-              ? captureRecipe()
-              : resolveFrameRecipe(activeRoll, assetId));
-          return {
-            assetId,
-            mode: recipe.mode,
-            tone: { ...recipe.tone },
-            calibrationProfileId: recipe.calibrationProfileId,
-            processing: cloneProcessing(recipe.processing),
-            dmaxOverride: activeRoll.manualDmax?.value,
-          };
-        }),
+      const batchItems = assetIds.map((assetId) => {
+        const recipe = activeRoll.uniformRecipe?.recipe
+          ?? (assetId === activeAssetId
+            ? captureRecipe()
+            : resolveFrameRecipe(activeRoll, assetId));
+        return {
+          assetId,
+          mode: recipe.mode,
+          tone: { ...recipe.tone },
+          calibrationProfileId: recipe.calibrationProfileId,
+          processing: cloneProcessing(recipe.processing),
+          dmaxOverride: activeRoll.manualDmax?.value,
+        };
+      });
+      if (masterExportFormat === "dng" && batchItems.some((item) => item.mode !== "calibrated" || item.calibrationProfileId === undefined)) {
+        setNotice("DNG 批处理要求每一帧都使用校准配置；请先统一整卷配方。");
+        return;
+      }
+      const job = await api.startBatchExport({
+        format: masterExportFormat,
+        items: batchItems,
       });
       if (job !== undefined) {
         setBatchJob(job);
-        setNotice("批处理已加入队列 · 0/" + job.total);
+        setNotice(describeMasterExportFormat(job.format) + " 批处理已加入队列 · 0/" + job.total);
       }
     } catch (error: unknown) {
       setNotice(error instanceof Error ? error.message : "无法启动批处理");
@@ -1917,15 +1968,11 @@ export function App(): ReactNode {
     setIsExportMenuOpen(false);
     setMasterExportFormat(format);
     setIsExporting(true);
+    let gpuSessionId: string | undefined;
     try {
       const source = assets.find((asset) => asset.id === activeAssetId);
       const suggestedFileName = makeMasterFileName(projectTitle, source?.name, format);
-      // Final masters deliberately use the utility worker's canonical
-      // full-resolution CPU pipeline. GPU remains an interactive preview
-      // acceleration; it must not make exported pixels depend on hardware or
-      // reuse preview-resolution film-base/white-point statistics.
-      setNotice("正在执行全分辨率确定性输出处理…");
-      const result = await api.exportMasterTiff({
+      const request = {
         assetId: activeAssetId,
         suggestedFileName,
         format,
@@ -1934,11 +1981,90 @@ export function App(): ReactNode {
         calibrationProfileId,
         processing,
         dmaxOverride: activeRoll.manualDmax?.value,
-      });
+      } as const;
+      setNotice("正在准备全分辨率 GPU 母版…");
+      let result: MasterTiffExportResult;
+      try {
+        const nextRevision = revision.current + 1;
+        revision.current = nextRevision;
+        const sourceFrame = await api.renderPreview({
+          revision: nextRevision,
+          assetId: activeAssetId,
+          maxEdge: 32_768,
+          mode,
+          view: "positive",
+          tone,
+          calibrationProfileId,
+          processing,
+          dmaxOverride: activeRoll.manualDmax?.value,
+          gpuInteractive: true,
+          gpuSourceOnly: true,
+        });
+        if (sourceFrame.gpuPipeline === undefined || sourceFrame.displayWhitePoint === undefined) {
+          throw new Error("GPU 母版源数据不可用。");
+        }
+        const layout = computeGeometryLayout(
+          sourceFrame.gpuPipeline.sourceWidth,
+          sourceFrame.gpuPipeline.sourceHeight,
+          processing.geometry,
+        );
+        const rowsPerStrip = 256;
+        const begin = await api.beginGpuMasterTiff({
+          ...request,
+          width: layout.outputWidth,
+          height: layout.outputHeight,
+          rowsPerStrip,
+          processingMetadata: {
+            demosaic: "edge-aware-bayer-v2",
+            gpuBackend: "WebGL2",
+          },
+        });
+        if (!begin.saved || begin.sessionId === undefined) {
+          setNotice("已取消导出");
+          return;
+        }
+        gpuSessionId = begin.sessionId;
+        const gpuFrame: GpuFilmFrame = {
+          pipeline: sourceFrame.gpuPipeline,
+          processing,
+          mode,
+          view: "positive",
+          tone,
+          displayWhitePoint: sourceFrame.displayWhitePoint,
+        };
+        await renderGpuMasterInTiles(gpuFrame, {
+          tileHeight: rowsPerStrip,
+          collectPixels: false,
+          transfer: format === "dng" ? "linear" : "srgb",
+          onProgress: (completed, total) => {
+            setNotice("GPU 母版处理中 · " + Math.round(completed / total * 100) + "%");
+          },
+          onTile: (tile) => api.appendGpuMasterTiffStrip({
+            sessionId: begin.sessionId!,
+            outputY: tile.outputY,
+            width: tile.width,
+            height: tile.height,
+            rgb16: tile.rgb16,
+          }),
+        });
+        result = await api.finishGpuMasterTiff(begin.sessionId);
+        gpuSessionId = undefined;
+      } catch (gpuError: unknown) {
+        if (gpuSessionId !== undefined) {
+          setNotice("GPU 母版不可用，正在使用同一路径进行 CPU 确定性回退…");
+          result = await api.fallbackGpuMasterTiff(gpuSessionId);
+          gpuSessionId = undefined;
+        } else {
+          setNotice("GPU 母版不可用，正在切换到 CPU 确定性输出…");
+          result = await api.exportMasterTiff(request);
+        }
+        console.warn("[FilmLab] GPU master fell back to CPU", gpuError);
+      }
       setNotice(result.saved
         ? "已导出 " + describeMasterExportFormat(format) + " · " + describeColorTrust(result.colorTrust ?? activeColorTrust) + " · " + (result.fileName ?? "已保存")
         : "已取消导出");
     } catch (error: unknown) {
+      if (gpuSessionId !== undefined) await api.cancelGpuMasterTiff(gpuSessionId).catch(() => undefined);
       setNotice(error instanceof Error ? error.message : "无法导出图像");
     } finally {
       setIsExporting(false);
@@ -1961,6 +2087,44 @@ export function App(): ReactNode {
       setNotice("已导入色卡标定配置 · " + profile.label);
     } catch (error: unknown) {
       setNotice(error instanceof Error ? error.message : "无法导入色卡标定配置");
+    }
+  };
+
+  const exportCalibrationProfile = async (): Promise<void> => {
+    if (calibrationProfileId === undefined) return;
+    try {
+      const result = await api.exportCalibrationProfile(calibrationProfileId);
+      setNotice(result.saved ? "已导出标定配置 · " + (result.fileName ?? "已保存") : "已取消导出标定配置");
+    } catch (error: unknown) {
+      setNotice(error instanceof Error ? error.message : "无法导出标定配置");
+    }
+  };
+
+  const deleteCalibrationProfile = async (): Promise<void> => {
+    if (calibrationProfileId === undefined) return;
+    const profile = calibrationProfiles.find((item) => item.id === calibrationProfileId);
+    if (!window.confirm("删除标定配置“" + (profile?.label ?? calibrationProfileId) + "”及其所有历史版本？项目内已保存的快照不会被删除。")) return;
+    try {
+      if (await api.deleteCalibrationProfile(calibrationProfileId)) {
+        setCalibrationProfiles((current) => current.filter((item) => item.id !== calibrationProfileId));
+        setCalibrationProfileId(undefined);
+        setCalibrationVersions([]);
+        if (mode === "calibrated") setMode("preset");
+        setNotice("已删除标定配置及其本机历史版本");
+      }
+    } catch (error: unknown) {
+      setNotice(error instanceof Error ? error.message : "无法删除标定配置");
+    }
+  };
+
+  const restoreCalibrationVersion = async (version: string): Promise<void> => {
+    if (calibrationProfileId === undefined || version.length === 0) return;
+    try {
+      const restored = await api.restoreCalibrationProfileVersion(calibrationProfileId, version);
+      setCalibrationProfiles((current) => [restored, ...current.filter((item) => item.id !== restored.id)]);
+      setNotice("已恢复标定配置版本 v" + restored.version);
+    } catch (error: unknown) {
+      setNotice(error instanceof Error ? error.message : "无法恢复标定配置版本");
     }
   };
 
@@ -2082,8 +2246,102 @@ export function App(): ReactNode {
     }
   };
 
+  const checkForUpdates = async (): Promise<void> => {
+    try {
+      setUpdateStatus(await api.checkForUpdates());
+    } catch (error: unknown) {
+      setNotice(error instanceof Error ? error.message : "无法检查更新");
+    }
+  };
+
+  const installUpdate = async (): Promise<void> => {
+    try {
+      await flushProject();
+      await api.installUpdate();
+    } catch (error: unknown) {
+      setNotice(error instanceof Error ? error.message : "无法安装更新");
+    }
+  };
+
+  const rollbackUpdate = async (): Promise<void> => {
+    try {
+      await flushProject();
+      await api.rollbackUpdate();
+    } catch (error: unknown) {
+      setNotice(error instanceof Error ? error.message : "无法回滚版本");
+    }
+  };
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent): void => {
+      const target = event.target;
+      const isTextEntry = target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
+        || (target instanceof HTMLElement && target.isContentEditable);
+      if (event.key === "F1") {
+        event.preventDefault();
+        setIsShortcutHelpOpen((current) => !current);
+        return;
+      }
+      if (event.key === "Escape" && isShortcutHelpOpen) {
+        event.preventDefault();
+        setIsShortcutHelpOpen(false);
+        return;
+      }
+      if (isTextEntry) return;
+      const command = event.ctrlKey || event.metaKey;
+      if (command && event.key.toLowerCase() === "o") {
+        event.preventDefault();
+        if (event.shiftKey) void runProjectSwitch(() => api.openProject(false));
+        else void importSources();
+        return;
+      }
+      if (command && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        void flushProject()
+          .then(() => {
+            const readOnly = projectSessionRef.current?.readOnly === true;
+            setProjectStatus(readOnly ? "只读" : "已保存");
+            setNotice(readOnly ? "当前项目为只读；请使用“另存为”保存修改。" : "项目已立即保存。");
+          })
+          .catch((error: unknown) => setNotice(error instanceof Error ? error.message : "项目保存失败"));
+        return;
+      }
+      if (command && event.key.toLowerCase() === "e") {
+        event.preventDefault();
+        if (event.shiftKey) void startBatch();
+        else if (activeAssetId === demoFrameId) void exportPreview();
+        else if (exportBlockedReason === undefined) void exportMasterTiff();
+        else setNotice(exportBlockedReason);
+        return;
+      }
+      if (command && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        if (event.shiftKey) redoRecipe();
+        else undoRecipe();
+        return;
+      }
+      if (command && event.key.toLowerCase() === "y") {
+        event.preventDefault();
+        redoRecipe();
+        return;
+      }
+      if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+        event.preventDefault();
+        const index = frames.findIndex((frame) => frame.id === activeAssetId);
+        const delta = event.key === "ArrowLeft" ? -1 : 1;
+        const next = frames[index + delta];
+        if (next !== undefined) selectFrame(next.id);
+      }
+    };
+    document.addEventListener("keydown", handleShortcut);
+    return () => document.removeEventListener("keydown", handleShortcut);
+  });
+
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-workspace">跳到主工作区</a>
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">
@@ -2112,21 +2370,21 @@ export function App(): ReactNode {
         </div>
 
         <div className="top-actions">
-          <button className="icon-button" type="button" aria-label="撤销" disabled={undoStack.length === 0} onClick={undoRecipe}>
+          <button className="icon-button" type="button" aria-label="撤销" aria-keyshortcuts="Control+Z Meta+Z" title="撤销（Ctrl/⌘+Z）" disabled={undoStack.length === 0} onClick={undoRecipe}>
             <Undo2 size={16} />
           </button>
-          <button className="icon-button" type="button" aria-label="重做" disabled={redoStack.length === 0} onClick={redoRecipe}>
+          <button className="icon-button" type="button" aria-label="重做" aria-keyshortcuts="Control+Y Meta+Y Control+Shift+Z Meta+Shift+Z" title="重做（Ctrl/⌘+Y）" disabled={redoStack.length === 0} onClick={redoRecipe}>
             <Redo2 size={16} />
           </button>
           <span className="top-divider" />
-          <button className="secondary-button" type="button" onClick={() => void importSources()}>
+          <button className="secondary-button" type="button" aria-keyshortcuts="Control+O Meta+O" title="导入帧（Ctrl/⌘+O）" onClick={() => void importSources()}>
             <FolderOpen size={16} />
             导入帧
           </button>
           <button className="secondary-button" type="button" disabled={assets.length === 0} onClick={() => void relinkSources()} title="扫描所选目录及子目录，按内容指纹重新连接">
             扫描目录重连
           </button>
-          <button className="secondary-button" type="button" disabled={assets.length === 0 || batchJob?.state === "running" || batchJob?.state === "queued"} onClick={() => void startBatch()}>
+          <button className="secondary-button" type="button" aria-keyshortcuts="Control+Shift+E Meta+Shift+E" title="批量导出（Ctrl/⌘+Shift+E）" disabled={assets.length === 0 || batchJob?.state === "running" || batchJob?.state === "queued"} onClick={() => void startBatch()}>
             批处理
           </button>
           <div className="export-menu-shell" ref={exportMenuRef}>
@@ -2136,6 +2394,7 @@ export function App(): ReactNode {
                 type="button"
                 aria-label={activeAssetId === demoFrameId ? "导出预览" : "导出 " + currentMasterExportLabel}
                 aria-busy={isExporting}
+                aria-keyshortcuts="Control+E Meta+E"
                 aria-disabled={exportBlockedReason !== undefined}
                 disabled={isExporting}
                 title={exportBlockedReason}
@@ -2236,6 +2495,30 @@ export function App(): ReactNode {
                 </button>
                 <button type="button" role="menuitem" disabled={isProjectSwitching || projectSession === undefined || projectSession.readOnly} onClick={() => void createManualProjectBackup()}>
                   <Layers size={15} /> 创建备份
+                </button>
+                <div className="project-menu-summary update-summary" role="status" aria-live="polite">
+                  <strong>FilmLab v{updateStatus.currentVersion}</strong>
+                  <small>{formatUpdateStatus(updateStatus)}</small>
+                </div>
+                {updateStatus.state === "downloaded" ? (
+                  <button type="button" role="menuitem" onClick={() => void installUpdate()}>
+                    <Download size={15} /> 安装 v{updateStatus.availableVersion}
+                  </button>
+                ) : (
+                  <button type="button" role="menuitem" disabled={updateStatus.state === "checking" || updateStatus.state === "downloading" || updateStatus.state === "disabled"} onClick={() => void checkForUpdates()}>
+                    <RefreshCw size={15} /> 检查更新
+                  </button>
+                )}
+                {updateStatus.rollbackVersion === undefined ? null : (
+                  <button type="button" role="menuitem" onClick={() => void rollbackUpdate()}>
+                    <RotateCcw size={15} /> 回滚到 v{updateStatus.rollbackVersion}
+                  </button>
+                )}
+                <button type="button" role="menuitem" onClick={() => {
+                  setIsProjectMenuOpen(false);
+                  setIsShortcutHelpOpen(true);
+                }}>
+                  <HelpCircle size={15} /> 快捷键与帮助
                 </button>
                 {recentProjects.length === 0 ? null : (
                   <div className="recent-projects" aria-label="最近项目">
@@ -2476,7 +2759,7 @@ export function App(): ReactNode {
         </div>
       </aside>
 
-      <main className="workspace">
+      <main className="workspace" id="main-workspace" tabIndex={-1}>
         <div className="workspace-toolbar">
           <div className="view-switcher" role="tablist" aria-label="预览视图">
             {(Object.keys(viewLabels) as PreviewView[]).map((option) => (
@@ -2629,7 +2912,7 @@ export function App(): ReactNode {
           </div>
         </section>
 
-        <section className="analysis-bar" aria-label="预览状态" aria-live="polite" aria-atomic="false">
+        <section className="analysis-bar" role="status" aria-label="预览状态" aria-live="polite" aria-atomic="true">
           <div className="analysis-item">
             <span className="analysis-label">Dmin · 片基</span>
             <strong>{preview === null ? "—" : preview.density.dmin.toFixed(3) + " D"}</strong>
@@ -2695,12 +2978,29 @@ export function App(): ReactNode {
             >
               <option value="">未选择色卡配置</option>
               {calibrationProfiles.map((profile) => (
-                <option value={profile.id} key={profile.id}>{profile.label}{profile.hasLut ? " · 3D LUT" : ""}</option>
+                <option value={profile.id} key={profile.id}>{profile.label} · v{profile.version}{profile.hasLut ? " · 3D LUT" : ""}</option>
               ))}
             </select>
             <button className="compact-tool" type="button" onClick={() => void importCalibrationProfile()}>
               导入配置
             </button>
+          </div>
+          <div className="profile-actions">
+            <select
+              className="profile-select"
+              aria-label="标定配置历史版本"
+              value={calibrationVersions.find((version) => version.current)?.version ?? ""}
+              disabled={calibrationProfileId === undefined || calibrationVersions.length < 2}
+              onChange={(event) => void restoreCalibrationVersion(event.currentTarget.value)}
+            >
+              {calibrationVersions.length === 0 ? <option value="">没有历史版本</option> : calibrationVersions.map((version) => (
+                <option value={version.version} key={version.version}>
+                  v{version.version}{version.current ? " · 当前" : " · " + new Date(version.createdAt).toLocaleDateString("zh-CN")}
+                </option>
+              ))}
+            </select>
+            <button className="compact-tool" type="button" disabled={calibrationProfileId === undefined} onClick={() => void exportCalibrationProfile()}>导出</button>
+            <button className="compact-tool danger" type="button" disabled={calibrationProfileId === undefined} onClick={() => void deleteCalibrationProfile()}>删除</button>
           </div>
           <div className="profile-actions">
             <select className="profile-select" aria-label="色卡照片" value={colorCardAssetId ?? ""} onChange={(event) => setColorCardAssetId(event.currentTarget.value || undefined)}>
@@ -3040,8 +3340,8 @@ export function App(): ReactNode {
           </p>
           <RestorationInspector processing={processing} onChange={updateProcessing} />
           {batchJob === undefined ? null : (
-            <div className="pending-row">
-              <span>批处理 {batchJob.state}</span>
+            <div className="pending-row" role="status" aria-live="polite" aria-atomic="true">
+              <span>{describeMasterExportFormat(batchJob.format)} 批处理 {batchJob.state}</span>
               <span>{batchJob.completed}/{batchJob.total}{batchJob.cancelRequested ? " · 正在取消" : ""}</span>
               {(batchJob.state === "queued" || batchJob.state === "running")
                 ? <button className="compact-tool" type="button" onClick={() => void cancelBatch()}>取消</button>
@@ -3109,6 +3409,56 @@ export function App(): ReactNode {
           onConfirm={() => deleteFrame(frameDeleteDialog.frameId)}
         />
       )}
+      {isShortcutHelpOpen ? <ShortcutHelpDialog onClose={() => setIsShortcutHelpOpen(false)} /> : null}
+    </div>
+  );
+}
+
+function formatUpdateStatus(status: UpdateStatus): string {
+  if (status.message !== undefined) return status.message;
+  switch (status.state) {
+    case "disabled": return "开发构建不检查更新";
+    case "checking": return "正在检查更新";
+    case "up-to-date": return "已经是最新版本";
+    case "available": return `发现 v${status.availableVersion ?? "新版本"}`;
+    case "downloading": return `正在下载 ${Math.round(status.downloadPercent ?? 0)}%`;
+    case "downloaded": return `v${status.availableVersion ?? "新版本"} 已就绪`;
+    case "error": return "更新检查失败";
+    default: return "自动更新已启用";
+  }
+}
+
+function ShortcutHelpDialog({ onClose }: { readonly onClose: () => void }): ReactNode {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.currentTarget === event.target) onClose();
+    }}>
+      <section className="shortcut-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcut-dialog-title">
+        <div className="dialog-copy">
+          <h2 id="shortcut-dialog-title">快捷键与帮助</h2>
+          <p>Windows/Linux 使用 Ctrl，macOS 使用 ⌘。完整流程见随安装包附带的 resources/docs/user-manual.md。</p>
+        </div>
+        <dl className="shortcut-list">
+          <div><dt>导入帧</dt><dd>Ctrl/⌘ + O</dd></div>
+          <div><dt>打开项目</dt><dd>Ctrl/⌘ + Shift + O</dd></div>
+          <div><dt>立即保存</dt><dd>Ctrl/⌘ + S</dd></div>
+          <div><dt>导出当前帧</dt><dd>Ctrl/⌘ + E</dd></div>
+          <div><dt>批量导出</dt><dd>Ctrl/⌘ + Shift + E</dd></div>
+          <div><dt>撤销 / 重做</dt><dd>Ctrl/⌘ + Z / Y</dd></div>
+          <div><dt>前 / 后一帧</dt><dd>Alt + ← / →</dd></div>
+          <div><dt>打开本帮助</dt><dd>F1</dd></div>
+        </dl>
+        <div className="dialog-actions">
+          <button className="primary-button" type="button" autoFocus onClick={onClose}>关闭</button>
+        </div>
+      </section>
     </div>
   );
 }

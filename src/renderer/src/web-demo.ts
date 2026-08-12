@@ -94,22 +94,31 @@ export function createWebDemoApi(): FilmLabApi {
     confirmClose: () => undefined,
     exportPreviewPng: async () => ({ saved: false }),
     exportMasterTiff: async () => ({ saved: false }),
-    exportGpuMasterTiff: async () => ({ saved: false }),
     beginGpuMasterTiff: async () => ({ saved: false }),
     appendGpuMasterTiffStrip: async () => undefined,
     finishGpuMasterTiff: async () => ({ saved: false }),
     cancelGpuMasterTiff: async () => undefined,
+    fallbackGpuMasterTiff: async () => ({ saved: false }),
     importCalibrationProfile: async () => undefined,
+    exportCalibrationProfile: async () => ({ saved: false }),
+    deleteCalibrationProfile: async () => false,
     listCalibrationProfiles: async () => [],
+    listCalibrationProfileVersions: async () => [],
+    restoreCalibrationProfileVersion: async () => { throw new Error("浏览器演示模式没有标定版本库。"); },
     generateCalibrationFromColorCard: async () => {
       throw new Error("浏览器演示模式不具备 RAW 色卡拟合能力。");
     },
     relinkProjectSources: async (assets) => masterExportUiDemo
       ? { relinkedAssetIds: assets.map((asset) => asset.id), relinkedAssets: assets, missingAssets: [] }
       : { relinkedAssetIds: [], relinkedAssets: [], missingAssets: assets },
-    startBatchTiffExport: async () => undefined,
+    startBatchExport: async () => undefined,
     getBatchJob: async () => undefined,
     cancelBatchJob: async () => undefined,
+    getUpdateStatus: async () => ({ state: "disabled", currentVersion: "web-demo" }),
+    checkForUpdates: async () => ({ state: "disabled", currentVersion: "web-demo" }),
+    installUpdate: async () => undefined,
+    rollbackUpdate: async () => undefined,
+    onUpdateStatus: () => () => undefined,
   };
   return cachedApi!;
 }

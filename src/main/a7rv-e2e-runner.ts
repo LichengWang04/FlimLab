@@ -385,7 +385,7 @@ function acceptanceProfile(cameraModel: string, decoderFingerprint: string): Cal
     capture: {
       cameraModel,
       decoderFingerprint,
-      demosaic: "bilinear-bayer-v1",
+      demosaic: decoderFingerprint.split("+").at(-1) ?? "edge-aware-bayer-v2",
     },
     transform: {
       sourceDomain: "relative-density-log10",

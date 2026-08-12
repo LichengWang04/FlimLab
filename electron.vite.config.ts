@@ -21,6 +21,17 @@ function developmentLoopbackCsp(): Plugin {
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
+    // electron-updater ships CommonJS. Emit the Electron main entry as CJS so
+    // development and packaged builds both load it through Node's native CJS
+    // interop instead of an unsupported external ESM named import.
+    build: {
+      rollupOptions: {
+        output: {
+          format: "cjs",
+          entryFileNames: "[name].cjs",
+        },
+      },
+    },
   },
   preload: {
     plugins: [externalizeDepsPlugin()],

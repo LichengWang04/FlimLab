@@ -10,18 +10,21 @@ Node ABI add-on.
 
 The worker opens a RAW file with LibRaw 0.22.1, calls only `unpack()`, reads the
 unpacked sensor mosaic, subtracts black levels, normalizes against the sensor
-white level and uses FilmLab's fixed `bilinear-bayer-v1` demosaic. It does not
+white level and uses FilmLab's versioned `edge-aware-bayer-v2` demosaic. It does not
 call `dcraw_process()`, thumbnail APIs, camera white balance, camera color
 matrices, gamma, noise reduction or highlight recovery.
 
 The worker has two versioned output modes:
 
-- `bilinear-bayer-v1` writes the existing row-major
+- `edge-aware-bayer-v2` writes a row-major
   `filmlab-rgb16le-v1` RGB cache for CPU processing and export.
-- `gpu-bayer-v1` writes a compact, single-channel
+- `gpu-edge-aware-bayer-v2` writes a compact, single-channel
   `filmlab-bayer16le-v1` cache. Its response includes the canonical row-major
   2×2 `bayerPattern` (`0=R`, `1=G`, `2=B`), and the renderer performs
-  demosaic together with geometry sampling in WebGL2.
+  direction-aware demosaic together with geometry sampling in WebGL2.
+
+`bilinear-bayer-v1` remains an explicitly requested compatibility mode. It is
+not the default and does not share a decoder fingerprint with v2 calibrations.
 
 The RGB cache layout is:
 
@@ -54,10 +57,11 @@ receive a cache or source path.
 ### Decode request
 
 ```json
-{"id":"job-42","type":"decode","sourcePath":"/absolute/frame.NEF","cachePath":"/absolute/cache/frame.rgb16le","options":{"demosaic":"bilinear-bayer-v1"}}
+{"id":"job-42","type":"decode","sourcePath":"/absolute/frame.NEF","cachePath":"/absolute/cache/frame.rgb16le","options":{"demosaic":"edge-aware-bayer-v2"}}
 ```
 
-For GPU preview, set `options.demosaic` to `gpu-bayer-v1`. Preview decimation
+For GPU preview or master export, set `options.demosaic` to
+`gpu-edge-aware-bayer-v2`. Preview decimation
 uses an odd source stride so the 2×2 CFA phase remains valid after sampling.
 
 The sidecar emits zero or more progress events:
@@ -69,7 +73,7 @@ The sidecar emits zero or more progress events:
 Its terminal response is either:
 
 ```json
-{"id":"job-42","ok":true,"result":{"cachePath":"/absolute/cache/frame.rgb16le","cacheFormat":"filmlab-rgb16le-v1","width":6048,"height":4024,"channels":3,"bitDepth":16,"byteOrder":"little-endian","bytes":146098176,"sourceDomain":"camera-linear-rgb","decoderFingerprint":"libraw-0.22.1+bilinear-bayer-v1","metadata":{}}}
+{"id":"job-42","ok":true,"result":{"cachePath":"/absolute/cache/frame.rgb16le","cacheFormat":"filmlab-rgb16le-v1","width":6048,"height":4024,"channels":3,"bitDepth":16,"byteOrder":"little-endian","bytes":146098176,"sourceDomain":"camera-linear-rgb","decoderFingerprint":"libraw-0.22.1+edge-aware-bayer-v2","metadata":{}}}
 ```
 
 or:
@@ -163,8 +167,10 @@ dependency change must update that inventory and source notice in the same
 commit. The FilmLab source in this folder does not invoke LibRaw's rendered-
 image path, but linking and redistribution remain subject to these notices.
 
-The bilinear demosaic is deterministic and deliberately conservative. It is a
-good linear input for the FilmLab negative pipeline, not a claim of a universal
-camera rendering. More advanced demosaicers may be added as separately named,
-versioned options so their decoder fingerprint remains part of a calibration
-profile's capture fingerprint.
+The v2 demosaic estimates green with horizontal/vertical gradients and
+second-order correction, then reconstructs red/blue through local colour
+differences. Mirrored boundaries avoid edge clamping bias. It is still a
+deterministic linear input for the FilmLab negative pipeline, not a claim of a
+universal camera rendering. Every future algorithm change requires a new name
+so the decoder fingerprint remains part of a calibration profile's capture
+fingerprint.

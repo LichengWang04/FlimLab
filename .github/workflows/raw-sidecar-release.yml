@@ -193,6 +193,7 @@ jobs:
           path: |
             release/*.exe
             release/*.dmg
+            release/*.zip
             release/*.AppImage
             release/*.blockmap
             release/latest*.yml
@@ -226,7 +227,7 @@ jobs:
           version="$(node -p "require('./package.json').version")"
           test "$GITHUB_REF_NAME" = "v$version"
           mkdir publish
-          find release-downloads -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.blockmap' -o -name 'latest*.yml' -o -name 'FilmLab-*-sbom.cdx.json' \) -exec cp {} publish/ \;
+          find release-downloads -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.blockmap' -o -name 'latest*.yml' -o -name 'FilmLab-*-sbom.cdx.json' \) -exec cp {} publish/ \;
           test "$(find publish -maxdepth 1 -type f | wc -l)" -ge 4
           cd publish
           find . -maxdepth 1 -type f -print0 \

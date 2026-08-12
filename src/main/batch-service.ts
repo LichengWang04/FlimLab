@@ -3,11 +3,11 @@ import { access } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 
 import type { CalibrationProfileDocument } from "../core/calibration.ts";
-import type { BatchJobSummary, BatchTiffExportItem } from "../shared/contracts.ts";
+import type { BatchExportItem, BatchJobSummary, MasterExportFormat } from "../shared/contracts.ts";
 import type { ProcessingService } from "./processing-service.ts";
 
 export interface BatchSource {
-  readonly item: BatchTiffExportItem;
+  readonly item: BatchExportItem;
   readonly sourcePath: string;
   readonly sourceName: string;
   readonly calibrationProfile?: CalibrationProfileDocument;
@@ -16,12 +16,13 @@ export interface BatchSource {
 interface BatchJob extends BatchJobSummary {
   readonly sources: readonly BatchSource[];
   readonly outputDirectory: string;
+  readonly format: MasterExportFormat;
 }
 
 /**
  * A deliberately single-file-at-a-time export queue. It keeps the utility
  * process memory bounded and makes cancellation deterministic: the current
- * TIFF is allowed to finish its atomic write, then no further item starts.
+ * file is allowed to finish its atomic write, then no further item starts.
  */
 export class BatchService {
   private readonly jobs = new Map<string, BatchJob>();
@@ -34,10 +35,12 @@ export class BatchService {
   public start(
     sources: readonly BatchSource[],
     outputDirectory: string,
+    format: MasterExportFormat = "tiff",
   ): BatchJobSummary {
     const id = randomUUID();
     const job: BatchJob = {
       id,
+      format,
       state: "queued",
       total: sources.length,
       completed: 0,
@@ -82,13 +85,14 @@ export class BatchService {
         const source = job.sources[index];
         const outputPath = await findAvailableOutputPath(
           job.outputDirectory,
-          makeOutputName(source.sourceName, index),
+          makeOutputName(source.sourceName, index, job.format),
         );
         this.jobs.set(id, { ...job, currentAssetId: source.item.assetId });
         try {
           await this.processing.exportTiff(source.item.assetId, source.sourcePath, {
             outputPath,
             suggestedFileName: basename(outputPath),
+            format: job.format,
             mode: source.item.mode,
             tone: source.item.tone,
             calibrationProfile: source.calibrationProfile,
@@ -146,6 +150,7 @@ export class BatchService {
 function summarizeJob(job: BatchJob): BatchJobSummary {
   return {
     id: job.id,
+    format: job.format,
     state: job.state,
     total: job.total,
     completed: job.completed,
@@ -156,13 +161,14 @@ function summarizeJob(job: BatchJob): BatchJobSummary {
   };
 }
 
-function makeOutputName(sourceName: string, index: number): string {
+function makeOutputName(sourceName: string, index: number, format: MasterExportFormat): string {
   const extension = extname(sourceName);
   const stem = (extension.length === 0 ? sourceName : sourceName.slice(0, -extension.length))
     .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
     .trim()
     .slice(0, 80) || "frame-" + String(index + 1).padStart(3, "0");
-  return String(index + 1).padStart(3, "0") + "-" + stem + "-positive.tiff";
+  const outputExtension = format === "jpeg" ? ".jpg" : format === "heif" ? ".avif" : "." + format;
+  return String(index + 1).padStart(3, "0") + "-" + stem + "-positive" + outputExtension;
 }
 
 async function findAvailableOutputPath(directory: string, preferredName: string): Promise<string> {

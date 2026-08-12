@@ -1,11 +1,15 @@
 # FilmLab privacy statement
 
 FilmLab is a local-first desktop application. The current application has no
-account system, advertising, analytics, telemetry, cloud synchronization,
-automatic crash upload, update check, or runtime network API. Production CSP
-sets `connect-src 'none'`, and Electron denies permission requests and external
-navigation. Development builds allow only loopback HTTP/WebSocket connections
-for Vite hot reload.
+account system, advertising, analytics, telemetry, cloud synchronization or
+automatic crash upload. Production renderer CSP sets `connect-src 'none'`, and
+Electron denies permission requests and external navigation. The packaged main
+process performs one narrow network function: it checks and downloads signed
+FilmLab releases from GitHub (or an administrator-configured update mirror).
+This sends the normal IP address and HTTP request metadata required by that
+host; FilmLab adds no photo, project, path, account or telemetry payload.
+Development builds disable release checks and allow only loopback HTTP/WebSocket
+connections for Vite hot reload.
 
 ## Data processed and stored locally
 
@@ -19,6 +23,9 @@ for Vite hot reload.
   user names or directory structure.
 - The session/cache directory contains decoded preview caches and temporary
   processing data. Exports are written only to user-selected destinations.
+- Downloaded update installers and a small last-known-good state file are kept
+  under the application user-data directory to support verified Windows
+  rollback. They contain version/package data, not photographs or projects.
 - Console output may contain error messages and local paths. No persistent
   diagnostic log or crash dump is automatically uploaded by FilmLab.
 

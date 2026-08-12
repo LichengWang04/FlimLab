@@ -17,6 +17,7 @@ test("calibration profile import validates, stores and reloads renderer-safe sum
   assert.equal(summary.id, "portra-400-studio-a");
   assert.equal(summary.label, "Portra 400 · Studio A");
   assert.equal(summary.hasLut, false);
+  assert.equal(summary.version, "1.0.0");
 
   const reloaded = new CalibrationProfileService(join(root, "profiles"));
   const profiles = await reloaded.list();
@@ -27,6 +28,45 @@ test("calibration profile import validates, stores and reloads renderer-safe sum
   assert.equal(profileFiles.length, 1);
   const stored = await readFile(join(root, "profiles", profileFiles[0]), "utf8");
   assert.doesNotMatch(stored, /input-profile\.json/);
+});
+
+test("calibration profiles archive versions, restore them and delete their history", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "filmlab-calibration-history-"));
+  context.after(async () => rm(root, { force: true, recursive: true }));
+  const service = new CalibrationProfileService(join(root, "profiles"));
+  await service.importSerialized(JSON.stringify(validProfile()));
+  const version2 = {
+    ...validProfile(),
+    version: "2.0.0",
+    createdAt: "2026-08-13T12:00:00.000Z",
+    calibrationId: "studio-a-2026-08",
+  };
+  await service.importSerialized(JSON.stringify(version2));
+
+  const versions = await service.listVersions("portra-400-studio-a");
+  assert.deepEqual(versions.map((entry) => [entry.version, entry.current]), [
+    ["2.0.0", true],
+    ["1.0.0", false],
+  ]);
+  const restored = await service.restoreVersion("portra-400-studio-a", "1.0.0");
+  assert.equal(restored.version, "1.0.0");
+  assert.equal((await service.get(restored.id))?.calibrationId, "studio-a-2026-07");
+  assert.deepEqual((await service.listVersions(restored.id)).map((entry) => entry.version), ["2.0.0", "1.0.0"]);
+
+  assert.equal(await service.delete(restored.id), true);
+  assert.deepEqual(await service.list(), []);
+  assert.deepEqual(await service.listVersions(restored.id), []);
+});
+
+test("calibration import rejects changed contents under the same version", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "filmlab-calibration-conflict-"));
+  context.after(async () => rm(root, { force: true, recursive: true }));
+  const service = new CalibrationProfileService(join(root, "profiles"));
+  await service.importSerialized(JSON.stringify(validProfile()));
+  await assert.rejects(
+    service.importSerialized(JSON.stringify({ ...validProfile(), calibrationId: "different" })),
+    /version/,
+  );
 });
 
 function validProfile(): object {
@@ -46,8 +86,8 @@ function validProfile(): object {
       filmStock: "Portra 400",
       process: "C-41",
       illuminationId: "light-a",
-      decoderFingerprint: "libraw-0.22.1+bilinear-bayer-v1",
-      demosaic: "bilinear-bayer-v1",
+      decoderFingerprint: "libraw-0.22.1+edge-aware-bayer-v2",
+      demosaic: "edge-aware-bayer-v2",
     },
     transform: {
       sourceDomain: "relative-density-log10",

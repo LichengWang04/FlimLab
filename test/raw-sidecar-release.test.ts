@@ -61,7 +61,9 @@ test("release configuration produces native installers with explicit lifecycle m
   assert.match(configuration, /^copyright: /m);
   assert.match(configuration, /win:[\s\S]*target:\n\s+- nsis/);
   assert.match(configuration, /mac:[\s\S]*notarize: true[\s\S]*target:\n\s+- dmg/);
+  assert.match(configuration, /target:\n\s+- dmg\n\s+- zip/);
   assert.match(configuration, /linux:[\s\S]*target:\n\s+- AppImage/);
+  assert.match(configuration, /provider: github[\s\S]*owner: LichengWang04[\s\S]*repo: FlimLab/);
   assert.match(configuration, /allowToChangeInstallationDirectory: true/);
   assert.match(configuration, /deleteAppDataOnUninstall: false/);
   assert.match(configuration, /build\/generated\/icon\.(?:ico|icns|png)/);
@@ -74,6 +76,7 @@ test("release CI installs packages and gates tagged publication on signatures", 
   assert.match(workflow, /codesign --verify --deep --strict/);
   assert.match(workflow, /xcrun stapler validate/);
   assert.match(workflow, /publish-release:/);
+  assert.match(workflow, /release\/\*\.zip/);
   assert.match(workflow, /SHA256SUMS/);
 });
 
@@ -89,12 +92,15 @@ test("RAW release manifest pins the LibRaw build input", async () => {
   });
 });
 
-test("RAW sidecar exposes compact Bayer16 output for the GPU demosaic path", async () => {
+test("RAW sidecar exposes versioned edge-aware CPU and compact GPU Bayer paths", async () => {
   const source = await readFile(
     new URL("../native/raw-worker/src/main.cpp", import.meta.url),
     "utf8",
   );
-  assert.match(source, /gpu-bayer-v1/);
+  assert.match(source, /edge-aware-bayer-v2/);
+  assert.match(source, /gpu-edge-aware-bayer-v2/);
+  assert.match(source, /edgeAwareGreen/);
+  assert.match(source, /edgeAwareDemosaicChannel/);
   assert.match(source, /filmlab-bayer16le-v1/);
   assert.match(source, /"camera-linear-bayer"/);
   assert.match(source, /sampleStride % 2 == 0/);

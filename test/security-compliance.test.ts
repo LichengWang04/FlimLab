@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("production renderer cannot initiate network connections", async () => {
+test("production renderer cannot initiate network connections while updates stay main-process-only", async () => {
   const html = await readFile("src/renderer/index.html", "utf8");
   assert.match(html, /default-src 'none'/);
   assert.match(html, /connect-src 'none'/);
@@ -14,6 +14,15 @@ test("production renderer cannot initiate network connections", async () => {
   assert.match(vite, /context\.server === undefined/);
   assert.match(vite, /ws:\/\/localhost:\*/);
   assert.doesNotMatch(vite, /https:\/\//);
+
+  const [updater, preload] = await Promise.all([
+    readFile("src/main/update-service.ts", "utf8"),
+    readFile("src/preload/index.ts", "utf8"),
+  ]);
+  assert.match(updater, /electron-updater/);
+  assert.match(updater, /autoInstallOnAppQuit = false/);
+  assert.match(updater, /lastKnownGoodVersion/);
+  assert.doesNotMatch(preload, /https?:\/\//);
 });
 
 test("Electron keeps renderer permissions, navigation and Node access closed", async () => {
@@ -64,6 +73,7 @@ test("privacy, diagnostic, migration, support and vulnerability policies exist",
   ]);
   for (const document of documents) assert.ok(document.length > 500);
   assert.match(documents[0], /no\s+account system, advertising, analytics, telemetry/);
+  assert.match(documents[0], /main\s+process performs one narrow network function/);
   assert.match(documents[1], /Report a vulnerability/);
   assert.match(documents[3], /不要收集 RAW/);
   assert.match(documents[4], /当前项目 schema 为 v8/);
