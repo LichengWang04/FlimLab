@@ -64,11 +64,21 @@ jobs:
           node-version: 24
           cache: npm
 
-      # vcpkg's binary cache keeps LibRaw and nlohmann-json builds reusable
-      # across runs. CMake runs its manifest install from native/raw-worker.
-      - uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgJsonGlob: '**/native/raw-worker/vcpkg.json'
+      # GitHub-hosted runner images already contain vcpkg. Using that verified
+      # image tool avoids a second bootstrap executable download; the project's
+      # builtin-baseline still pins every port definition used by the manifest.
+      - name: Select runner-provided vcpkg
+        shell: bash
+        run: |
+          vcpkg_root="$VCPKG_INSTALLATION_ROOT"
+          vcpkg_executable="$vcpkg_root/vcpkg"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            vcpkg_root="$(cygpath -m "$vcpkg_root")"
+            vcpkg_executable="$vcpkg_root/vcpkg.exe"
+          fi
+          test -x "$vcpkg_executable"
+          "$vcpkg_executable" version
+          echo "VCPKG_ROOT=$vcpkg_root" >> "$GITHUB_ENV"
 
       - run: npm ci
         shell: bash
@@ -76,13 +86,28 @@ jobs:
       - name: Build target sidecar into Electron's resource input tree
         shell: bash
         run: |
-          cmake -S native/raw-worker -B build/raw-worker/${{ matrix.platform }}-${{ matrix.arch }} \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-            -DVCPKG_MANIFEST_DIR="$GITHUB_WORKSPACE/native/raw-worker" \
-            -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
-            -DFILMLAB_RAW_WORKER_OUTPUT_DIR="$GITHUB_WORKSPACE/native/raw-worker/out/${{ matrix.platform }}-${{ matrix.arch }}"
+          configured=false
+          for attempt in 1 2 3 4; do
+            if cmake -S native/raw-worker -B build/raw-worker/${{ matrix.platform }}-${{ matrix.arch }} \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+              -DVCPKG_MANIFEST_DIR="$GITHUB_WORKSPACE/native/raw-worker" \
+              -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+              -DFILMLAB_RAW_WORKER_OUTPUT_DIR="$GITHUB_WORKSPACE/native/raw-worker/out/${{ matrix.platform }}-${{ matrix.arch }}"; then
+              configured=true
+              break
+            fi
+            if [[ "$attempt" -lt 4 ]]; then
+              delay=$((attempt * 15))
+              echo "CMake/vcpkg configure attempt $attempt failed; retrying in ${delay}s."
+              sleep "$delay"
+            fi
+          done
+          if [[ "$configured" != "true" ]]; then
+            echo "CMake/vcpkg configure failed after 4 attempts."
+            exit 1
+          fi
           cmake --build build/raw-worker/${{ matrix.platform }}-${{ matrix.arch }} --config Release --parallel
 
       - name: Verify RAW protocol and Bayer-only release capability

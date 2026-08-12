@@ -27,6 +27,11 @@ npm run verify:installed-release -- --package release/FilmLab-0.1.0-win-x64.exe
 
 ## CI、签名与发布
 
+RAW sidecar 作业直接使用所选 GitHub 托管 runner 镜像中预装的 vcpkg 可执行文件，
+端口定义仍由 `native/raw-worker/vcpkg.json` 的 `builtin-baseline` 锁定。
+这样无需再次下载 vcpkg 引导程序；对上游源码归档偶发的 HTTP 5xx，manifest
+配置会以有限退避方式最多重试四次。
+
 `.github/workflows/raw-sidecar-release.yml` 在干净的 Windows x64、macOS Intel、macOS Apple Silicon 和 Linux x64 托管 runner 上构建；每个平台都必须安装或展开并启动产物。`v*` 标签还必须提供：
 
 - Windows：`WIN_CSC_LINK`、`WIN_CSC_KEY_PASSWORD`。安装器、主程序和已打包 RAW worker 的 Authenticode 状态都必须为 Valid。

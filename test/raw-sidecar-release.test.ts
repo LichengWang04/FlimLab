@@ -71,6 +71,10 @@ test("release configuration produces native installers with explicit lifecycle m
 
 test("release CI installs packages and gates tagged publication on signatures", async () => {
   const workflow = await readFile(new URL("../.github/workflows/raw-sidecar-release.yml", import.meta.url), "utf8");
+  assert.doesNotMatch(workflow, /lukka\/run-vcpkg/);
+  assert.match(workflow, /VCPKG_INSTALLATION_ROOT/);
+  assert.match(workflow, /for attempt in 1 2 3 4/);
+  assert.match(workflow, /CMake\/vcpkg configure failed after 4 attempts/);
   assert.match(workflow, /verify-installed-release\.cjs/);
   assert.match(workflow, /Get-AuthenticodeSignature/);
   assert.match(workflow, /codesign --verify --deep --strict/);
