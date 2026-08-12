@@ -20,6 +20,10 @@ extraResources:
     to: raw-worker
     filter:
       - "**/*"
+  - from: build/generated/legal
+    to: legal
+    filter:
+      - "**/*"
 win:
   # electron-builder signs .exe extra resources with the configured Windows
   # certificate, including the RAW sidecar. Tag builds require that certificate.

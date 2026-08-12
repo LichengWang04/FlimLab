@@ -106,6 +106,8 @@ camera-linear RGB
 ```powershell
 npm install
 npm run check
+npm run audit:dependencies
+npm run sbom
 npm run benchmark:preview
 npm run build
 npm run dev
@@ -114,7 +116,7 @@ npm run acceptance:a7rv
 
 `npm run dev` 会启动完整的 Electron 工作台。需要在普通浏览器中做隔离的界面验收时，访问 `http://localhost:5173/?web-demo`；该入口使用内建演示负片，不会读取本地源文件，也不替代 Electron 的真实处理链路。
 
-`npm run check` 包含核心、项目隔离、标定配置/色卡矩阵、TIFF/ICC、故障注入和来源注册测试。`npm run acceptance:a7rv` 还要求本机已经构建当前平台 sidecar，并在 `A7R5_RAW/` 放置清单匹配的私有素材；它会产生体积较大的忽略目录 `artifacts/`。`npm run dist` 使用 electron-builder 打包当前平台。
+`npm run check` 包含核心、项目隔离、标定配置/色卡矩阵、TIFF/ICC、CSP、许可材料、故障注入和来源注册测试。`npm run audit:dependencies` 联网查询 npm 安全公告并在 high/critical 时失败；`npm run sbom` 生成含 npm 与 vcpkg 原生组件的 CycloneDX 清单到 `build/generated/legal/`。`npm run acceptance:a7rv` 还要求本机已经构建当前平台 sidecar，并在 `A7R5_RAW/` 放置清单匹配的私有素材；它会产生体积较大的忽略目录 `artifacts/`。`npm run dist` 使用 electron-builder 打包当前平台。
 
 仓库不提交真实相机 RAW、扫描母版或本地导出。Sony A7R V 回归素材采用外部本地保存和 SHA-256 身份清单；恢复及验证方法见 [`docs/test-data.md`](docs/test-data.md)。首次克隆后可执行 `git config core.hooksPath .githooks` 启用提交前的仓库卫生检查与完整测试。
 
@@ -128,4 +130,4 @@ CI 工作流 [`.github/workflows/raw-sidecar-release.yml`](.github/workflows/raw
 
 electron-builder 在打包前后验证当前目标对应的 sidecar，最终位置固定为 `resources/raw-worker/<platform>-<arch>/`。正式产物为 Windows NSIS、macOS x64/arm64 DMG 和 Linux x64 AppImage；每个干净构建都会安装或解包后启动应用并探测已安装 sidecar，真实 A7R V runner 还会通过安装后的可执行文件重复 ARW 导入与 TIFF 导出。版本标签构建强制 Authenticode、Developer ID 与 Apple notarization 门禁，缺少证书即失败；通过后生成校验和并发布 GitHub Release。完整命令、密钥、升级/卸载策略和验收边界见 [`docs/release.md`](docs/release.md)，sidecar 许可义务见 [`native/raw-worker/README.md`](native/raw-worker/README.md)。
 
-当前架构、色彩可信度、输出格式、项目重连和 CI 的统一验收口径见 [`docs/design.md`](docs/design.md)；测试素材策略见 [`docs/test-data.md`](docs/test-data.md)；版本变化见 [`CHANGELOG.md`](CHANGELOG.md)；开发参考、许可边界和第三方项目约束见 [`docs/references.md`](docs/references.md)。
+当前架构、色彩可信度、输出格式、项目重连和 CI 的统一验收口径见 [`docs/design.md`](docs/design.md)；许可与第三方边界见 [`LICENSE`](LICENSE)、[`NOTICE`](NOTICE) 和 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)；隐私、安全与支持政策见 [`PRIVACY.md`](PRIVACY.md)、[`SECURITY.md`](SECURITY.md) 和 [`SUPPORT.md`](SUPPORT.md)；故障诊断与迁移见 [`docs/diagnostics.md`](docs/diagnostics.md) 和 [`docs/migration.md`](docs/migration.md)。测试素材策略见 [`docs/test-data.md`](docs/test-data.md)，版本变化见 [`CHANGELOG.md`](CHANGELOG.md)，外部参考边界见 [`docs/references.md`](docs/references.md)。

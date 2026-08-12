@@ -1,0 +1,27 @@
+FilmLab Proprietary License
+
+Copyright (c) 2026 Licheng Wang. All rights reserved.
+
+The FilmLab source code, user interface, documentation, presets, calibration
+data, and original assets in this repository are proprietary unless a file
+expressly states otherwise. No permission is granted to use, copy, modify,
+publish, distribute, sublicense, sell, or create derivative works from those
+materials without prior written permission from the copyright holder.
+
+You may run an unmodified FilmLab binary that was lawfully provided to you for
+your own use, subject to any terms accompanying that binary. This permission
+does not grant redistribution, reverse-engineering, trademark, patent, or
+source-code rights, except where such restrictions are prohibited by
+applicable law.
+
+Third-party components remain governed by their respective licenses. Nothing
+in this license limits rights granted directly by those third-party licenses.
+Their notices and license texts are identified in NOTICE and
+THIRD_PARTY_NOTICES.md.
+
+THE FILMLAB MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. TO
+THE MAXIMUM EXTENT PERMITTED BY LAW, THE COPYRIGHT HOLDER SHALL NOT BE LIABLE
+FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM OR RELATED TO THE
+FILMLAB MATERIALS OR THEIR USE.

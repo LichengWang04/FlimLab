@@ -53,7 +53,7 @@ function sourceWorkerPath(projectDir, platform, arch) {
   return join(resolve(projectDir), "native", "raw-worker", "out", platformArch(platform, arch), executableName(platform));
 }
 
-async function assertExecutable(file, label) {
+async function assertNonEmptyFile(file, label) {
   let info;
   try {
     info = await stat(file);
@@ -61,8 +61,13 @@ async function assertExecutable(file, label) {
     throw new Error(`${label} is missing: ${file}`);
   }
   if (!info.isFile() || info.size === 0) {
-    throw new Error(`${label} is not a non-empty executable file: ${file}`);
+    throw new Error(`${label} is not a non-empty file: ${file}`);
   }
+  return file;
+}
+
+async function assertExecutable(file, label) {
+  await assertNonEmptyFile(file, label);
   if (process.platform !== "win32") {
     try {
       await access(file, constants.X_OK);
@@ -155,6 +160,20 @@ async function afterPack(context) {
   const relative = relativeWorkerPath(context.electronPlatformName, context.arch);
   const resourcesDir = context.packager.getResourcesDir(context.appOutDir);
   await assertExecutable(join(resourcesDir, relative), "Packaged RAW sidecar");
+  for (const legalFile of [
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md",
+    "LibRaw-0.22.1.CDDL.txt",
+    "LibRaw-0.22.1.COPYRIGHT.txt",
+    "LibRaw-0.22.1.SOURCE.txt",
+  ]) {
+    await assertNonEmptyFile(join(resourcesDir, "legal", legalFile), `Packaged legal material ${legalFile}`);
+  }
+  const legalEntries = await require("node:fs/promises").readdir(join(resourcesDir, "legal"));
+  if (!legalEntries.some((name) => /^FilmLab-\d+\.\d+\.\d+-sbom\.cdx\.json$/.test(name))) {
+    throw new Error(`Packaged legal material is missing the versioned CycloneDX SBOM: ${join(resourcesDir, "legal")}`);
+  }
 }
 
 function parseArguments(argv) {
@@ -200,6 +219,7 @@ async function main() {
 module.exports = {
   afterPack,
   assertExecutable,
+  assertNonEmptyFile,
   beforePack,
   executableName,
   normaliseArch,

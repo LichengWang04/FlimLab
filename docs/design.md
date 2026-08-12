@@ -189,3 +189,11 @@ DNG 容器验收使用动态匹配当前相机/decoder 的“验收专用单位�
 干净构建必须完成三层验证：打包前 sidecar 协议探测；打包后资源存在性与字节身份验证；安装/挂载/展开后从发行可执行文件启动隐藏 renderer 并再次探测 sidecar。带私有素材的 Windows/macOS runner 还必须通过安装后的应用重复真实 A7R V ARW 导入、跨进程项目恢复/重连、TIFF 母版导出及 GPU/CPU 回退，开发态 Electron 的通过结果不能替代它。
 
 普通分支和 pull request 产生的包是未签名验证构建。`v*` 标签才是正式发行边界：Windows 安装器、主程序和 sidecar 必须通过 Authenticode；macOS `.app` 与 sidecar 必须通过 Developer ID 严格验证、Gatekeeper 评估及 stapled notarization ticket；任一密钥缺失或验证失败都中止。矩阵全部通过后才生成 `SHA256SUMS` 并发布 GitHub Release。平台命令和升级/卸载策略见 [`release.md`](release.md)。
+
+## 11. 隐私、安全与供应链边界
+
+生产 renderer 的 CSP 以 `default-src 'none'` 为基线并设置 `connect-src 'none'`，应用没有遥测、联网更新或崩溃上传。Vite 开发模式只对 localhost/127.0.0.1 的 HTTP/WebSocket 放行热更新。Electron 继续禁止 Node integration、权限请求、外部窗口与导航；源路径只在 main/utility/sidecar 边界内处理。
+
+FilmLab 原创内容使用根 `LICENSE` 的专有保留权利条款；npm 包保持 `private`/`UNLICENSED`。静态 LibRaw 0.22.1 分发明确选择 CDDL-1.0，并随包提供原文、版权、精确源码 archive SHA-512、vcpkg baseline 与构建配方。平台实际安装的 npm 许可证、原生组件清单和 CycloneDX SBOM 一并写入 `resources/legal/`，缺失时 `afterPack` 必须失败。
+
+安全工作流每次 push/PR 及每周运行 high/critical npm audit 并生成 SBOM；公开仓库或已启用 GitHub Code Security 的私有仓库运行 Dependency Review 与 CodeQL `security-extended`（JavaScript/TypeScript、C++）。隐私、报告、支持、诊断和迁移口径分别以根 `PRIVACY.md`、`SECURITY.md`、`SUPPORT.md`、[`diagnostics.md`](diagnostics.md) 和 [`migration.md`](migration.md) 为准。

@@ -28,6 +28,7 @@ async function main() {
   try {
     const sourceWorker = sourceWorkerPath(root, process.platform, process.arch);
     await pingWorker(installed.worker);
+    const legal = await verifyInstalledLegal(installed.legalRoot);
     const [packageSha256, sourceWorkerSha256, packagedWorkerSha256] = await Promise.all([
       sha256(packagePath), sha256(sourceWorker), sha256(installed.worker),
     ]);
@@ -58,7 +59,7 @@ async function main() {
       platform: process.platform,
       arch: process.arch,
       package: { name: basename(packagePath), bytes: (await stat(packagePath)).size, sha256: packageSha256 },
-      installed: { executable: installed.executable, worker: installed.worker, workerSha256: packagedWorkerSha256 },
+      installed: { executable: installed.executable, worker: installed.worker, workerSha256: packagedWorkerSha256, legal },
       upgradeReinstallVerified: installed.upgradeReinstallVerified,
       acceptance,
     }, null, 2) + "\n", "utf8");
@@ -81,6 +82,7 @@ async function installWindows(packagePath, workRoot) {
   await run(packagePath, installArgs);
   const executable = join(installRoot, "FilmLab.exe");
   const worker = join(installRoot, "resources", "raw-worker", `win32-${process.arch}`, "filmlab-raw-worker.exe");
+  const legalRoot = join(installRoot, "resources", "legal");
   await Promise.all([access(executable), access(worker)]);
   // A second installation to the same application identity and directory is
   // the upgrade contract; NSIS must replace in place without duplicate roots.
@@ -90,6 +92,7 @@ async function installWindows(packagePath, workRoot) {
   return {
     executable,
     worker,
+    legalRoot,
     upgradeReinstallVerified: true,
     cleanup: async () => {
       try {
@@ -116,10 +119,12 @@ async function installMac(packagePath, workRoot) {
     await run("ditto", [join(mount, appName), app]);
     const executable = join(app, "Contents", "MacOS", "FilmLab");
     const worker = join(app, "Contents", "Resources", "raw-worker", `darwin-${process.arch}`, "filmlab-raw-worker");
+    const legalRoot = join(app, "Contents", "Resources", "legal");
     await Promise.all([access(executable), access(worker)]);
     return {
       executable,
       worker,
+      legalRoot,
       upgradeReinstallVerified: false,
       cleanup: async () => {
         await run("hdiutil", ["detach", mount], { rejectOnNonZero: false });
@@ -142,13 +147,28 @@ async function installLinux(packagePath, workRoot) {
   const applicationRoot = join(extractRoot, "squashfs-root");
   const executable = join(applicationRoot, "AppRun");
   const worker = join(applicationRoot, "resources", "raw-worker", `linux-${process.arch}`, "filmlab-raw-worker");
+  const legalRoot = join(applicationRoot, "resources", "legal");
   await Promise.all([access(executable), access(worker)]);
   return {
     executable,
     worker,
+    legalRoot,
     upgradeReinstallVerified: false,
     cleanup: async () => rm(extractRoot, { recursive: true, force: true }),
   };
+}
+
+async function verifyInstalledLegal(legalRoot) {
+  const required = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "LibRaw-0.22.1.CDDL.txt", "LibRaw-0.22.1.COPYRIGHT.txt", "LibRaw-0.22.1.SOURCE.txt"];
+  await Promise.all(required.map((file) => access(join(legalRoot, file))));
+  const sbomName = (await readdir(legalRoot)).find((name) => /^FilmLab-\d+\.\d+\.\d+-sbom\.cdx\.json$/.test(name));
+  if (sbomName === undefined) throw new Error(`Installed legal bundle has no versioned CycloneDX SBOM: ${legalRoot}`);
+  const sbomPath = join(legalRoot, sbomName);
+  const sbom = JSON.parse(await readFile(sbomPath, "utf8"));
+  if (sbom.bomFormat !== "CycloneDX" || !Array.isArray(sbom.components)) throw new Error("Installed SBOM is not valid CycloneDX JSON.");
+  const libraw = sbom.components.find((component) => component.name === "LibRaw" && component.version === "0.22.1");
+  if (libraw === undefined) throw new Error("Installed SBOM does not identify LibRaw 0.22.1.");
+  return { root: legalRoot, sbom: sbomName, sbomSha256: await sha256(sbomPath), componentCount: sbom.components.length };
 }
 
 async function runInstalledRendererSmoke(executable, workRoot) {

@@ -189,13 +189,14 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: filmlab-${{ matrix.platform }}-${{ matrix.arch }}
+          name: filmlab-package-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
             release/*.exe
             release/*.dmg
             release/*.AppImage
             release/*.blockmap
             release/latest*.yml
+            build/generated/legal/FilmLab-*-sbom.cdx.json
             artifacts/installed-release.json
           if-no-files-found: error
 
@@ -206,23 +207,39 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
-          pattern: filmlab-*
+          pattern: filmlab-package-*
           path: release-downloads
           merge-multiple: true
 
       - name: Generate release checksums
+        id: release-metadata
         shell: bash
         run: |
+          version="$(node -p "require('./package.json').version")"
+          test "$GITHUB_REF_NAME" = "v$version"
           mkdir publish
-          find release-downloads -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.blockmap' -o -name 'latest*.yml' \) -exec cp {} publish/ \;
+          find release-downloads -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.blockmap' -o -name 'latest*.yml' -o -name 'FilmLab-*-sbom.cdx.json' \) -exec cp {} publish/ \;
           test "$(find publish -maxdepth 1 -type f | wc -l)" -ge 4
           cd publish
           find . -maxdepth 1 -type f -print0 \
             | sort -z \
             | xargs -0 sha256sum > SHA256SUMS
+          echo "sbom-path=publish/FilmLab-$version-sbom.cdx.json" >> "$GITHUB_OUTPUT"
+
+      - name: Attest release artifacts with CycloneDX SBOM
+        if: github.event.repository.private == false || vars.FILMLAB_ATTESTATIONS_ENABLED == 'true'
+        uses: actions/attest@v4
+        with:
+          subject-checksums: publish/SHA256SUMS
+          sbom-path: ${{ steps.release-metadata.outputs.sbom-path }}
 
       - uses: softprops/action-gh-release@v2
         with:

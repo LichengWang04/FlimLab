@@ -149,11 +149,19 @@ changing `decoderFingerprint` if the decoder's behavior changes.
 
 ## License and shipping notes
 
-LibRaw 0.22.1 is available under LGPL-2.1 or CDDL-1.0. Before release, choose a
-licensing route, retain the required notices/source offer if applicable and
-include the exact LibRaw license text with each binary bundle. The FilmLab
-source in this folder does not invoke LibRaw's rendered-image path, but linking
-and redistribution still require that review.
+FilmLab elects **CDDL-1.0** for its static distribution of unmodified LibRaw
+0.22.1. The LGPL route is not used for the packaged RAW worker. Every installer
+contains `resources/legal/LibRaw-0.22.1.CDDL.txt`, the upstream copyright
+notice, and a source notice identifying the exact 0.22.1 archive SHA-512,
+vcpkg baseline and build recipe. `scripts/verify-raw-sidecar.cjs` rejects a
+package if those materials or its CycloneDX SBOM are absent.
+
+The complete repository inventory is in `THIRD_PARTY_NOTICES.md`; generated
+platform-specific npm license texts and native notices live under
+`resources/legal/`. A LibRaw version, vcpkg baseline, build patch or static
+dependency change must update that inventory and source notice in the same
+commit. The FilmLab source in this folder does not invoke LibRaw's rendered-
+image path, but linking and redistribution remain subject to these notices.
 
 The bilinear demosaic is deterministic and deliberately conservative. It is a
 good linear input for the FilmLab negative pipeline, not a claim of a universal

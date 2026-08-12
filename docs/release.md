@@ -32,7 +32,7 @@ npm run verify:installed-release -- --package release/FilmLab-0.1.0-win-x64.exe
 - Windows：`WIN_CSC_LINK`、`WIN_CSC_KEY_PASSWORD`。安装器、主程序和已打包 RAW worker 的 Authenticode 状态都必须为 Valid。
 - macOS：`MAC_CSC_LINK`、`MAC_CSC_KEY_PASSWORD` 用于 Developer ID；`APPLE_API_KEY`、`APPLE_API_KEY_ID`、`APPLE_API_ISSUER` 用于 notarization。
 
-缺少密钥或签名验证失败会中止标签构建。矩阵全部通过后，工作流才发布 NSIS、两种架构 DMG、AppImage、更新元数据和 `SHA256SUMS` 到 GitHub Release。非标签 CI 产物明确只是未签名验证包，不能称为正式发行版。
+缺少密钥或签名验证失败会中止标签构建。矩阵全部通过后，工作流才发布 NSIS、两种架构 DMG、AppImage、更新元数据、CycloneDX SBOM 和 `SHA256SUMS` 到 GitHub Release。公开仓库自动用 `actions/attest@v4` 绑定包与 SBOM；私有仓库只有在支持 GitHub artifact attestations 的计划上设置 `FILMLAB_ATTESTATIONS_ENABLED=true` 后启用。非标签 CI 产物明确只是未签名验证包，不能称为正式发行版。
 
 `.github/workflows/a7rv-acceptance.yml` 是私有素材发行门禁。Windows/macOS 自托管 runner 先验证开发构建，再生成原生包、安装它，并通过安装后的程序重复真实 A7R V 冒烟。只有对应平台报告通过才能声明该平台受支持；Windows 结果不能推定 macOS 兼容。
 
@@ -45,4 +45,4 @@ npm run verify:installed-release -- --package release/FilmLab-0.1.0-win-x64.exe
 - macOS：Photography 分类，最低 macOS 13，hardened runtime，DMG 内提供 Applications 链接。
 - Linux：Graphics 分类 AppImage。AppImage 是便携包，因此安装验证定义为展开不可变文件系统并启动 `AppRun`。
 
-项目当前标记为 `UNLICENSED`；发布安装器不会自动授予源代码或捆绑第三方组件的再分发权。发布维护者必须持续满足 `native/raw-worker/README.md` 中的 LibRaw 及第三方声明义务。
+项目在 npm 元数据中保持 `private`/`UNLICENSED`，根 [`LICENSE`](../LICENSE) 给出正式的保留权利条款；发布安装器不会自动授予源代码再分发权。第三方权利不受该条款限制。FilmLab 对静态 LibRaw 0.22.1 明确选择 CDDL-1.0，每个包必须通过打包后钩子验证 `resources/legal/` 中的 CDDL、版权、源码获取说明、平台 npm 许可证和 SBOM。发布维护者必须同步更新 [`NOTICE`](../NOTICE)、[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) 与原生组件清单。

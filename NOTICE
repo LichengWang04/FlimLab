@@ -1,0 +1,27 @@
+FilmLab
+Copyright (c) 2026 Licheng Wang. All rights reserved.
+
+FilmLab contains third-party software. The following notices apply to the
+distributed desktop application and its native RAW worker. Complete license
+texts and the generated CycloneDX SBOM are installed under the application's
+resources/legal directory.
+
+LibRaw 0.22.1
+Copyright (C) 2008-2025 LibRaw LLC (https://www.libraw.org/)
+Includes work from dcraw by Dave Coffin, copyright 1997-2018.
+FilmLab elects the COMMON DEVELOPMENT AND DISTRIBUTION LICENSE (CDDL) 1.0 for
+its unmodified LibRaw distribution. LibRaw is statically linked into the RAW
+worker. The CDDL license, upstream copyright notice, exact source location,
+archive hash, vcpkg baseline, and build instructions accompany every package.
+
+This software is based in part on the work of the Independent JPEG Group.
+
+React and React DOM are copyright Meta Platforms, Inc. and affiliates and are
+provided under the MIT License. Lucide is provided under the ISC License.
+Sharp is provided under the Apache License 2.0; its platform packages bundle
+libvips and related libraries under their stated licenses, including
+LGPL-3.0-or-later where applicable.
+
+No third-party author or project endorses FilmLab. FilmLab's proprietary terms
+are offered by Licheng Wang alone and do not alter recipients' rights in any
+third-party component.

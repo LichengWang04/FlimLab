@@ -6,6 +6,9 @@ FilmLab follows [Semantic Versioning](https://semver.org/). This file records us
 
 ### Added
 
+- Proprietary root license, CDDL-1.0 LibRaw election, packaged third-party license bundle and combined npm/vcpkg CycloneDX SBOM.
+- High-severity dependency audit, Dependency Review and CodeQL security-extended workflows for JavaScript/TypeScript and C++.
+- Formal privacy, security reporting, diagnostics, migration and support policies.
 - Reproducible Windows NSIS, macOS DMG and Linux AppImage packages with generated FilmLab icons, version/publisher metadata and target-specific installation policy.
 - Installed-package smoke verification that launches the packaged renderer, pings the packaged RAW sidecar and, on private A7R V runners, repeats real ARW import/relink/export through the installed executable.
 - Tag release gates for Authenticode, Developer ID signing, Apple notarization tickets, checksums and GitHub Release publication.
@@ -18,6 +21,8 @@ FilmLab follows [Semantic Versioning](https://semver.org/). This file records us
 
 ### Changed
 
+- Production renderer CSP now denies every network connection; Vite development permits loopback HMR only.
+- Locked build dependencies were refreshed within existing constraints to resolve all npm advisories reported on 2026-08-13.
 - Project and recent absolute paths remain only in the machine-private `project-sessions-v1.json`; renderer APIs use opaque session IDs.
 - `benchmark:raw` now drives a real ARW through Electron and the native sidecar instead of using Sharp to read a TIFF proxy.
 - Batch export releases each completed full-resolution raster; atomic output retries clean dead-process artifacts without touching live exports.

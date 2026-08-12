@@ -1,0 +1,79 @@
+name: Security and dependency assurance
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "23 4 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-audit-and-sbom:
+    name: Dependency audit and CycloneDX SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install the locked dependency graph
+        run: npm ci
+
+      - name: Fail on high or critical npm advisories
+        run: npm audit --audit-level=high
+
+      - name: Validate legal inventory and generate CycloneDX SBOM
+        run: npm run check:compliance
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filmlab-cyclonedx-sbom
+          path: build/generated/legal/FilmLab-*-sbom.cdx.json
+          if-no-files-found: error
+
+  dependency-review:
+    name: Pull request dependency review
+    if: github.event_name == 'pull_request' && (github.event.repository.private == false || vars.FILMLAB_GHAS_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
+
+  codeql:
+    name: CodeQL JavaScript/TypeScript and C++
+    if: github.event.repository.private == false || vars.FILMLAB_GHAS_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript,c-cpp
+          build-mode: none
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@v4

@@ -1,5 +1,22 @@
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import react from "@vitejs/plugin-react";
+import type { Plugin } from "vite";
+
+function developmentLoopbackCsp(): Plugin {
+  return {
+    name: "filmlab-development-loopback-csp",
+    transformIndexHtml: {
+      order: "pre",
+      handler(html, context) {
+        if (context.server === undefined) return html;
+        return html.replace(
+          "connect-src 'none'",
+          "connect-src 'self' ws://localhost:* ws://127.0.0.1:* http://localhost:* http://127.0.0.1:*",
+        );
+      },
+    },
+  };
+}
 
 export default defineConfig({
   main: {
@@ -20,6 +37,8 @@ export default defineConfig({
     },
   },
   renderer: {
-    plugins: [react()],
+    // Production has connect-src 'none'. Only Vite development receives the
+    // explicit loopback exception required for HMR; no remote host is allowed.
+    plugins: [developmentLoopbackCsp(), react()],
   },
 });
