@@ -22,6 +22,7 @@ class RecordingProcessingService {
   }> = [];
   public maximumActive = 0;
   public readonly releasedAssetIds: string[] = [];
+  public onExportStarted?: (assetId: string) => void;
   private active = 0;
 
   public async exportTiff(
@@ -32,6 +33,7 @@ class RecordingProcessingService {
     this.active += 1;
     this.maximumActive = Math.max(this.maximumActive, this.active);
     try {
+      this.onExportStarted?.(assetId);
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
       this.calls.push({ assetId, sourcePath, request });
     } finally {
@@ -194,6 +196,13 @@ test("batch cancellation finishes at most the active file and starts no later so
   context.after(async () => rm(directory, { recursive: true, force: true }));
   const processing = new RecordingProcessingService();
   const service = new BatchService(processing as unknown as ProcessingService);
+  let signalFirstExportStarted: (() => void) | undefined;
+  const firstExportStarted = new Promise<void>((resolve) => {
+    signalFirstExportStarted = resolve;
+  });
+  processing.onExportStarted = (assetId) => {
+    if (assetId === "frame-a") signalFirstExportStarted?.();
+  };
   const item = {
     mode: "generic" as const,
     tone: { exposureStops: 0, contrast: 1, highlightCompression: 0, saturation: 1 },
@@ -203,7 +212,7 @@ test("batch cancellation finishes at most the active file and starts no later so
     { item: { ...item, assetId: "frame-a" }, sourcePath: "a.ARW", sourceName: "a.ARW" },
     { item: { ...item, assetId: "frame-b" }, sourcePath: "b.ARW", sourceName: "b.ARW" },
   ], directory);
-  await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  await firstExportStarted;
   service.cancel(started.id);
   const completed = await waitForTerminalJob(service, started.id);
 
