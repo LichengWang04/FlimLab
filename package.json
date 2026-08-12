@@ -1,0 +1,44 @@
+{
+  "name": "filmlab-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./out/main/index.js",
+  "description": "A deterministic, linear-light core for camera-scanned film negatives.",
+  "scripts": {
+    "check:repo": "node scripts/check-repository-hygiene.cjs",
+    "check:repo:staged": "node scripts/check-repository-hygiene.cjs --staged",
+    "precommit": "npm run check:repo:staged && npm run check",
+    "verify:test-data": "node scripts/verify-local-test-data.cjs",
+    "test": "node --experimental-strip-types --test test/photon-transfer.test.ts test/core.test.ts test/repair.test.ts test/color-card.test.ts test/color-trust.test.ts test/project-service.test.ts test/frame-recipes.test.ts test/precompute-plan.test.ts test/batch-service.test.ts test/calibration.test.ts test/tiff-codec.test.ts test/input-color.test.ts test/source-registry.test.ts test/calibration-profile-service.test.ts test/raw-sidecar-release.test.ts test/preview-service.test.ts test/preview-interaction.test.ts test/preview-layout.test.ts test/image-worker-performance.test.ts test/decoded-preview-cache.test.ts test/web-demo.test.ts test/waveform.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run test",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "benchmark:preview": "node --experimental-strip-types scripts/benchmark-preview.ts",
+    "benchmark:raw": "node --experimental-strip-types scripts/benchmark-real-source.ts",
+    "verify:raw-sidecar": "node scripts/verify-raw-sidecar.cjs --ping",
+    "start": "electron-vite preview",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:linux": "npm run build && electron-builder --linux"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "electron": "^43.1.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.3.6"
+  },
+  "dependencies": {
+    "lucide-react": "^1.24.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "sharp": "^0.35.3"
+  }
+}

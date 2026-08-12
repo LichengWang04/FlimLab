@@ -1,0 +1,123 @@
+name: RAW sidecar release
+
+on:
+  pull_request:
+    paths:
+      - native/raw-worker/**
+      - scripts/verify-raw-sidecar.cjs
+      - electron-builder.yml
+      - package.json
+      - package-lock.json
+      - .github/workflows/raw-sidecar-release.yml
+  push:
+    branches:
+      - main
+    tags:
+      - v*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-package:
+    name: ${{ matrix.platform }}-${{ matrix.arch }} RAW sidecar
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            platform: win32
+            electron_target: win
+            arch: x64
+            triplet: x64-windows-static
+            requires_codesign: true
+          - runner: macos-15-intel
+            platform: darwin
+            electron_target: mac
+            arch: x64
+            triplet: x64-osx
+            requires_codesign: true
+          - runner: macos-15
+            platform: darwin
+            electron_target: mac
+            arch: arm64
+            triplet: arm64-osx
+            requires_codesign: true
+          - runner: ubuntu-22.04
+            platform: linux
+            electron_target: linux
+            arch: x64
+            triplet: x64-linux
+            requires_codesign: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # vcpkg's binary cache keeps LibRaw and nlohmann-json builds reusable
+      # across runs. CMake runs its manifest install from native/raw-worker.
+      - uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgJsonGlob: '**/native/raw-worker/vcpkg.json'
+
+      - run: npm ci
+        shell: bash
+
+      - name: Build target sidecar into Electron's resource input tree
+        shell: bash
+        run: |
+          cmake -S native/raw-worker -B build/raw-worker/${{ matrix.platform }}-${{ matrix.arch }} \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_MANIFEST_DIR="$GITHUB_WORKSPACE/native/raw-worker" \
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DFILMLAB_RAW_WORKER_OUTPUT_DIR="$GITHUB_WORKSPACE/native/raw-worker/out/${{ matrix.platform }}-${{ matrix.arch }}"
+          cmake --build build/raw-worker/${{ matrix.platform }}-${{ matrix.arch }} --config Release --parallel
+
+      - name: Verify RAW protocol and Bayer-only release capability
+        shell: bash
+        run: >-
+          node scripts/verify-raw-sidecar.cjs
+          --root "$GITHUB_WORKSPACE"
+          --platform ${{ matrix.platform }}
+          --arch ${{ matrix.arch }}
+          --ping
+
+      - run: npm run check
+        shell: bash
+
+      - name: Package current platform with its verified sidecar
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "${{ matrix.requires_codesign }}" == "true" ]]; then
+            export CSC_LINK='${{ secrets.MAC_CSC_LINK }}'
+            export CSC_KEY_PASSWORD='${{ secrets.MAC_CSC_KEY_PASSWORD }}'
+            export WIN_CSC_LINK='${{ secrets.WIN_CSC_LINK }}'
+            export WIN_CSC_KEY_PASSWORD='${{ secrets.WIN_CSC_KEY_PASSWORD }}'
+            export APPLE_API_KEY='${{ secrets.APPLE_API_KEY }}'
+            export APPLE_API_KEY_ID='${{ secrets.APPLE_API_KEY_ID }}'
+            export APPLE_API_ISSUER='${{ secrets.APPLE_API_ISSUER }}'
+            npx electron-builder --${{ matrix.electron_target }} --${{ matrix.arch }} --publish never --config.forceCodeSigning=true
+          else
+            npx electron-builder --${{ matrix.electron_target }} --${{ matrix.arch }} --publish never
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filmlab-raw-worker-${{ matrix.platform }}-${{ matrix.arch }}
+          path: native/raw-worker/out/${{ matrix.platform }}-${{ matrix.arch }}/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filmlab-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release/
+          if-no-files-found: error

@@ -1,0 +1,16 @@
+{
+  "name": "filmlab-raw-worker",
+  "version-string": "1.0.0",
+  "description": "Native LibRaw decoder sidecar for FilmLab",
+  "builtin-baseline": "cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3",
+  "dependencies": [
+    "nlohmann-json",
+    "libraw"
+  ],
+  "overrides": [
+    {
+      "name": "libraw",
+      "version": "0.22.1"
+    }
+  ]
+}

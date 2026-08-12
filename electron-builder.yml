@@ -1,0 +1,35 @@
+appId: com.filmlab.desktop
+productName: FilmLab
+beforePack: ./scripts/verify-raw-sidecar.cjs
+afterPack: ./scripts/verify-raw-sidecar.cjs
+directories:
+  output: release
+files:
+  - out/**/*
+  - package.json
+asar: true
+asarUnpack:
+  - "**/*.node"
+  - "**/node_modules/sharp/**/*"
+  - "**/node_modules/@img/**/*"
+extraResources:
+  - from: native/raw-worker/out
+    to: raw-worker
+    filter:
+      - "**/*"
+win:
+  # electron-builder signs .exe extra resources with the configured Windows
+  # certificate, including the RAW sidecar. Tag builds require that certificate.
+  signExts:
+    - .exe
+  target:
+    - nsis
+mac:
+  # @electron/osx-sign walks executable files below Contents, so the sidecar
+  # under Contents/Resources/raw-worker is signed with the app bundle.
+  hardenedRuntime: true
+  target:
+    - dmg
+linux:
+  target:
+    - AppImage

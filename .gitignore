@@ -1,0 +1,19 @@
+node_modules/
+.tools/
+.agents/
+.reasonix/
+coverage/
+dist/
+out/
+release/
+*.tsbuildinfo
+*.log
+.DS_Store
+native/raw-worker/build/
+native/raw-worker/vcpkg_installed/
+
+# Real camera sources and locally rendered masters are private test material.
+# Their reproducible identities live in test-data/a7rv-local-manifest.json.
+/A7R5_RAW/
+/*-positive.tif
+/*-positive.tiff

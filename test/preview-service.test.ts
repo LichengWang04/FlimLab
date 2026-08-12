@@ -1,0 +1,58 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { renderDemoPreview } from "../src/main/preview-service.ts";
+import { defaultProcessingRecipe, type PreviewRequest } from "../src/shared/contracts.ts";
+
+function request(revision: number, rotation: 0 | 90 = 0, exposureStops = 0, maxEdge = 256): PreviewRequest {
+  return {
+    revision,
+    assetId: "demo-negative",
+    maxEdge,
+    mode: "preset",
+    view: "positive",
+    tone: { exposureStops, contrast: 1.16, highlightCompression: 0.5, saturation: 1.04 },
+    processing: {
+      ...defaultProcessingRecipe,
+      baseRoi: { ...defaultProcessingRecipe.baseRoi },
+      geometry: { ...defaultProcessingRecipe.geometry, rotation },
+      restoration: { ...defaultProcessingRecipe.restoration },
+    },
+  };
+}
+
+test("demo preview reuses invariant processing while applying new tone settings", () => {
+  const first = renderDemoPreview(request(1));
+  const adjusted = renderDemoPreview(request(2, 0, 0.5));
+
+  assert.equal(first.width, adjusted.width);
+  assert.equal(first.height, adjusted.height);
+  assert.deepEqual(first.base, adjusted.base);
+  assert.equal(first.sceneLinear?.length, first.width * first.height * 3);
+  assert.deepEqual(first.sceneLinear, adjusted.sceneLinear);
+  assert.ok((first.displayWhitePoint ?? 0) > 0);
+  assert.equal(first.gpuPipeline?.sourceLinear?.length, 256 * Math.round(256 * 0.664) * 3);
+  assert.equal(first.gpuPipeline?.film.kind, "preset");
+  assert.deepEqual(first.colorTrust, { level: "uncalibrated", reason: "default-preset" });
+  assert.notDeepEqual(first.rgba, adjusted.rgba);
+});
+
+test("demo preview applies geometry and reports the transformed dimensions", () => {
+  const normal = renderDemoPreview(request(1));
+  const rotated = renderDemoPreview(request(2, 90));
+
+  assert.equal(rotated.width, normal.height);
+  assert.equal(rotated.height, normal.width);
+});
+
+test("demo preview can alternate quick and settled resolutions without losing tone updates", () => {
+  const quick = renderDemoPreview(request(11, 0, 0, 256));
+  const settled = renderDemoPreview(request(12, 0, 0, 384));
+  const adjustedQuick = renderDemoPreview(request(13, 0, 0.4, 256));
+
+  assert.equal(quick.width, 256);
+  assert.equal(settled.width, 384);
+  assert.equal(adjustedQuick.width, quick.width);
+  assert.deepEqual(adjustedQuick.base, quick.base);
+  assert.notDeepEqual(adjustedQuick.rgba, quick.rgba);
+});
