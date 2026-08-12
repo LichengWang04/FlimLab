@@ -66,6 +66,13 @@ if(NOT FILMLAB_LIBRAW_TARGET)
 endif()
 
 add_executable(filmlab-raw-worker src/main.cpp)
+if(MSVC)
+  # The release workflow intentionally uses x64-windows-static. Its vcpkg
+  # libraries are compiled with /MT, so the sidecar must use the same CRT or
+  # MSVC rejects the link with LNK2038 RuntimeLibrary mismatches.
+  set_property(TARGET filmlab-raw-worker PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 target_link_libraries(filmlab-raw-worker PRIVATE
   ${FILMLAB_LIBRAW_TARGET}
   nlohmann_json::nlohmann_json)

@@ -113,6 +113,7 @@ test("macOS native dependencies honour the application's minimum system version"
 });
 
 test("RAW sidecar exposes versioned edge-aware CPU and compact GPU Bayer paths", async () => {
+  const cmake = await readFile(new URL("../native/raw-worker/CMakeLists.txt", import.meta.url), "utf8");
   const source = await readFile(
     new URL("../native/raw-worker/src/main.cpp", import.meta.url),
     "utf8",
@@ -127,4 +128,5 @@ test("RAW sidecar exposes versioned edge-aware CPU and compact GPU Bayer paths",
   assert.match(source, /\{"bayerPattern", gpuBayer \? rgbPattern/);
   assert.match(source, /normalizationRangeDnRgb/);
   assert.match(source, /raw\.imgdata\.other\.iso_speed/);
+  assert.match(cmake, /MSVC_RUNTIME_LIBRARY "MultiThreaded\$<\$<CONFIG:Debug>:Debug>"/);
 });
