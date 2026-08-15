@@ -125,6 +125,7 @@ export class BatchService {
             calibrationProfile: source.calibrationProfile,
             processing: source.item.processing,
             dmaxOverride: source.item.dmaxOverride,
+            dmaxChannelRange: source.item.dmaxChannelRange,
           });
         } catch {
           job = this.requireJob(id);

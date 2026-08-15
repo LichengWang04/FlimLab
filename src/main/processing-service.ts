@@ -79,6 +79,7 @@ export class ProcessingService {
         tone: request.tone,
         processing: request.processing,
         dmaxOverride: request.dmaxOverride,
+        dmaxChannelRange: request.dmaxChannelRange,
         dmaxSampleRoi: request.dmaxSampleRoi,
         gpuInteractive: request.gpuInteractive,
         gpuReuseSourceKey: request.gpuReuseSourceKey,
@@ -145,6 +146,7 @@ export class ProcessingService {
       readonly calibrationProfile?: CalibrationProfileDocument;
       readonly processing?: ProcessingRecipe;
       readonly dmaxOverride?: number;
+      readonly dmaxChannelRange?: import("../core/types.ts").Rgb;
     },
   ): Promise<TiffExportSummary> {
     await this.ensureLoaded(assetId, sourcePath);
@@ -158,6 +160,7 @@ export class ProcessingService {
       tone: request.tone,
       processing: request.processing,
       dmaxOverride: request.dmaxOverride,
+      dmaxChannelRange: request.dmaxChannelRange,
       calibrationProfile: request.calibrationProfile,
     });
     if (response.kind !== "export-tiff") {
@@ -206,15 +209,11 @@ export class ProcessingService {
           : !loaded.gpuBayer
       )
     ) {
-      return {
-        assetId,
-        width: 0,
-        height: 0,
-        bitDepth: 16,
-        sourceDomain: "transmission-linear-rgb",
-        decoder: "sharp-raster",
-        warnings: [],
-      };
+      // No new decode is needed, but callers (GPU master export, XMP
+      // metadata, colour-trust evaluation) still expect the real source
+      // summary. A synthetic placeholder would silently misreport the
+      // decoder/domain/fingerprint and could wrongly reject DNG exports.
+      return { ...loaded.summary };
     }
 
     // A load request must never be deduplicated across different decode
@@ -246,6 +245,7 @@ export class ProcessingService {
           previewMaxEdge,
           gpuBayer: response.result.sourceDomain === "camera-linear-bayer",
           gpuBayerAttempted: preferGpuBayer,
+          summary: response.result,
         });
         return response.result;
       })
@@ -403,6 +403,8 @@ interface LoadedPath {
   readonly gpuBayer: boolean;
   /** Prevents an older sidecar from being probed again on every frame. */
   readonly gpuBayerAttempted: boolean;
+  /** The real decode summary returned by the first load of this path. */
+  readonly summary: DecodedSourceSummary;
 }
 
 interface PendingRequest {

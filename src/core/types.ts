@@ -68,12 +68,16 @@ export interface BaseSample {
   readonly confidence: number;
 }
 
-/** Scalar density anchors derived from the scan. Dmin tracks the unexposed
- * film-base density, while Dmax is a robust high-density scene estimate. */
+/** Density anchors derived from the scan. Dmin tracks the unexposed film-base
+ * density, while Dmax is a robust high-density scene estimate. A channelRange
+ * is present only when a neutral high-density reference was measured or
+ * inferred conservatively. */
 export interface DensityAnchors {
   readonly dmin: number;
   readonly dmax: number;
   readonly range: number;
+  /** Optional per-channel density ranges measured from a neutral Dmax ROI. */
+  readonly channelRange?: Rgb;
 }
 
 export interface DensityAnchorOptions {
@@ -81,6 +85,9 @@ export interface DensityAnchorOptions {
   readonly dmaxOverride?: number;
   /** ROI used only while measuring a manual Dmax sample. */
   readonly dmaxRoi?: NormalizedRoi;
+  /** Opt-in inference from a neutral high-density tail. It is disabled by
+   * default because a scene highlight is not a trustworthy neutral reference. */
+  readonly inferChannelRange?: boolean;
 }
 
 export interface CurvePoint {
@@ -119,6 +126,10 @@ export type FilmMode =
       readonly kind: "generic";
       readonly densityGain?: Rgb;
       readonly whiteBalance?: Rgb;
+      /** Optional density-domain cross-talk correction. */
+      readonly densityMatrix?: Matrix3;
+      /** Density-domain chroma expansion before the H&D inversion. */
+      readonly preSaturation?: number;
     }
   | {
       readonly kind: "calibrated";
@@ -147,6 +158,10 @@ export interface PipelineSettings {
   readonly dmaxOverride?: number;
   /** Temporary ROI used to measure a manual Dmax sample. */
   readonly dmaxSampleRoi?: NormalizedRoi;
+  /** Frozen per-channel Dmax ranges from a neutral reference frame. */
+  readonly dmaxChannelRange?: Rgb;
+  /** Opt in to guessing a neutral per-channel Dmax from scene content. */
+  readonly inferChannelRange?: boolean;
   readonly tone?: Partial<ToneSettings>;
   readonly restoration?: import("./repair.ts").RestorationSettings;
   /** Optional sensor-noise regularization used only before log-density. */

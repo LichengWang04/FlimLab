@@ -7,6 +7,17 @@ FilmLab follows [Semantic Versioning](https://semver.org/). This file records us
 ### Changed
 
 - Film-inversion colour pipeline: preset curves are resampled onto each frame's measured Dmax−Dmin (calibrated profiles keep their absolute domain), curve endpoints extrapolate in the log domain instead of hard-clamping, cross-talk matrix negatives clamp at inversion, calibrated white balance moves ahead of the 3D LUT, tone contrast is a log-domain power law anchored at 0.18 mid grey, hue-preserving gamut compression is always active, and scRGB TIFF inputs floor out-of-gamut negatives. CPU and WebGL2 paths share the same formulas.
+- Standard negative conversion now uses a conservative neutral-high-density analysis: a manually selected Dmax ROI records per-channel density ranges, while automatic mode only enables the same correction when the high-density tail contains enough low-chroma samples. Frozen ranges are reused across a roll and carried through GPU preview, tiled masters and CPU fallback.
+- Standard mode no longer guesses a per-channel Dmax from scene highlights by default; an explicit advanced toggle enables that heuristic, and the new density-domain pre-saturation control defaults to 1.08 and is shared by CPU/WebGL2/project recipes.
+
+### Fixed
+
+- Project autosave no longer loops: a successful save that does not change the backup count no longer replaces the session object, and the autosave effect depends on session identity fields instead of the whole session.
+- Tiled WebGL2 master exports no longer stall indefinitely while the window is hidden or minimized; the tile loop yields with a timer instead of `requestAnimationFrame`.
+- Repeated GPU exports of the same frame now reuse the real decode summary instead of a placeholder, so calibrated colour trust, DNG eligibility and XMP source metadata stay correct.
+- Non-finite decoded pixels (corrupt float TIFFs, ICC overflow) map to the film base instead of failing the whole calibrated-mode frame.
+- Demo-negative previews clamp their edge length in the main process and reject full-resolution source payloads, removing a multi-gigabyte allocation vector.
+- Standard-mode inversion caps per-channel normalization at 4× the sampled Dmax anchor, so a badly sampled low-density ROI can no longer amplify highlights to 10^20.
 
 ### Added
 

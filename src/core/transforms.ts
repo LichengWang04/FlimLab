@@ -18,11 +18,23 @@ const ONE: Rgb = [1, 1, 1];
  * profiles keep their absolute density domain (that domain is the
  * device-match claim and must not follow frame content).
  */
-export function applyFilmTransform(density: Raster, mode: FilmMode, densityRange?: number): Raster {
+export function applyFilmTransform(
+  density: Raster,
+  mode: FilmMode,
+  densityRange?: number,
+  densityChannelRange?: Rgb,
+): Raster {
   density.assertDomain("relative-density");
   switch (mode.kind) {
     case "generic":
-      return applyGenericTransform(density, mode.densityGain ?? ONE, mode.whiteBalance ?? ONE);
+      return applyGenericTransform(
+        density,
+        mode.densityGain ?? ONE,
+        mode.whiteBalance ?? ONE,
+        densityChannelRange,
+        mode.densityMatrix,
+        mode.preSaturation,
+      );
     case "calibrated":
       return applyCalibratedTransform(density, mode.profile, mode.whiteBalance ?? ONE);
   }
@@ -32,18 +44,62 @@ export function applyGenericTransform(
   density: Raster,
   densityGain: Rgb = ONE,
   whiteBalance: Rgb = ONE,
+  densityChannelRange?: Rgb,
+  densityMatrix?: Matrix3,
+  preSaturation = 1,
 ): Raster {
   density.assertDomain("relative-density");
   validateRgb(densityGain, "densityGain");
   validateRgb(whiteBalance, "whiteBalance");
+  if (densityChannelRange !== undefined) validateDensityChannelRange(densityChannelRange);
+  if (densityMatrix !== undefined) validateMatrix(densityMatrix);
+  if (!Number.isFinite(preSaturation) || preSaturation < 0.5 || preSaturation > 2) {
+    throw new Error("preSaturation must be finite and between 0.5 and 2.");
+  }
 
   const target = new Raster(density.width, density.height, "scene-linear-rgb");
   for (let offset = 0; offset < density.data.length; offset += 3) {
-    target.data[offset] = Math.max(0, Math.pow(10, density.data[offset] * densityGain[0]) - 1) * whiteBalance[0];
-    target.data[offset + 1] = Math.max(0, Math.pow(10, density.data[offset + 1] * densityGain[1]) - 1) * whiteBalance[1];
-    target.data[offset + 2] = Math.max(0, Math.pow(10, density.data[offset + 2] * densityGain[2]) - 1) * whiteBalance[2];
+    const source: Rgb = [
+      Math.max(0, density.data[offset]),
+      Math.max(0, density.data[offset + 1]),
+      Math.max(0, density.data[offset + 2]),
+    ];
+    const corrected = densityMatrix === undefined ? source : clampDensity(multiplyMatrix(densityMatrix, source));
+    const mean = (corrected[0] + corrected[1] + corrected[2]) / 3;
+    const separated: Rgb = [
+      Math.max(0, mean + (corrected[0] - mean) * preSaturation),
+      Math.max(0, mean + (corrected[1] - mean) * preSaturation),
+      Math.max(0, mean + (corrected[2] - mean) * preSaturation),
+    ];
+    target.data[offset] = genericPositive(separated[0], densityGain[0], densityChannelRange?.[0]) * whiteBalance[0];
+    target.data[offset + 1] = genericPositive(separated[1], densityGain[1], densityChannelRange?.[1]) * whiteBalance[1];
+    target.data[offset + 2] = genericPositive(separated[2], densityGain[2], densityChannelRange?.[2]) * whiteBalance[2];
   }
   return target;
+}
+
+/**
+ * A neutral high-density reference supplies a per-channel H&D scale for the
+ * uncalibrated path. Without it, the generic inverse is intentionally the
+ * conservative relative-transmission transform. With it, the sampled Dmax
+ * point lands on the same normalized density in all channels, which removes
+ * the common blue/cyan shadow cast without pretending to be a camera profile.
+ */
+function genericPositive(density: number, gain: number, channelRange?: number): number {
+  const nonNegativeDensity = Math.max(0, density);
+  // Cap the normalized density so a poorly sampled Dmax ROI (near-zero
+  // channel range) cannot amplify highlights by orders of magnitude: the
+  // worst case stays at 10^4-1, below the pre-anchor path's 10^6 ceiling.
+  // Pixels beyond 4x the measured anchor are speculars that tone mapping
+  // will compress to display white anyway.
+  const normalizedDensity = channelRange === undefined
+    ? nonNegativeDensity
+    : Math.min(nonNegativeDensity / channelRange, 4);
+  return Math.max(0, Math.pow(10, normalizedDensity * gain) - 1);
+}
+
+function clampDensity(value: Rgb): Rgb {
+  return [Math.max(0, value[0]), Math.max(0, value[1]), Math.max(0, value[2])];
 }
 
 export function applyPresetTransform(
@@ -170,6 +226,12 @@ function dot(left: Rgb, right: Rgb): number {
 function validateRgb(value: Rgb, name: string): void {
   if (value.some((channel) => !Number.isFinite(channel) || channel < 0)) {
     throw new Error(name + " must contain finite, non-negative values.");
+  }
+}
+
+function validateDensityChannelRange(value: Rgb): void {
+  if (value.some((channel) => !Number.isFinite(channel) || channel < 0.05 || channel > 16)) {
+    throw new Error("densityChannelRange must contain finite values between 0.05 and 16 D.");
   }
 }
 

@@ -149,6 +149,46 @@ test("manual Dmax overrides automatic anchors and can be measured from an ROI", 
   near(sampled.dmax, Math.log10(2) + 0.3);
 });
 
+test("a neutral Dmax ROI records per-channel density ranges", () => {
+  const density = raster("relative-density", 2, 1, [
+    0.1, 0.2, 0.3,
+    0.4, 0.5, 0.6,
+  ]);
+  const anchors = measureDensityAnchors(
+    [0.5, 0.5, 0.5],
+    density,
+    1,
+    { dmaxRoi: { x: 0, y: 0, width: 1, height: 1 } },
+  );
+
+  assert.ok(anchors.channelRange !== undefined);
+  near(anchors.channelRange[0], 0.4);
+  near(anchors.channelRange[1], 0.5);
+  near(anchors.channelRange[2], 0.6);
+});
+
+test("automatic density anchors only infer channel ranges from a neutral high-density tail", () => {
+  const values: number[] = [];
+  for (let pixel = 0; pixel < 100; pixel += 1) {
+    if (pixel < 12) {
+      values.push(0.92, 0.9, 0.91);
+    } else {
+      values.push(0.1 + (pixel % 5) * 0.01, 0.2, 0.65);
+    }
+  }
+  const anchors = measureDensityAnchors(
+    [0.5, 0.5, 0.5],
+    raster("relative-density", 100, 1, values),
+    0.995,
+    { inferChannelRange: true },
+  );
+
+  assert.ok(anchors.channelRange !== undefined);
+  near(anchors.channelRange[0], 0.92);
+  near(anchors.channelRange[1], 0.9);
+  near(anchors.channelRange[2], 0.91);
+});
+
 test("generic mode maps higher negative density to a brighter positive", () => {
   const density = raster("relative-density", 2, 1, [
     0, 0, 0,
@@ -161,6 +201,76 @@ test("generic mode maps higher negative density to a brighter positive", () => {
   near(result.data[4], 1);
   near(result.data[5], 1);
   assert.equal(result.domain, "scene-linear-rgb");
+});
+
+test("generic mode keeps scene-derived channel Dmax disabled unless opted in", () => {
+  const values: number[] = [];
+  for (let pixel = 0; pixel < 100; pixel += 1) {
+    values.push(pixel < 12 ? 0.92 : 0.1, pixel < 12 ? 0.9 : 0.2, pixel < 12 ? 0.91 : 0.65);
+  }
+  const anchors = measureDensityAnchors(
+    [0.5, 0.5, 0.5],
+    raster("relative-density", 100, 1, values),
+  );
+  assert.equal(anchors.channelRange, undefined);
+});
+
+test("generic mode uses a neutral Dmax anchor to align channel response", () => {
+  const density = raster("relative-density", 1, 1, [0.4, 0.5, 0.6]);
+  const result = applyFilmTransform(
+    density,
+    { kind: "generic" },
+    undefined,
+    [0.4, 0.5, 0.6],
+  );
+
+  near(result.data[0], 9);
+  near(result.data[1], 9);
+  near(result.data[2], 9);
+});
+
+test("generic mode can separate density chroma before inversion", () => {
+  const result = applyFilmTransform(
+    raster("relative-density", 1, 1, [0.1, 0.2, 0.3]),
+    {
+      kind: "generic",
+      preSaturation: 2,
+      densityMatrix: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    },
+  );
+  near(result.data[0], 0);
+  near(result.data[1], Math.pow(10, 0.2) - 1);
+  near(result.data[2], Math.pow(10, 0.4) - 1);
+});
+
+test("relative density sanitizes non-finite transmission samples", () => {
+  const source = raster("transmission-linear-rgb", 3, 1, [
+    0.5, 0.5, 0.5,
+    Number.NaN, 0.2, 0.2,
+    0.2, Number.POSITIVE_INFINITY, 0.2,
+  ]);
+  const density = toRelativeDensity(source, [1, 1, 1]);
+
+  for (let index = 0; index < density.data.length; index += 1) {
+    assert.ok(Number.isFinite(density.data[index]), `density sample ${index} must be finite`);
+  }
+  // Corrupt samples map to the film base (density 0) instead of failing the frame.
+  near(density.data[3], 0);
+  near(density.data[7], 0);
+});
+
+test("generic mode caps amplification beyond a small channel anchor", () => {
+  const result = applyFilmTransform(
+    raster("relative-density", 1, 1, [2, 2, 2]),
+    { kind: "generic" },
+    undefined,
+    [0.1, 0.1, 0.1],
+  );
+
+  // Without the cap, 2 / 0.1 = 20 would reach 10^20 from a badly sampled ROI.
+  near(result.data[0], Math.pow(10, 4) - 1);
+  near(result.data[1], Math.pow(10, 4) - 1);
+  near(result.data[2], Math.pow(10, 4) - 1);
 });
 
 test("calibrated mode applies its curves then its colour matrix", () => {

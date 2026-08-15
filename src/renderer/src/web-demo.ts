@@ -151,6 +151,9 @@ function cloneDefaultProcessing(): ProcessingRecipe {
     baseRoi: { ...defaultProcessingRecipe.baseRoi },
     geometry: { ...defaultProcessingRecipe.geometry },
     restoration: { ...defaultProcessingRecipe.restoration },
+    channelGains: [...(defaultProcessingRecipe.channelGains ?? [1, 1, 1])] as [number, number, number],
+    autoNeutralDmax: defaultProcessingRecipe.autoNeutralDmax,
+    preSaturation: defaultProcessingRecipe.preSaturation,
   };
 }
 
@@ -279,6 +282,7 @@ function createPreview(request: PreviewRequest): PreviewResult {
       baseRgb,
       film: demoGpuFilm(request.mode),
       densityRange: Math.max(0, dmax - dmin),
+      densityChannelRange: request.dmaxChannelRange,
     },
     base: {
       rgb: baseRgb,
@@ -295,6 +299,7 @@ function createPreview(request: PreviewRequest): PreviewResult {
       dmin,
       dmax,
       range: Math.max(0, dmax - dmin),
+      channelRange: request.dmaxChannelRange,
     },
     colorTrust: uncharacterizedColorTrust(request.mode),
     elapsedMs: Math.round(performance.now() - startedAt),

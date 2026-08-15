@@ -44,6 +44,8 @@ export interface FilmRoll {
 export interface RollDmaxOverride {
   readonly value: number;
   readonly sourceFrameId: string;
+  /** Optional per-channel ranges sampled with the same neutral Dmax ROI. */
+  readonly channelRange?: readonly [number, number, number];
 }
 
 export interface ProjectRecipe {

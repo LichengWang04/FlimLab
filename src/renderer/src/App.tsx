@@ -371,6 +371,7 @@ export function App(): ReactNode {
       : tone,
     calibrationProfileId,
     dmaxOverride: activeRoll.manualDmax?.value ?? null,
+    dmaxChannelRange: activeRoll.manualDmax?.channelRange ?? null,
     processing: fullGpuPreviewActive
       ? {
           baseRoi: previewProcessing.baseRoi,
@@ -378,6 +379,8 @@ export function App(): ReactNode {
           // The GPU film transform is supplied by the worker payload rather
           // than reconstructed from live renderer uniforms.
           channelGains: previewProcessing.channelGains ?? [1, 1, 1],
+          autoNeutralDmax: previewProcessing.autoNeutralDmax ?? false,
+          preSaturation: previewProcessing.preSaturation ?? 1.08,
         }
       : previewProcessing,
     // Relinking an already-linked asset does not change its renderer-safe ID.
@@ -391,6 +394,7 @@ export function App(): ReactNode {
     calibrationProfileId,
     previewProcessing,
     activeRoll.manualDmax?.value,
+    activeRoll.manualDmax?.channelRange,
   );
   const precomputePlan = useMemo(
     () => createFramePrecomputePlan(activeRoll, activeAssetId, linkedAssetIds),
@@ -736,7 +740,11 @@ export function App(): ReactNode {
       void projectSaveQueue.current
         .enqueue(() => api.saveProject(projectSession.id, latestProjectDraft))
         .then((result) => {
-          setProjectSession((current) => current?.id === projectSession.id
+          // Only replace the session object when the backup count actually
+          // changed. The effect below depends on the session identity, so an
+          // unconditional spread here would retrigger a save after every
+          // successful save and loop indefinitely.
+          setProjectSession((current) => current?.id === projectSession.id && current.backupCount !== result.backupCount
             ? { ...current, backupCount: result.backupCount }
             : current);
           if (saveRevision.current === nextSaveRevision) {
@@ -757,7 +765,11 @@ export function App(): ReactNode {
         projectAutosaveTimer.current = undefined;
       }
     };
-  }, [api, latestProjectDraft, projectLoaded, projectSession]);
+    // Depend on the session's primitive identity fields rather than the
+    // session object: save completion swaps the object (backupCount), which
+    // would otherwise reschedule this effect and turn autosave into a loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, latestProjectDraft, projectLoaded, projectSession?.id, projectSession?.readOnly]);
 
   const flushProject = useCallback(async (): Promise<void> => {
     if (projectAutosaveTimer.current !== undefined) {
@@ -838,6 +850,7 @@ export function App(): ReactNode {
           calibrationProfileId,
           processing: previewProcessing,
           dmaxOverride: activeRoll.manualDmax?.value,
+          dmaxChannelRange: activeRoll.manualDmax?.channelRange,
           gpuInteractive: useGpuInteractive,
           gpuReuseSourceKey: useGpuInteractive
             ? preview?.gpuPipeline?.sourceKey
@@ -974,6 +987,7 @@ export function App(): ReactNode {
             calibrationProfileId: frameRecipe.calibrationProfileId,
             processing: framePreviewProcessing,
             dmaxOverride: item.dmaxOverride,
+            dmaxChannelRange: item.dmaxChannelRange,
             gpuInteractive: true,
           });
           precomputeInFlight.current.set(cacheKey, pending);
@@ -1104,6 +1118,8 @@ export function App(): ReactNode {
       targetRecipe.mode,
       targetRecipe.calibrationProfileId,
       targetRecipe.processing,
+      roll.manualDmax?.value,
+      roll.manualDmax?.channelRange,
     );
     stageFramePreview(targetFrameId, rollSettingsKey);
     setActiveRollId(roll.id);
@@ -1121,6 +1137,8 @@ export function App(): ReactNode {
       targetRecipe.mode,
       targetRecipe.calibrationProfileId,
       targetRecipe.processing,
+      activeRoll.manualDmax?.value,
+      activeRoll.manualDmax?.channelRange,
     );
     stageFramePreview(frameId, frameSettingsKey);
     setActiveAssetId(frameId);
@@ -1561,9 +1579,13 @@ export function App(): ReactNode {
       if (!Number.isFinite(result.density.dmax) || result.density.dmax <= result.density.dmin + 0.01) {
         throw new Error("Dmax 取样区域密度范围过小，请选择更暗的负片细节。");
       }
+      // The calibrated path keeps its absolute density domain and ignores
+      // per-channel Dmax ranges, so only standard mode locks them in.
+      const lockedChannelRange = mode === "generic" ? result.density.channelRange : undefined;
       const manualDmax = {
         value: result.density.dmax,
         sourceFrameId: owner.assetId,
+        ...(lockedChannelRange === undefined ? {} : { channelRange: lockedChannelRange }),
       };
       setRolls((current) => current.map((roll) => roll.id === owner.rollId
         ? { ...roll, manualDmax }
@@ -1572,7 +1594,8 @@ export function App(): ReactNode {
         "手动 Dmax 已启用并应用到整卷 · "
         + result.density.dmax.toFixed(3)
         + " D · 来源 "
-        + describeFrame(activeRoll, owner.assetId),
+        + describeFrame(activeRoll, owner.assetId)
+        + (lockedChannelRange === undefined ? "" : " · 已同时锁定 RGB 密度锚点"),
       );
     } catch (error: unknown) {
       if (activeSelectionRef.current.rollId === owner.rollId && activeSelectionRef.current.assetId === owner.assetId) {
@@ -1878,6 +1901,7 @@ export function App(): ReactNode {
           calibrationProfileId: recipe.calibrationProfileId,
           processing: cloneProcessing(recipe.processing),
           dmaxOverride: activeRoll.manualDmax?.value,
+          dmaxChannelRange: activeRoll.manualDmax?.channelRange,
         };
       });
       if (masterExportFormat === "dng" && batchItems.some((item) => item.mode !== "calibrated" || item.calibrationProfileId === undefined)) {
@@ -1910,6 +1934,7 @@ export function App(): ReactNode {
         calibrationProfileId,
         processing,
         dmaxOverride: activeRoll.manualDmax?.value,
+        dmaxChannelRange: activeRoll.manualDmax?.channelRange,
       });
       const png = await encodePreviewPng(exportFrame);
       const result = await api.exportPreviewPng({ suggestedFileName: projectTitle + "-preview.png", png });
@@ -1942,6 +1967,7 @@ export function App(): ReactNode {
         calibrationProfileId,
         processing,
         dmaxOverride: activeRoll.manualDmax?.value,
+        dmaxChannelRange: activeRoll.manualDmax?.channelRange,
       } as const;
       setNotice("正在准备全分辨率 GPU 母版…");
       let result: MasterTiffExportResult;
@@ -1957,6 +1983,7 @@ export function App(): ReactNode {
           calibrationProfileId,
           processing,
           dmaxOverride: activeRoll.manualDmax?.value,
+          dmaxChannelRange: activeRoll.manualDmax?.channelRange,
           gpuInteractive: true,
           gpuSourceOnly: true,
         });
@@ -2149,6 +2176,10 @@ export function App(): ReactNode {
       gains[channel] = value;
       return { ...current, channelGains: gains };
     });
+  };
+
+  const updatePreSaturation = (value: number): void => {
+    setProcessing((current) => current.preSaturation === value ? current : { ...current, preSaturation: value });
   };
 
   const refreshCalibrationProfiles = async (): Promise<void> => {
@@ -3065,7 +3096,9 @@ export function App(): ReactNode {
               <strong>手动 Dmax · 整卷</strong>
               <span>{activeRoll.manualDmax === undefined
                 ? "默认关闭；从一帧取样后，统一作用于本胶卷所有帧"
-                : "已启用 · " + activeRoll.manualDmax.value.toFixed(3) + " D · 来源 " + describeFrame(activeRoll, activeRoll.manualDmax.sourceFrameId)}</span>
+                : "已启用 · " + activeRoll.manualDmax.value.toFixed(3) + " D"
+                  + (activeRoll.manualDmax.channelRange === undefined ? "" : " · 已锁定 RGB 密度")
+                  + " · 来源 " + describeFrame(activeRoll, activeRoll.manualDmax.sourceFrameId)}</span>
             </div>
             <button
               className={isDmaxSampling ? "compact-tool base-card-action is-selected" : "compact-tool base-card-action"}
@@ -3218,6 +3251,18 @@ export function App(): ReactNode {
             onCommit={(value) => updateChannelGain(2, value)}
             onCancel={(value) => updateChannelGain(2, value)}
           />
+          <InteractiveSlider
+            label="预饱和"
+            value={processing.preSaturation ?? 1.08}
+            min={0.5}
+            max={1.5}
+            step={0.01}
+            display={(value) => "×" + value.toFixed(2)}
+            onBegin={recordRecipeChange}
+            onPreview={updatePreSaturation}
+            onCommit={updatePreSaturation}
+            onCancel={updatePreSaturation}
+          />
           <div className="base-reference-actions">
             <button
               className="compact-tool"
@@ -3228,6 +3273,7 @@ export function App(): ReactNode {
                 && tone.highlightCompression === 0
                 && tone.saturation === 1
                 && (processing.channelGains?.every((gain) => gain === 1) ?? true)
+                && (processing.preSaturation ?? 1.08) === 1.08
               }
               onClick={() => {
                 recordRecipeChange();
@@ -3237,8 +3283,8 @@ export function App(): ReactNode {
                   highlightCompression: 0,
                   saturation: 1,
                 });
-                setProcessing((current) => ({ ...current, channelGains: [1, 1, 1] }));
-                setNotice("当前照片的曝光、对比度、高光、饱和度与 RGB 通道已恢复中性；源图像色彩数据未被修改。");
+                setProcessing((current) => ({ ...current, channelGains: [1, 1, 1], preSaturation: 1.08 }));
+                setNotice("当前照片的曝光、对比度、高光、饱和度、RGB 通道与预饱和已恢复默认；源图像色彩数据未被修改。");
               }}
             >
               重置色调
@@ -4660,6 +4706,7 @@ function ProcessingInspector({
         </p>
       )}
       <label className="pending-row"><span>透视校正</span><input type="checkbox" checked={geometry.perspective !== undefined} onChange={(event) => setPerspective(event.currentTarget.checked)} /></label>
+      <label className="pending-row" title="仅在确实保留中性高密度片段时启用；否则可能把主体高光误当作中性参考。"><span>自动中和 Dmax</span><input type="checkbox" checked={processing.autoNeutralDmax === true} onChange={(event) => onChange((current) => ({ ...current, autoNeutralDmax: event.currentTarget.checked }))} /></label>
       {geometry.perspective === undefined ? null : (
         <details className="section-note">
           <summary>调整四角</summary>
@@ -4785,6 +4832,8 @@ function cloneProcessing(value: ProcessingRecipe): ProcessingRecipe {
     channelGains: value.channelGains === undefined
       ? undefined
       : [...value.channelGains] as [number, number, number],
+    autoNeutralDmax: value.autoNeutralDmax,
+    preSaturation: value.preSaturation,
   };
 }
 

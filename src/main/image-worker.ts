@@ -159,7 +159,7 @@ function calibrateColorCard(
       contrast: 1,
       highlightCompression: 0,
       saturation: 1,
-    }, undefined, processing, undefined, undefined, cached.summary.photonTransfer),
+    }, undefined, processing, undefined, undefined, undefined, cached.summary.photonTransfer),
   );
   // Fit from relative density, not from a generic scene transform. The chart
   // therefore constrains both the characteristic response and the residual
@@ -356,6 +356,7 @@ function renderAsset(
     readonly tone: { readonly exposureStops: number; readonly contrast: number; readonly highlightCompression: number; readonly saturation: number };
     readonly processing?: ProcessingRecipe;
     readonly dmaxOverride?: number;
+    readonly dmaxChannelRange?: import("../core/types.ts").Rgb;
     readonly dmaxSampleRoi?: import("../shared/contracts.ts").NormalizedRoi;
     readonly gpuInteractive?: boolean;
     readonly gpuReuseSourceKey?: string;
@@ -374,6 +375,7 @@ function renderAsset(
     calibrationProfile,
     request.processing,
     request.dmaxOverride,
+    request.dmaxChannelRange,
     request.dmaxSampleRoi,
     cached.summary.photonTransfer,
   );
@@ -420,6 +422,7 @@ function renderAsset(
         baseRgb,
         film: pipelineSettings.film,
         densityRange: analysis.densityAnchors.range,
+        densityChannelRange: analysis.densityAnchors.channelRange,
         photonTransfer: pipelineSettings.photonTransfer,
       },
       base: {
@@ -499,6 +502,7 @@ function renderAsset(
         baseRgb: processed.base.rgb,
         film: pipelineSettings.film,
         densityRange: processed.densityAnchors.range,
+        densityChannelRange: processed.densityAnchors.channelRange,
         photonTransfer: pipelineSettings.photonTransfer,
       },
     } : {}),
@@ -515,6 +519,9 @@ function renderAsset(
     warnings: [
       ...cached.summary.warnings,
       ...buildWarnings(request.mode, colorTrust),
+      ...(request.mode === "generic" && processed.densityAnchors.channelRange !== undefined
+        ? ["标准模式已使用中性高密度 RGB 锚点进行逐通道密度平衡；输出仍属于未校准色彩。"]
+        : []),
       ...buildBaseSampleWarnings(processed.base),
       ...(gpuFilmCurvesAreExact
         ? []
@@ -608,6 +615,7 @@ function renderGpuInteractivePreview(
       baseRgb: analysis.base.rgb,
       film: pipelineSettings.film,
       densityRange: analysis.densityAnchors.range,
+      densityChannelRange: analysis.densityAnchors.channelRange,
       photonTransfer: pipelineSettings.photonTransfer,
     },
     base: {
@@ -623,6 +631,9 @@ function renderGpuInteractivePreview(
     warnings: [
       ...cached.summary.warnings,
       ...buildWarnings(request.mode, colorTrust),
+      ...(request.mode === "generic" && analysis.densityAnchors.channelRange !== undefined
+        ? ["标准模式已使用中性高密度 RGB 锚点进行逐通道密度平衡；输出仍属于未校准色彩。"]
+        : []),
       ...buildBaseSampleWarnings(analysis.base),
     ],
   };
@@ -677,6 +688,7 @@ async function exportAsset(
       request.calibrationProfile,
       request.processing,
       request.dmaxOverride,
+      request.dmaxChannelRange,
       undefined,
       cached.summary.photonTransfer,
     ),
@@ -717,6 +729,7 @@ function createPipelineSettings(
   calibrationProfile: CalibrationProfileDocument | undefined,
   processing: ProcessingRecipe | undefined,
   dmaxOverride?: number,
+  dmaxChannelRange?: import("../core/types.ts").Rgb,
   dmaxSampleRoi?: import("../shared/contracts.ts").NormalizedRoi,
   photonTransfer?: PhotonTransferModel,
 ) {
@@ -729,10 +742,12 @@ function createPipelineSettings(
         : undefined,
     geometry: processing?.geometry,
     dmaxOverride,
+    dmaxChannelRange,
     dmaxSampleRoi,
     restoration: toRestorationSettings(processing),
     photonTransfer,
-    film: getFilmMode(mode, calibrationProfile, processing?.channelGains),
+    film: getFilmMode(mode, calibrationProfile, processing?.channelGains, processing?.preSaturation),
+    inferChannelRange: processing?.autoNeutralDmax === true,
     tone,
   };
 }
@@ -764,6 +779,7 @@ function getFilmMode(
   mode: "generic" | "calibrated",
   calibrationProfile: CalibrationProfileDocument | undefined,
   channelGains?: readonly [number, number, number],
+  preSaturation?: number,
 ): FilmMode {
   const trim = channelGains === undefined
     ? [1, 1, 1] as const
@@ -773,6 +789,7 @@ function getFilmMode(
       kind: "generic",
       densityGain: [1, 1, 1],
       whiteBalance: multiplyWhiteBalance([1, 1, 1], trim),
+      preSaturation: preSaturation ?? 1.08,
     };
   }
   if (calibrationProfile === undefined) {
@@ -1185,6 +1202,7 @@ function createPreviewStageKey(
     readonly mode: "generic" | "calibrated";
     readonly processing?: ProcessingRecipe;
     readonly dmaxOverride?: number;
+    readonly dmaxChannelRange?: import("../core/types.ts").Rgb;
     readonly dmaxSampleRoi?: import("../shared/contracts.ts").NormalizedRoi;
   },
   calibrationProfile: CalibrationProfileDocument | undefined,
@@ -1196,6 +1214,7 @@ function createPreviewStageKey(
     request.mode,
     request.processing ?? null,
     request.dmaxOverride ?? null,
+    request.dmaxChannelRange ?? null,
     request.dmaxSampleRoi ?? null,
     calibrationProfile === undefined
       ? null
@@ -1494,6 +1513,7 @@ function assertPreviewRequest(value: {
   readonly maxEdge: number;
   readonly tone: { readonly exposureStops: number; readonly contrast: number; readonly highlightCompression: number; readonly saturation: number };
   readonly dmaxOverride?: number;
+  readonly dmaxChannelRange?: import("../core/types.ts").Rgb;
   readonly dmaxSampleRoi?: import("../shared/contracts.ts").NormalizedRoi;
   readonly gpuInteractive?: boolean;
   readonly gpuReuseSourceKey?: string;
@@ -1511,6 +1531,12 @@ function assertPreviewRequest(value: {
     !Number.isFinite(value.dmaxOverride) || value.dmaxOverride < 0 || value.dmaxOverride > 16
   )) {
     throw new ImageWorkerError("INVALID_PREVIEW", "Manual Dmax is invalid.");
+  }
+  if (value.dmaxChannelRange !== undefined && (
+    value.dmaxChannelRange.length !== 3
+    || value.dmaxChannelRange.some((item) => !Number.isFinite(item) || item < 0.05 || item > 16)
+  )) {
+    throw new ImageWorkerError("INVALID_PREVIEW", "Manual Dmax channel ranges are invalid.");
   }
   if (value.dmaxSampleRoi !== undefined) {
     const roi = value.dmaxSampleRoi;

@@ -50,11 +50,20 @@ export function processFilmToScene(source: Raster, settings: PipelineSettings): 
       ? estimateFilmBase(framed)
       : sampleFilmBase(framed, settings.baseRoi);
   const density = toRelativeDensity(framed, base.rgb, undefined, settings.photonTransfer);
-  const densityAnchors = measureDensityAnchors(base.rgb, density, 0.995, {
+  const measuredDensityAnchors = measureDensityAnchors(base.rgb, density, 0.995, {
     dmaxOverride: settings.dmaxOverride,
     dmaxRoi: settings.dmaxSampleRoi,
+    inferChannelRange: settings.inferChannelRange === true,
   });
-  const sceneLinear = applyFilmTransform(density, settings.film, densityAnchors.range);
+  const densityAnchors = settings.dmaxChannelRange === undefined
+    ? measuredDensityAnchors
+    : { ...measuredDensityAnchors, channelRange: settings.dmaxChannelRange };
+  const sceneLinear = applyFilmTransform(
+    density,
+    settings.film,
+    densityAnchors.range,
+    densityAnchors.channelRange,
+  );
   const displayWhitePoint = estimateDisplayWhitePoint(density, sceneLinear, densityAnchors);
 
   return {

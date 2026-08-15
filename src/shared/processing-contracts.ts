@@ -45,6 +45,7 @@ export interface WorkerRenderMessage extends WorkerMessageBase {
     readonly tone: PreviewTone;
     readonly processing?: ProcessingRecipe;
     readonly dmaxOverride?: number;
+    readonly dmaxChannelRange?: import("../core/types.ts").Rgb;
     readonly dmaxSampleRoi?: import("./contracts.ts").NormalizedRoi;
     readonly gpuInteractive?: boolean;
     readonly gpuReuseSourceKey?: string;
@@ -64,6 +65,7 @@ export interface WorkerExportTiffMessage extends WorkerMessageBase {
   readonly tone: PreviewTone;
   readonly processing?: ProcessingRecipe;
   readonly dmaxOverride?: number;
+  readonly dmaxChannelRange?: import("../core/types.ts").Rgb;
   readonly calibrationProfile?: CalibrationProfileDocument;
 }
 

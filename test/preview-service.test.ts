@@ -56,3 +56,18 @@ test("demo preview can alternate quick and settled resolutions without losing to
   assert.deepEqual(adjustedQuick.base, quick.base);
   assert.notDeepEqual(adjustedQuick.rgba, quick.rgba);
 });
+
+test("demo preview clamps oversized maxEdge instead of allocating in the main process", () => {
+  const clamped = renderDemoPreview(request(1, 0, 0, 32_768));
+
+  assert.equal(clamped.width, 2_048);
+  assert.equal(clamped.height, Math.round(2_048 * 0.664));
+  assert.equal(clamped.rgba.length, clamped.width * clamped.height * 4);
+});
+
+test("demo preview rejects full-resolution source payload requests", () => {
+  assert.throws(
+    () => renderDemoPreview({ ...request(1), gpuSourceOnly: true }),
+    /演示模式/,
+  );
+});

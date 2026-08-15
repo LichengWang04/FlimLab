@@ -94,6 +94,10 @@ export interface ProcessingRecipe {
    * on top of the mode's default whiteBalance. [1, 1, 1] means "no trim".
    */
   readonly channelGains?: readonly [number, number, number];
+  /** Opt-in neutral-tail Dmax inference; off by default for standard mode. */
+  readonly autoNeutralDmax?: boolean;
+  /** Density-domain colour separation control used by standard mode. */
+  readonly preSaturation?: number;
 }
 
 export const defaultProcessingRecipe: ProcessingRecipe = {
@@ -101,6 +105,8 @@ export const defaultProcessingRecipe: ProcessingRecipe = {
   geometry: { rotation: 0, straighten: 0 },
   restoration: { dust: false, scratches: false, denoise: 0, sharpen: 0 },
   channelGains: [1, 1, 1],
+  autoNeutralDmax: false,
+  preSaturation: 1.08,
 };
 
 export interface PreviewRequest {
@@ -115,6 +121,8 @@ export interface PreviewRequest {
   readonly processing?: ProcessingRecipe;
   /** Roll-wide absolute Dmax override; omitted means automatic measurement. */
   readonly dmaxOverride?: number;
+  /** Optional RGB density ranges frozen from a neutral Dmax reference. */
+  readonly dmaxChannelRange?: Rgb;
   /** Temporary normalized ROI used when sampling a manual Dmax. */
   readonly dmaxSampleRoi?: NormalizedRoi;
   /**
@@ -142,6 +150,7 @@ export interface PreviewDensitySummary {
   readonly dmin: number;
   readonly dmax: number;
   readonly range: number;
+  readonly channelRange?: Rgb;
 }
 
 export interface PreviewResult {
@@ -195,6 +204,8 @@ export interface GpuPipelinePayload {
    * this value is used for diagnostics and display-white estimation.
    */
   readonly densityRange?: number;
+  /** Per-channel ranges from a neutral Dmax reference, when available. */
+  readonly densityChannelRange?: Rgb;
   readonly photonTransfer?: PhotonTransferModel;
 }
 
@@ -203,7 +214,7 @@ import type {
   WorkspaceProject,
   WorkspaceProjectDraft,
 } from "./project.ts";
-import type { FilmMode, NormalizedRoi, PhotonTransferModel } from "../core/types.ts";
+import type { FilmMode, NormalizedRoi, PhotonTransferModel, Rgb } from "../core/types.ts";
 
 export type { NormalizedRoi } from "../core/types.ts";
 
@@ -230,6 +241,7 @@ export interface MasterTiffExportRequest {
   readonly calibrationProfileId?: string;
   readonly processing?: ProcessingRecipe;
   readonly dmaxOverride?: number;
+  readonly dmaxChannelRange?: Rgb;
 }
 
 export interface MasterTiffExportResult {
@@ -249,6 +261,7 @@ export interface GpuMasterTiffBeginRequest {
   readonly calibrationProfileId?: string;
   readonly processing?: ProcessingRecipe;
   readonly dmaxOverride?: number;
+  readonly dmaxChannelRange?: Rgb;
   readonly width: number;
   readonly height: number;
   readonly rowsPerStrip: number;
@@ -367,6 +380,7 @@ export interface BatchExportItem {
   readonly calibrationProfileId?: string;
   readonly processing?: ProcessingRecipe;
   readonly dmaxOverride?: number;
+  readonly dmaxChannelRange?: Rgb;
 }
 
 export interface BatchExportRequest {

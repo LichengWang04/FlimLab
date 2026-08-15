@@ -7,6 +7,7 @@ export interface FramePrecomputePlanItem {
   readonly recipe: ProjectRecipe;
   readonly settingsKey: string;
   readonly dmaxOverride?: number;
+  readonly dmaxChannelRange?: readonly [number, number, number];
 }
 
 /**
@@ -30,15 +31,18 @@ export function createFramePrecomputePlan(
     .map((frameId) => {
       const recipe = resolveFrameRecipe(roll, frameId);
       const dmaxOverride = roll.manualDmax?.value;
+      const dmaxChannelRange = roll.manualDmax?.channelRange;
       return {
         frameId,
         recipe,
         dmaxOverride,
+        dmaxChannelRange,
         settingsKey: createPrecomputeSettingsKey(
           recipe.mode,
           recipe.calibrationProfileId,
           recipe.processing,
           dmaxOverride,
+          dmaxChannelRange,
         ),
       };
     });
@@ -58,6 +62,7 @@ export function createPrecomputeSettingsKey(
   calibrationProfileId: string | undefined,
   processing: ProcessingRecipe,
   dmaxOverride?: number,
+  dmaxChannelRange?: readonly [number, number, number],
 ): string {
   return JSON.stringify([
     mode,
@@ -69,7 +74,10 @@ export function createPrecomputeSettingsKey(
     // renderer uniforms, so reusing a payload across gain changes would leave
     // the WebGL preview on the previous white balance.
     processing.channelGains ?? [1, 1, 1],
+    processing.autoNeutralDmax ?? false,
+    processing.preSaturation ?? 1.08,
     dmaxOverride ?? null,
+    dmaxChannelRange ?? null,
   ]);
 }
 

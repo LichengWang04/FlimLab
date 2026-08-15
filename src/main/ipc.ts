@@ -107,6 +107,7 @@ interface GpuTiffSession {
   readonly calibrationProfile: CalibrationProfileDocument | undefined;
   readonly processing: ProcessingRecipe | undefined;
   readonly dmaxOverride: number | undefined;
+  readonly dmaxChannelRange: import("../core/types.ts").Rgb | undefined;
   readonly colorTrust: ColorTrust;
   timeout?: NodeJS.Timeout;
 }
@@ -363,6 +364,7 @@ export function registerIpcHandlers(
       calibrationProfile: profile,
       processing: request.processing,
       dmaxOverride: request.dmaxOverride,
+      dmaxChannelRange: request.dmaxChannelRange,
     });
     return {
       saved: true,
@@ -434,6 +436,7 @@ export function registerIpcHandlers(
         calibrationProfile,
         processing: request.processing,
         dmaxOverride: request.dmaxOverride,
+        dmaxChannelRange: request.dmaxChannelRange,
         colorTrust,
       });
       refreshGpuTiffSessionTimeout(sessionId, gpuTiffSessions);
@@ -473,6 +476,7 @@ export function registerIpcHandlers(
         calibrationProfile: session.calibrationProfile,
         processing: session.processing,
         dmaxOverride: session.dmaxOverride,
+        dmaxChannelRange: session.dmaxChannelRange,
       });
       return {
         saved: true,
@@ -514,6 +518,7 @@ export function registerIpcHandlers(
       calibrationProfile: session.calibrationProfile,
       processing: session.processing,
       dmaxOverride: session.dmaxOverride,
+      dmaxChannelRange: session.dmaxChannelRange,
     });
     return {
       saved: true,
@@ -791,6 +796,7 @@ function isPreviewRequest(value: unknown): value is PreviewRequest {
   return toneIsValid
     && gpuFieldsAreValid
     && isDmaxOverride(request.dmaxOverride)
+    && isDmaxChannelRange(request.dmaxChannelRange)
     && (request.dmaxSampleRoi === undefined || isRoi(request.dmaxSampleRoi))
     && (request.calibrationProfileId === undefined
       || (typeof request.calibrationProfileId === "string"
@@ -830,6 +836,7 @@ function parseMasterTiffRequest(value: unknown): MasterTiffExportRequest {
     calibrationProfileId: record.calibrationProfileId,
     processing: record.processing,
     dmaxOverride: record.dmaxOverride,
+    dmaxChannelRange: record.dmaxChannelRange,
   };
   if (
     !isPreviewRequest(previewRequest)
@@ -848,6 +855,7 @@ function parseMasterTiffRequest(value: unknown): MasterTiffExportRequest {
     calibrationProfileId: previewRequest.calibrationProfileId,
     processing: previewRequest.processing,
     dmaxOverride: previewRequest.dmaxOverride,
+    dmaxChannelRange: previewRequest.dmaxChannelRange,
   };
 }
 
@@ -869,6 +877,7 @@ function parseGpuMasterTiffBeginRequest(value: unknown): GpuMasterTiffBeginReque
     calibrationProfileId: record.calibrationProfileId,
     processing: record.processing,
     dmaxOverride: record.dmaxOverride,
+    dmaxChannelRange: record.dmaxChannelRange,
   };
   if (
     !isPreviewRequest(previewRequest)
@@ -894,6 +903,7 @@ function parseGpuMasterTiffBeginRequest(value: unknown): GpuMasterTiffBeginReque
     calibrationProfileId: previewRequest.calibrationProfileId,
     processing: previewRequest.processing,
     dmaxOverride: previewRequest.dmaxOverride,
+    dmaxChannelRange: previewRequest.dmaxChannelRange,
     width,
     height,
     rowsPerStrip,
@@ -971,6 +981,7 @@ function parseBatchExportRequest(value: unknown): BatchExportRequest {
       calibrationProfileId: item.calibrationProfileId,
       processing: item.processing,
       dmaxOverride: item.dmaxOverride,
+      dmaxChannelRange: item.dmaxChannelRange,
     };
     if (!isPreviewRequest(preview)) throw new Error("批处理设置无效。");
     return {
@@ -980,6 +991,7 @@ function parseBatchExportRequest(value: unknown): BatchExportRequest {
       calibrationProfileId: preview.calibrationProfileId,
       processing: preview.processing,
       dmaxOverride: preview.dmaxOverride,
+      dmaxChannelRange: preview.dmaxChannelRange,
     };
   });
   if (new Set(items.map((item) => item.assetId)).size !== items.length) {
@@ -1102,11 +1114,23 @@ function isProcessingRecipe(value: unknown): value is ProcessingRecipe | undefin
       return false;
     }
   }
+  if (record.autoNeutralDmax !== undefined && typeof record.autoNeutralDmax !== "boolean") return false;
+  if (
+    record.preSaturation !== undefined
+    && (typeof record.preSaturation !== "number" || !Number.isFinite(record.preSaturation) || record.preSaturation < 0.5 || record.preSaturation > 2)
+  ) return false;
   return true;
 }
 
 function isDmaxOverride(value: unknown): boolean {
   return value === undefined || (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 16);
+}
+
+function isDmaxChannelRange(value: unknown): boolean {
+  return value === undefined
+    || (Array.isArray(value)
+      && value.length === 3
+      && value.every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0.05 && item <= 16));
 }
 
 function isFilmBaseOverride(value: unknown): value is FilmBaseOverride | undefined {

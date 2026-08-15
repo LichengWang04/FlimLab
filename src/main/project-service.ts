@@ -239,9 +239,13 @@ function parseRollDmax(
   if (!frameOrder.includes(sourceFrameId)) {
     throw new Error("Dmax 来源帧不在胶卷中。");
   }
+  const channelRange = record.channelRange === undefined
+    ? undefined
+    : parseRgb(record.channelRange, "手动 Dmax RGB 密度范围", 0.05, 16);
   return {
     value: requireBoundedNumber(record.value, "手动 Dmax", 0, 16),
     sourceFrameId,
+    ...(channelRange === undefined ? {} : { channelRange }),
   };
 }
 
@@ -450,11 +454,23 @@ function parseProcessingRecipe(value: unknown): ProcessingRecipe {
   }
   const record = requireRecord(value, "处理设置");
   const filmBase = parseFilmBaseReference(record.filmBase);
+  const channelGains = record.channelGains === undefined
+    ? undefined
+    : parseRgb(record.channelGains, "通道增益", 0.01, 4);
+  const autoNeutralDmax = record.autoNeutralDmax === undefined
+    ? false
+    : requireBoolean(record.autoNeutralDmax, "自动中和 Dmax");
+  const preSaturation = record.preSaturation === undefined
+    ? 1.08
+    : requireBoundedNumber(record.preSaturation, "预饱和", 0.5, 2);
   return {
     baseRoi: parseRoi(record.baseRoi, "片基 ROI"),
     geometry: parseGeometry(record.geometry),
     restoration: parseRestoration(record.restoration),
     ...(filmBase === undefined ? {} : { filmBase }),
+    ...(channelGains === undefined ? {} : { channelGains }),
+    autoNeutralDmax,
+    preSaturation,
   };
 }
 
@@ -483,6 +499,9 @@ function defaultRecipeProcessing(): ProcessingRecipe {
     baseRoi: { ...defaultProcessingRecipe.baseRoi },
     geometry: { ...defaultProcessingRecipe.geometry },
     restoration: { ...defaultProcessingRecipe.restoration },
+    channelGains: [...(defaultProcessingRecipe.channelGains ?? [1, 1, 1])] as [number, number, number],
+    autoNeutralDmax: defaultProcessingRecipe.autoNeutralDmax,
+    preSaturation: defaultProcessingRecipe.preSaturation,
   };
 }
 
@@ -561,6 +580,11 @@ function parseRgb(value: unknown, label: string, minimum: number, maximum: numbe
     requireBoundedNumber(value[1], label + " G", minimum, maximum),
     requireBoundedNumber(value[2], label + " B", minimum, maximum),
   ];
+}
+
+function requireBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== "boolean") throw new Error(label + "必须是布尔值。");
+  return value;
 }
 
 function parseOptionalAssetId(value: unknown, label: string): string | undefined {

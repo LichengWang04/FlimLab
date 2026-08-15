@@ -110,6 +110,8 @@ export function cloneProcessingRecipe(value: ProjectRecipe["processing"]): Proje
     channelGains: value.channelGains === undefined
       ? undefined
       : [...value.channelGains] as [number, number, number],
+    autoNeutralDmax: value.autoNeutralDmax,
+    preSaturation: value.preSaturation,
   };
 }
 

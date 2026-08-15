@@ -121,6 +121,7 @@ test("project storage persists a renderer-safe recipe and source list", async (c
         manualDmax: {
           value: 1.42,
           sourceFrameId: "9f6b32d1-987a-44a6-9fc4-c4011d7ab2ec",
+          channelRange: [0.92, 0.88, 0.95],
         },
       },
       { id: "winter-roll", title: "冬日卷", assets: [], frameOrder: [] },
@@ -147,6 +148,7 @@ test("project storage persists a renderer-safe recipe and source list", async (c
   assert.deepEqual(saved.rolls[0]?.manualDmax, {
     value: 1.42,
     sourceFrameId: "9f6b32d1-987a-44a6-9fc4-c4011d7ab2ec",
+    channelRange: [0.92, 0.88, 0.95],
   });
   assert.equal(saved.rolls[0]?.recipesByFrameId?.["9f6b32d1-987a-44a6-9fc4-c4011d7ab2ec"]?.tone.exposureStops, 0.65);
   assert.equal(saved.rolls[0]?.recipesByFrameId?.["demo-negative"]?.view, "density");

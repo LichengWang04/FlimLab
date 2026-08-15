@@ -182,17 +182,26 @@ export function toRelativeDensity(
             photonTransfer.normalizationRangeDn[channel],
             photonTransfer,
           );
-      density.data[offset + channel] = -Math.log10(Math.max(signal / base[channel], epsilon));
+      const ratio = signal / base[channel];
+      // Corrupt or overflowing decode values (NaN/±Inf from broken float
+      // TIFFs or ICC conversion) must not reach the density domain: the
+      // calibrated curve sampler asserts finite inputs, and a single bad
+      // pixel would otherwise fail the whole frame. Map them to the film
+      // base (density 0) so both film modes degrade the same way.
+      const safeRatio = Number.isFinite(ratio) ? ratio : 1;
+      density.data[offset + channel] = -Math.log10(Math.max(safeRatio, epsilon));
     }
   }
   return density;
 }
 
 /**
- * Measure the two density anchors used by film-inversion tools. Dmin is the
- * mean optical density of the sampled film base relative to normalized scan
- * white. Dmax adds the 99.5th percentile of neutral relative density, which
- * avoids letting a few dust/scratch pixels define the usable film range.
+ * Measure the density anchors used by film-inversion tools. Dmin is the mean
+ * optical density of the sampled film base relative to normalized scan white.
+ * Dmax adds the 99.5th percentile of neutral relative density, which avoids
+ * letting a few dust/scratch pixels define the usable film range. When a Dmax
+ * ROI is supplied, or when the high-density tail is convincingly neutral, the
+ * same samples also provide a per-channel density range.
  */
 export function measureDensityAnchors(
   base: Rgb,
@@ -222,6 +231,8 @@ export function measureDensityAnchors(
     0,
   ) / 3;
   const neutralDensities: number[] = [];
+  const channelDensities: [number[], number[], number[]] = [[], [], []];
+  const sampledTriples: Rgb[] = [];
   const roi = options.dmaxRoi;
   const left = roi === undefined ? 0 : Math.floor(roi.x * density.width);
   const top = roi === undefined ? 0 : Math.floor(roi.y * density.height);
@@ -244,7 +255,18 @@ export function measureDensityAnchors(
         + Math.max(0, density.data[offset + 1])
         + Math.max(0, density.data[offset + 2])
       ) / 3;
-      if (Number.isFinite(value)) neutralDensities.push(value);
+      if (Number.isFinite(value)) {
+        neutralDensities.push(value);
+        const channels: Rgb = [
+          Math.max(0, density.data[offset]),
+          Math.max(0, density.data[offset + 1]),
+          Math.max(0, density.data[offset + 2]),
+        ];
+        sampledTriples.push(channels);
+        channelDensities[0].push(channels[0]);
+        channelDensities[1].push(channels[1]);
+        channelDensities[2].push(channels[2]);
+      }
     }
   }
   if (neutralDensities.length === 0) {
@@ -255,7 +277,62 @@ export function measureDensityAnchors(
   const range = options.dmaxOverride === undefined
     ? automaticRange
     : Math.max(0, options.dmaxOverride - dmin);
-  return { dmin, dmax: dmin + range, range };
+  const channelRange = roi !== undefined
+    ? channelRangesFromSamples(channelDensities, highPercentile)
+    : options.inferChannelRange === true && options.dmaxOverride === undefined
+      ? inferNeutralChannelRange(neutralDensities, sampledTriples, highPercentile)
+      : undefined;
+  return channelRange === undefined
+    ? { dmin, dmax: dmin + range, range }
+    : { dmin, dmax: dmin + range, range, channelRange };
+}
+
+function channelRangesFromSamples(
+  channels: readonly [readonly number[], readonly number[], readonly number[]],
+  highPercentile: number,
+): Rgb | undefined {
+  if (!channels.every((values) => values.length > 0)) return undefined;
+  return [
+    Math.max(0.05, percentile(channels[0], highPercentile)),
+    Math.max(0.05, percentile(channels[1], highPercentile)),
+    Math.max(0.05, percentile(channels[2], highPercentile)),
+  ];
+}
+
+/**
+ * Conservative automatic equivalent of a neutral high-density picker. It
+ * only activates when the high-density tail contains enough low-chroma
+ * samples; a colourful scene therefore keeps the neutral relative transform
+ * instead of guessing a per-channel correction from its subject matter.
+ */
+function inferNeutralChannelRange(
+  neutralDensities: readonly number[],
+  samples: readonly Rgb[],
+  highPercentile: number,
+): Rgb | undefined {
+  if (samples.length < 32) return undefined;
+  const threshold = percentile(neutralDensities, Math.max(0.99, highPercentile));
+  const candidates: [number[], number[], number[]] = [[], [], []];
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = samples[index];
+    const maximum = Math.max(sample[0], sample[1], sample[2]);
+    const minimum = Math.min(sample[0], sample[1], sample[2]);
+    const mean = neutralDensities[index];
+    if (
+      mean >= threshold
+      && maximum - minimum <= Math.max(0.08, mean * 0.16)
+    ) {
+      candidates[0].push(sample[0]);
+      candidates[1].push(sample[1]);
+      candidates[2].push(sample[2]);
+    }
+  }
+  if (candidates[0].length < 8) return undefined;
+  return [
+    Math.max(0.05, percentile(candidates[0], 0.5)),
+    Math.max(0.05, percentile(candidates[1], 0.5)),
+    Math.max(0.05, percentile(candidates[2], 0.5)),
+  ];
 }
 
 function collectChannelSamples(transmission: Raster, roi: NormalizedRoi): ChannelSamples {

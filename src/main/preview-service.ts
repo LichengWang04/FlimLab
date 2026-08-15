@@ -50,20 +50,27 @@ const C41_CURVES: CurveSet = [
 const demoSourceCache = new Map<string, Raster>();
 const demoStageCache = new Map<string, PipelineSceneResult>();
 const maximumDemoCacheEntries = 2;
+const maximumDemoPreviewEdge = 2_048;
 const DEMO_CALIBRATION_PROFILE = calibratedProfile();
 
 export function renderDemoPreview(request: PreviewRequest): PreviewResult {
+  // The demo negative has no real decode behind it: a full-resolution
+  // source payload would only allocate a huge raster in the main process.
+  if (request.gpuSourceOnly === true) {
+    throw new Error("演示模式不支持全尺寸源载荷。");
+  }
   const startedAt = Date.now();
-  const width = Math.round(request.maxEdge);
+  const width = Math.min(Math.round(request.maxEdge), maximumDemoPreviewEdge);
   const height = Math.round(width * 0.664);
   const source = getDemoNegative(width, height);
-  const film = getFilmMode(request.mode, request.processing?.channelGains);
+  const film = getFilmMode(request.mode, request.processing?.channelGains, request.processing?.preSaturation);
   const stageKey = JSON.stringify([
     width,
     height,
     request.mode,
     request.processing ?? null,
     request.dmaxOverride ?? null,
+    request.dmaxChannelRange ?? null,
     request.dmaxSampleRoi ?? null,
   ]);
   let processed: PipelineSceneResult;
@@ -82,7 +89,9 @@ export function renderDemoPreview(request: PreviewRequest): PreviewResult {
           : undefined,
       geometry: request.processing?.geometry,
       dmaxOverride: request.dmaxOverride,
+      dmaxChannelRange: request.dmaxChannelRange,
       dmaxSampleRoi: request.dmaxSampleRoi,
+      inferChannelRange: request.processing?.autoNeutralDmax === true,
       restoration: toDemoRestorationSettings(request.processing),
       film,
       tone: request.tone,
@@ -116,6 +125,7 @@ export function renderDemoPreview(request: PreviewRequest): PreviewResult {
       baseRgb: processed.base.rgb,
       film,
       densityRange: processed.densityAnchors.range,
+      densityChannelRange: processed.densityAnchors.channelRange,
     },
     base: {
       rgb: processed.base.rgb,
@@ -127,17 +137,27 @@ export function renderDemoPreview(request: PreviewRequest): PreviewResult {
     density: processed.densityAnchors,
     colorTrust: uncharacterizedColorTrust(request.mode),
     elapsedMs: Date.now() - startedAt,
-    warnings: buildWarnings(request.mode, processed.base),
+    warnings: [
+      ...buildWarnings(request.mode, processed.base),
+      ...(request.mode === "generic" && processed.densityAnchors.channelRange !== undefined
+        ? ["标准模式已使用中性高密度 RGB 锚点进行逐通道密度平衡；输出仍属于未校准色彩。"]
+        : []),
+    ],
   };
 }
 
-function getFilmMode(mode: PreviewMode, channelGains?: readonly [number, number, number]): FilmMode {
+function getFilmMode(
+  mode: PreviewMode,
+  channelGains?: readonly [number, number, number],
+  preSaturation?: number,
+): FilmMode {
   const trim = channelGains === undefined ? [1, 1, 1] as const : channelGains;
   if (mode === "generic") {
     return {
       kind: "generic",
       densityGain: [1, 1, 1],
       whiteBalance: multiplyWhiteBalance([1, 1, 1], trim),
+      preSaturation: preSaturation ?? 1.08,
     };
   }
   return {

@@ -647,6 +647,13 @@ export class WebGlFilmPipeline {
       frame.pipeline.baseRgb[1],
       frame.pipeline.baseRgb[2],
     );
+    const densityChannelRange = frame.pipeline.densityChannelRange ?? [1, 1, 1] as const;
+    gl.uniform3f(
+      requireUniform(gl, this.displayProgram, "u_densityChannelRange"),
+      densityChannelRange[0],
+      densityChannelRange[1],
+      densityChannelRange[2],
+    );
     const photonTransfer = frame.pipeline.photonTransfer;
     gl.uniform1i(
       requireUniform(gl, this.displayProgram, "u_hasPhotonTransfer"),
@@ -724,6 +731,10 @@ export class WebGlFilmPipeline {
       prepared.whiteBalance[0],
       prepared.whiteBalance[1],
       prepared.whiteBalance[2],
+    );
+    gl.uniform1f(
+      requireUniform(gl, program, "u_preSaturation"),
+      prepared.preSaturation,
     );
     gl.uniform3f(
       requireUniform(gl, program, "u_matrix0"),
@@ -1061,7 +1072,10 @@ export async function renderGpuMasterInTiles(
         await commitOldestTile();
       }
       if ((Math.floor(outputY / tileHeight) + 1) % 4 === 0) {
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        // Yield to the event loop so progress and cancel stay responsive.
+        // requestAnimationFrame is paused while the window is hidden or
+        // minimized, which would stall a long master export indefinitely.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
     }
     while (pendingTiles.length > 0) {
@@ -1151,6 +1165,7 @@ interface PreparedFilm {
   readonly kind: 0 | 1;
   readonly densityGain: Rgb;
   readonly whiteBalance: Rgb;
+  readonly preSaturation: number;
   readonly curves: readonly [
     readonly CurvePoint[],
     readonly CurvePoint[],
@@ -1166,14 +1181,16 @@ function prepareFilm(film: FilmMode): PreparedFilm {
       kind: 0,
       densityGain: film.densityGain ?? [1, 1, 1],
       whiteBalance: film.whiteBalance ?? [1, 1, 1],
+      preSaturation: film.preSaturation ?? 1.08,
       curves: identityCurves,
-      matrix: identityMatrix,
+      matrix: film.densityMatrix ?? identityMatrix,
     };
   }
   return {
     kind: 1,
     densityGain: [1, 1, 1],
     whiteBalance: film.whiteBalance ?? [1, 1, 1],
+    preSaturation: 1,
     curves: film.profile.curves,
     matrix: film.profile.matrix,
     lut: film.profile.lut,
@@ -1683,6 +1700,7 @@ const displayFragmentShader = `#version 300 es
   uniform vec2 u_bottomRight;
   uniform vec2 u_bottomLeft;
   uniform vec3 u_base;
+  uniform vec3 u_densityChannelRange;
   uniform vec3 u_curveDomainScale;
   uniform bool u_hasPhotonTransfer;
   uniform float u_ptcReadNoiseDn;
@@ -1693,6 +1711,7 @@ const displayFragmentShader = `#version 300 es
   uniform int u_filmKind;
   uniform vec3 u_densityGain;
   uniform vec3 u_whiteBalance;
+  uniform float u_preSaturation;
   uniform vec3 u_matrix0;
   uniform vec3 u_matrix1;
   uniform vec3 u_matrix2;
@@ -1805,7 +1824,17 @@ const displayFragmentShader = `#version 300 es
 
   vec3 filmTransform(vec3 density) {
     if (u_filmKind == 0) {
-      return max(pow(vec3(10.0), density * u_densityGain) - 1.0, 0.0) * u_whiteBalance;
+      vec3 corrected = max(vec3(
+        dot(u_matrix0, max(density, vec3(0.0))),
+        dot(u_matrix1, max(density, vec3(0.0))),
+        dot(u_matrix2, max(density, vec3(0.0)))
+      ), vec3(0.0));
+      float meanDensity = dot(corrected, vec3(0.3333333333));
+      corrected = max(meanDensity + (corrected - meanDensity) * u_preSaturation, vec3(0.0));
+      // Cap the normalized density exactly like the CPU path: a poorly
+      // sampled Dmax ROI must not amplify highlights by orders of magnitude.
+      vec3 normalizedDensity = min(corrected / max(u_densityChannelRange, vec3(0.05)), vec3(4.0));
+      return max(pow(vec3(10.0), normalizedDensity * u_densityGain) - 1.0, 0.0) * u_whiteBalance;
     }
     vec3 curved = vec3(
       curveR(density.r * u_curveDomainScale.r),
