@@ -30,6 +30,11 @@ FilmLab follows [Semantic Versioning](https://semver.org/). This file records us
 - Projects written by a newer FilmLab version are refused instead of being silently downgraded by a migration confirmation; a corrupt calibration snapshot no longer aborts the whole project open.
 - Batch export runs on the background worker so long runs no longer stall interactive previews, and concurrent batch jobs reserve distinct output names.
 - WebGPU restoration no longer reads unwritten scratch buffers when only denoise or sharpen is enabled.
+- Source relinking no longer trusts size+mtime alone: the machine-private location index stores head/tail content probes, so a replaced file with a preserved mtime cannot pass as the original master without a full re-hash.
+- CPU restoration no longer allocates per-pixel median/MAD arrays (in-place quickselect and reused scratch buffers), multi-iteration denoise reuses ping-pong rasters, and the sharpen blur shares its buffer with the output pass.
+- The WebGL dust detector now uses the same median-based robust scale (median × 1.4826, 19-comparator sorting network) as the CPU instead of a mean deviation.
+- Repeated GPU master exports of the same frame reuse the renderer's cached full-resolution source payload (LRU 2) via `gpuReuseSourceKey` and only refresh analysis metadata, avoiding multi-hundred-megabyte re-clones over IPC.
+- CI workflows pin all third-party actions to immutable commit SHAs; CodeQL builds the tracked C++ sidecar (`build-mode: manual`) instead of source-only scanning; main pushes rehearse tag-only signing configuration and the notarization key file is removed after packaging.
 
 ### Added
 

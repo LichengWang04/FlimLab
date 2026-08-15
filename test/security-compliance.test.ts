@@ -66,9 +66,11 @@ test("security workflow audits dependencies, emits SBOM and configures CodeQL", 
   const workflow = await readFile(".github/workflows/security.yml", "utf8");
   assert.match(workflow, /npm audit --audit-level=high/);
   assert.match(workflow, /FilmLab-\*-sbom\.cdx\.json/);
-  assert.match(workflow, /actions\/dependency-review-action@v5/);
-  assert.match(workflow, /github\/codeql-action\/init@v4/);
+  // Third-party actions are pinned to immutable commit SHAs.
+  assert.match(workflow, /actions\/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294/);
+  assert.match(workflow, /github\/codeql-action\/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd/);
   assert.match(workflow, /languages: javascript-typescript,c-cpp/);
+  assert.match(workflow, /build-mode: manual/);
   assert.match(workflow, /queries: security-extended/);
 });
 

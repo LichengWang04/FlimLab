@@ -50,6 +50,7 @@ import type {
   CalibrationProfileVersionSummary,
   ColorCardCaptureContext,
   BatchJobSummary,
+  GpuPipelinePayload,
   MasterExportFormat,
   MasterTiffExportResult,
   ProcessingRecipe,
@@ -257,6 +258,10 @@ export function App(): ReactNode {
   const precomputedPreviews = useRef(new Map<string, PreviewResult>());
   const precomputeInFlight = useRef(new Map<string, Promise<PreviewResult>>());
   const precomputePlanRef = useRef<readonly FramePrecomputePlanItem[]>([]);
+  /** Full-resolution GPU source payloads, keyed by sourceKey, so repeated
+   * master exports reuse the pixel arrays the renderer already holds
+   * instead of re-cloning ~160 MB over IPC every time. Bounded LRU. */
+  const gpuSourceCacheRef = useRef(new Map<string, GpuSourceCacheEntry>());
   const thumbnailUrlsRef = useRef(new Map<string, string>());
   const saveRevision = useRef(0);
   const projectSaveQueue = useRef(new ProjectSaveQueue());
@@ -863,6 +868,11 @@ export function App(): ReactNode {
         }
         void publishThumbnail(assetId, result);
         setPreview(result);
+        // Bayer previews carry the full-resolution source; keep a bounded
+        // copy so master exports can skip re-sending it over IPC.
+        if (result.gpuPipeline?.sourceBayer !== undefined) {
+          storeGpuSourcePayload(gpuSourceCacheRef.current, result.gpuPipeline);
+        }
         setPreviewQuality(quality);
         setIsRendering(false);
         const baseSampleTotal = result.base.sampleCount + result.base.rejectedCount;
@@ -1984,6 +1994,7 @@ export function App(): ReactNode {
       let result: MasterTiffExportResult;
       try {
         revision.current += 1;
+        const cachedSourceKey = preview?.gpuPipeline?.sourceKey;
         const sourceFrame = await api.renderPreview({
           revision: revision.current,
           assetId: activeAssetId,
@@ -1997,13 +2008,25 @@ export function App(): ReactNode {
           dmaxChannelRange: activeRoll.manualDmax?.channelRange,
           gpuInteractive: true,
           gpuSourceOnly: true,
+          // Skip the multi-hundred-megabyte source re-clone when the
+          // renderer already holds this exact payload from an earlier
+          // preview or export; the worker still refreshes the analysis
+          // metadata at full resolution.
+          gpuReuseSourceKey: cachedSourceKey !== undefined && gpuSourceCacheRef.current.has(cachedSourceKey)
+            ? cachedSourceKey
+            : undefined,
         });
         if (sourceFrame.gpuPipeline === undefined || sourceFrame.displayWhitePoint === undefined) {
           throw new Error("GPU 母版源数据不可用。");
         }
+        storeGpuSourcePayload(gpuSourceCacheRef.current, sourceFrame.gpuPipeline);
+        const sourcePipeline = spliceGpuSourcePayload(gpuSourceCacheRef.current, sourceFrame.gpuPipeline);
+        if (sourcePipeline.sourceBayer === undefined && sourcePipeline.sourceLinear === undefined) {
+          throw new Error("GPU 母版源数据不可用。");
+        }
         const layout = computeGeometryLayout(
-          sourceFrame.gpuPipeline.sourceWidth,
-          sourceFrame.gpuPipeline.sourceHeight,
+          sourcePipeline.sourceWidth,
+          sourcePipeline.sourceHeight,
           processing.geometry,
         );
         const rowsPerStrip = 256;
@@ -2020,7 +2043,7 @@ export function App(): ReactNode {
         }
         gpuSessionId = begin.sessionId;
         const gpuFrame: GpuFilmFrame = {
-          pipeline: sourceFrame.gpuPipeline,
+          pipeline: sourcePipeline,
           processing,
           mode,
           view: "positive",
@@ -4822,6 +4845,51 @@ function clampUnit(value: number): number {
 
 function cloneDefaultProcessing(): ProcessingRecipe {
   return cloneProcessing(defaultProcessingRecipe);
+}
+
+const maximumCachedGpuSources = 2;
+
+interface GpuSourceCacheEntry {
+  readonly sourceBayer?: Uint16Array;
+  readonly sourceLinear?: Float32Array;
+  readonly bayerPattern?: GpuPipelinePayload["bayerPattern"];
+  readonly sourceWidth: number;
+  readonly sourceHeight: number;
+}
+
+/** Remembers a full-resolution GPU source payload (when it carries pixel
+ * arrays) under its sourceKey, evicting the least recently used entry. */
+function storeGpuSourcePayload(cache: Map<string, GpuSourceCacheEntry>, payload: GpuPipelinePayload): void {
+  if (payload.sourceBayer === undefined && payload.sourceLinear === undefined) return;
+  const entry: GpuSourceCacheEntry = {
+    sourceBayer: payload.sourceBayer,
+    sourceLinear: payload.sourceLinear,
+    bayerPattern: payload.bayerPattern,
+    sourceWidth: payload.sourceWidth,
+    sourceHeight: payload.sourceHeight,
+  };
+  cache.delete(payload.sourceKey);
+  cache.set(payload.sourceKey, entry);
+  while (cache.size > maximumCachedGpuSources) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+}
+
+/** Fills the pixel arrays of a payload whose worker skipped them (reuse-key
+ * hit) from the renderer-side cache. Returns the payload unchanged when it
+ * already carries arrays or no cache entry exists. */
+function spliceGpuSourcePayload(cache: Map<string, GpuSourceCacheEntry>, payload: GpuPipelinePayload): GpuPipelinePayload {
+  if (payload.sourceBayer !== undefined || payload.sourceLinear !== undefined) return payload;
+  const entry = cache.get(payload.sourceKey);
+  if (entry === undefined) return payload;
+  return {
+    ...payload,
+    sourceBayer: entry.sourceBayer,
+    sourceLinear: entry.sourceLinear,
+    bayerPattern: entry.bayerPattern,
+  };
 }
 
 function cloneProcessing(value: ProcessingRecipe): ProcessingRecipe {

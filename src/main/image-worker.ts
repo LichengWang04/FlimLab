@@ -416,6 +416,17 @@ function renderAsset(
     const sourceWidth = gpuSource?.width ?? source.width;
     const sourceHeight = gpuSource?.height ?? source.height;
     const baseRgb = request.gpuBaseRgb ?? analysis.base.rgb;
+    const sourceKey = createGpuSourceKey(
+      assetId,
+      cached.generation,
+      sourceWidth,
+      sourceHeight,
+      gpuSource === undefined ? "rgb" : "bayer",
+    );
+    // A renderer that already holds this exact source can skip the pixel
+    // payload: the full-resolution arrays dominate the message and a
+    // repeated master export only needs fresh analysis metadata.
+    const reuseSource = request.gpuReuseSourceKey === sourceKey;
     return {
       revision: request.revision,
       width: sourceWidth,
@@ -424,15 +435,9 @@ function renderAsset(
       displayWhitePoint: analysis.displayWhitePoint,
       photonTransfer: pipelineSettings.photonTransfer,
       gpuPipeline: {
-        sourceKey: createGpuSourceKey(
-          assetId,
-          cached.generation,
-          sourceWidth,
-          sourceHeight,
-          gpuSource === undefined ? "rgb" : "bayer",
-        ),
-        sourceLinear: gpuSource === undefined ? source.data : undefined,
-        sourceBayer: gpuSource?.data,
+        sourceKey,
+        sourceLinear: reuseSource || gpuSource !== undefined ? undefined : source.data,
+        sourceBayer: reuseSource ? undefined : gpuSource?.data,
         bayerPattern: gpuSource?.pattern,
         sourceWidth,
         sourceHeight,

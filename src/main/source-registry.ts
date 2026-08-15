@@ -6,11 +6,21 @@ import type { ProjectRelinkResult, SourceAsset } from "../shared/contracts.ts";
 import type { SourceIdentity } from "../shared/project.ts";
 
 const fingerprintReadSize = 4 * 1024 * 1024;
+const probeReadSize = 64 * 1024;
 const maximumScannedFiles = 20_000;
 const maximumLocationRecords = 5_000;
 const supportedExtensions = new Set([
   "DNG", "NEF", "CR2", "CR3", "ARW", "RAF", "RW2", "ORF", "IIQ", "PEF", "SRW", "TIF", "TIFF",
 ]);
+
+/** Cheap content probe (head/tail hashes) stored in the machine-private
+ * index. It backs the mtime shortcut so a replaced file with a preserved
+ * mtime cannot pass as the original master without a full re-hash. */
+interface SourceProbe {
+  readonly algorithm: "sha256-probe-v1";
+  readonly head: string;
+  readonly tail: string;
+}
 
 interface SourceLocationRecord {
   readonly fingerprint: string;
@@ -19,6 +29,8 @@ interface SourceLocationRecord {
   readonly size: number;
   readonly lastModifiedAt: string;
   readonly lastSeenAt: string;
+  /** Optional; absent for records written by older versions. */
+  readonly probe?: SourceProbe;
 }
 
 interface Candidate {
@@ -65,7 +77,7 @@ export class SourceRegistry {
         };
         this.paths.set(asset.id, filePath);
         assets.push(asset);
-        upsertLocation(locations, filePath, identity);
+        await upsertLocation(locations, filePath, identity);
       }
       await this.writeLocations(locations);
     });
@@ -103,9 +115,9 @@ export class SourceRegistry {
           .sort((left, right) => Number(right.name === asset.name) - Number(left.name === asset.name));
         let restoredPath: string | undefined;
         for (const entry of matches) {
-          if (await pathMatchesIdentity(entry.path, asset.identity)) {
+          if (await pathMatchesIdentity(entry.path, asset.identity, entry.probe)) {
             restoredPath = entry.path;
-            upsertLocation(locations, entry.path, asset.identity);
+            await upsertLocation(locations, entry.path, asset.identity);
             changed = true;
             break;
           }
@@ -177,7 +189,7 @@ export class SourceRegistry {
         const relinkedAsset: SourceAsset = { ...asset, identity: match.identity };
         usedPaths.add(match.candidate.path);
         this.paths.set(asset.id, match.candidate.path);
-        upsertLocation(locations, match.candidate.path, match.identity);
+        await upsertLocation(locations, match.candidate.path, match.identity);
         relinkedAssetIds.push(asset.id);
         relinkedAssets.push(relinkedAsset);
       }
@@ -245,11 +257,54 @@ export async function describeSource(filePath: string): Promise<SourceIdentity> 
   }
 }
 
-async function pathMatchesIdentity(filePath: string, identity: SourceIdentity): Promise<boolean> {
+/** Reads only the first and last probeReadSize bytes of a file and hashes
+ * them. Used by the mtime shortcut so identity checks stay cheap while
+ * catching replaced content that preserved size and mtime. */
+async function readSourceProbe(filePath: string): Promise<SourceProbe | undefined> {
+  let handle;
+  try {
+    handle = await open(filePath, "r");
+    const details = await handle.stat();
+    if (!details.isFile() || details.size <= 0) return undefined;
+    const headLength = Math.min(probeReadSize, details.size);
+    const tailLength = Math.min(probeReadSize, details.size);
+    const head = Buffer.alloc(headLength);
+    const tail = Buffer.alloc(tailLength);
+    await handle.read(head, 0, headLength, 0);
+    await handle.read(tail, 0, tailLength, details.size - tailLength);
+    return {
+      algorithm: "sha256-probe-v1",
+      head: createHash("sha256").update(head).digest("hex"),
+      tail: createHash("sha256").update(tail).digest("hex"),
+    };
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function pathMatchesIdentity(
+  filePath: string,
+  identity: SourceIdentity,
+  probe?: SourceProbe,
+): Promise<boolean> {
   try {
     const details = await stat(filePath);
     if (!details.isFile() || details.size !== identity.size) return false;
-    if (details.mtime.toISOString() === identity.lastModifiedAt) return true;
+    if (details.mtime.toISOString() === identity.lastModifiedAt) {
+      // The mtime shortcut no longer trusts on its own: verify the cached
+      // head/tail probe (128 KiB of reads) so a replaced file with a
+      // preserved mtime cannot pass as the original master. Records without
+      // a probe fall through to the full fingerprint check once and gain a
+      // probe on the next index write.
+      if (probe !== undefined) {
+        const current = await readSourceProbe(filePath);
+        if (current !== undefined && current.head === probe.head && current.tail === probe.tail) {
+          return true;
+        }
+      }
+    }
     return (await describeSource(filePath)).fingerprint.value === identity.fingerprint.value;
   } catch {
     return false;
@@ -299,12 +354,15 @@ function sourceExtension(filePath: string): string {
   return extname(filePath).replace(".", "").toUpperCase() || "FILE";
 }
 
-function upsertLocation(
+async function upsertLocation(
   locations: SourceLocationRecord[],
   filePath: string,
   identity: SourceIdentity,
-): void {
+): Promise<void> {
   const existingIndex = locations.findIndex((entry) => entry.path === filePath);
+  // Best effort: an unreadable probe only means the next restore falls back
+  // to the full fingerprint check.
+  const probe = await readSourceProbe(filePath);
   const record: SourceLocationRecord = {
     fingerprint: identity.fingerprint.value,
     path: filePath,
@@ -312,6 +370,7 @@ function upsertLocation(
     size: identity.size,
     lastModifiedAt: identity.lastModifiedAt,
     lastSeenAt: new Date().toISOString(),
+    ...(probe === undefined ? {} : { probe }),
   };
   if (existingIndex < 0) locations.push(record);
   else locations[existingIndex] = record;

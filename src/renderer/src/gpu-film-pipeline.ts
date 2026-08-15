@@ -1645,24 +1645,51 @@ const defectFragmentShader = `#version 300 es
   uniform bool u_dust;
   uniform bool u_scratches;
 
+  // Median of 8 via the optimal 19-comparator sorting network; even counts
+  // average the two middle elements. Mirrors the CPU's median-based MAD
+  // estimate (median x 1.4826) instead of the previous mean deviation, which
+  // diverged from the CPU on skewed neighbourhoods.
+  float medianOf8(float v[8]) {
+    const ivec2 pairs[19] = ivec2[19](
+      ivec2(0,1), ivec2(2,3), ivec2(4,5), ivec2(6,7),
+      ivec2(0,2), ivec2(1,3), ivec2(4,6), ivec2(5,7),
+      ivec2(1,2), ivec2(5,6),
+      ivec2(0,4), ivec2(1,5), ivec2(2,6), ivec2(3,7),
+      ivec2(1,4), ivec2(2,5), ivec2(3,6),
+      ivec2(2,4), ivec2(3,5)
+    );
+    for (int i = 0; i < 19; i++) {
+      int a = pairs[i].x;
+      int b = pairs[i].y;
+      if (v[a] > v[b]) {
+        float t = v[a];
+        v[a] = v[b];
+        v[b] = t;
+      }
+    }
+    return (v[3] + v[4]) * 0.5;
+  }
+
   void main() {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     vec3 center = samplePixel(pixel);
     vec3 result = center;
     if (u_dust) {
       vec3 neighbourSum = vec3(0.0);
-      float lumaDeviation = 0.0;
+      float deviations[8];
       float centerLuma = luma(center);
+      int neighbourIndex = 0;
       for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
           if (x == 0 && y == 0) continue;
           vec3 sampleValue = samplePixel(pixel + ivec2(x, y));
           neighbourSum += sampleValue;
-          lumaDeviation += abs(luma(sampleValue) - centerLuma);
+          deviations[neighbourIndex] = abs(luma(sampleValue) - centerLuma);
+          neighbourIndex += 1;
         }
       }
       vec3 average = neighbourSum / 8.0;
-      float required = max(0.01, 3.5 * lumaDeviation / 8.0);
+      float required = max(0.01, 3.5 * medianOf8(deviations) * 1.4826);
       bvec3 affected = greaterThan(abs(center - average), vec3(required));
       int affectedCount = (affected.r ? 1 : 0) + (affected.g ? 1 : 0) + (affected.b ? 1 : 0);
       if (abs(centerLuma - luma(average)) >= required && affectedCount >= 2) {

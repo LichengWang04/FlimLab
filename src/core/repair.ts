@@ -152,28 +152,27 @@ export function detectDust(
   assertFiniteRaster(source);
   const options = normalizeDustDetection(settings);
   const mask = new Uint8Array(source.width * source.height);
-  const values: number[] = [];
-  const redValues: number[] = [];
-  const greenValues: number[] = [];
-  const blueValues: number[] = [];
+  // Typed collectors reused across pixels: the median/MAD helpers below
+  // select in place, so no per-pixel short-lived arrays are allocated.
+  const neighbourhoodCapacity = (2 * options.radius + 1) ** 2 - 1;
+  const values = new Float32Array(neighbourhoodCapacity);
+  const redValues = new Float32Array(neighbourhoodCapacity);
+  const greenValues = new Float32Array(neighbourhoodCapacity);
+  const blueValues = new Float32Array(neighbourhoodCapacity);
 
   report(control, "dust-detection", 0, source.height);
   for (let y = 0; y < source.height; y += 1) {
     throwIfAborted(control.signal);
     for (let x = 0; x < source.width; x += 1) {
-      values.length = 0;
-      redValues.length = 0;
-      greenValues.length = 0;
-      blueValues.length = 0;
-      collectNeighbourhood(source, x, y, options.radius, values, redValues, greenValues, blueValues);
-      if (values.length < 3) {
+      const count = collectNeighbourhood(source, x, y, options.radius, values, redValues, greenValues, blueValues);
+      if (count < 3) {
         continue;
       }
 
       const offset = (y * source.width + x) * 3;
       const centerLuma = luminance(source.data[offset], source.data[offset + 1], source.data[offset + 2]);
-      const lumaMedian = median(values);
-      const lumaScale = robustScale(values, lumaMedian);
+      const lumaMedian = medianInPlace(values, count);
+      const lumaScale = robustScaleInPlace(values, count, lumaMedian);
       const difference = centerLuma - lumaMedian;
       const requiredDifference = Math.max(options.minDifference, options.threshold * lumaScale);
       if (!matchesPolarity(difference, requiredDifference, options.polarity)) {
@@ -183,9 +182,9 @@ export function detectDust(
       const channelValues = [redValues, greenValues, blueValues] as const;
       let affectedChannels = 0;
       for (let channel = 0; channel < 3; channel += 1) {
-        const channelMedian = median(channelValues[channel]);
+        const channelMedian = medianInPlace(channelValues[channel], count);
         const channelDifference = source.data[offset + channel] - channelMedian;
-        const channelRequired = Math.max(options.minDifference, options.threshold * robustScale(channelValues[channel], channelMedian));
+        const channelRequired = Math.max(options.minDifference, options.threshold * robustScaleInPlace(channelValues[channel], count, channelMedian));
         if (matchesPolarity(channelDifference, channelRequired, options.polarity)) {
           affectedChannels += 1;
         }
@@ -333,10 +332,15 @@ export function denoiseEdgePreserving(
   }
   const spatialWeights = gaussianWeights(options.radius, options.spatialSigma);
   let input = source;
+  // Ping-pong two scratch rasters instead of allocating a full frame per
+  // iteration; multi-iteration denoise no longer scales memory with
+  // iterations (each full-resolution Raster is ~720 MB at 61 MP).
+  const ping = new Raster(source.width, source.height, source.domain);
+  const pong = options.iterations >= 2 ? new Raster(source.width, source.height, source.domain) : undefined;
   const total = source.height * options.iterations;
   report(control, "denoise", 0, total);
   for (let iteration = 0; iteration < options.iterations; iteration += 1) {
-    const target = new Raster(source.width, source.height, source.domain);
+    const target = iteration % 2 === 0 ? ping : (pong ?? ping);
     for (let y = 0; y < source.height; y += 1) {
       throwIfAborted(control.signal);
       for (let x = 0; x < source.width; x += 1) {
@@ -389,8 +393,11 @@ export function sharpenUnsharp(
     return source.clone();
   }
 
-  const blurred = gaussianBlur(source, options.radius, options.sigma, control);
+  // The blur output doubles as the sharpen target: the detail pass reads and
+  // writes the same channel slot in order, so a single full-frame buffer
+  // serves both stages instead of two.
   const target = new Raster(source.width, source.height, source.domain);
+  const blurred = gaussianBlur(source, options.radius, options.sigma, control, target);
   report(control, "sharpen", 0, source.height);
   for (let y = 0; y < source.height; y += 1) {
     throwIfAborted(control.signal);
@@ -562,9 +569,14 @@ function nearestUnmasked(
   return undefined;
 }
 
-function gaussianBlur(source: Raster, radius: number, sigma: number, control: RepairControl): Raster {
+function gaussianBlur(
+  source: Raster,
+  radius: number,
+  sigma: number,
+  control: RepairControl,
+  target = new Raster(source.width, source.height, source.domain),
+): Raster {
   const weights = gaussianWeights(radius, sigma);
-  const target = new Raster(source.width, source.height, source.domain);
   report(control, "sharpen-blur", 0, source.height);
   for (let y = 0; y < source.height; y += 1) {
     throwIfAborted(control.signal);
@@ -600,11 +612,12 @@ function collectNeighbourhood(
   x: number,
   y: number,
   radius: number,
-  values: number[],
-  redValues: number[],
-  greenValues: number[],
-  blueValues: number[],
-): void {
+  values: Float32Array,
+  redValues: Float32Array,
+  greenValues: Float32Array,
+  blueValues: Float32Array,
+): number {
+  let count = 0;
   for (let dy = -radius; dy <= radius; dy += 1) {
     const sampleY = y + dy;
     if (sampleY < 0 || sampleY >= source.height) {
@@ -616,12 +629,14 @@ function collectNeighbourhood(
         continue;
       }
       const offset = (sampleY * source.width + sampleX) * 3;
-      redValues.push(source.data[offset]);
-      greenValues.push(source.data[offset + 1]);
-      blueValues.push(source.data[offset + 2]);
-      values.push(luminance(source.data[offset], source.data[offset + 1], source.data[offset + 2]));
+      redValues[count] = source.data[offset];
+      greenValues[count] = source.data[offset + 1];
+      blueValues[count] = source.data[offset + 2];
+      values[count] = luminance(source.data[offset], source.data[offset + 1], source.data[offset + 2]);
+      count += 1;
     }
   }
+  return count;
 }
 
 function isScratchOutlier(center: number, firstSide: number, secondSide: number, options: Required<ScratchDetectionSettings>): boolean {
@@ -725,32 +740,92 @@ function gaussianWeights(radius: number, sigma: number): number[][] {
   return weights;
 }
 
+interface WeightedMedianEntry {
+  value: number;
+  weight: number;
+}
+
+/** Reused entry pool: inpaintMask runs synchronously in one thread, so
+ * recycling entries avoids per-defect-pixel allocation churn. */
+const weightedMedianEntries: WeightedMedianEntry[] = [];
+
 function weightedMedian(values: readonly number[], distances: readonly number[]): number {
-  const entries = values.map((value, index) => ({ value, weight: 1 / Math.max(distances[index], EPSILON) }));
+  const count = values.length;
+  while (weightedMedianEntries.length < count) {
+    weightedMedianEntries.push({ value: 0, weight: 0 });
+  }
+  for (let index = 0; index < count; index += 1) {
+    const entry = weightedMedianEntries[index];
+    entry.value = values[index];
+    entry.weight = 1 / Math.max(distances[index], EPSILON);
+  }
+  const entries = weightedMedianEntries;
+  entries.length = count;
   entries.sort((left, right) => left.value - right.value);
-  const total = entries.reduce((sum, entry) => sum + entry.weight, 0);
+  let total = 0;
+  for (let index = 0; index < count; index += 1) total += entries[index].weight;
   let accumulated = 0;
-  for (const entry of entries) {
-    accumulated += entry.weight;
+  for (let index = 0; index < count; index += 1) {
+    accumulated += entries[index].weight;
     if (accumulated >= total / 2) {
-      return entry.value;
+      return entries[index].value;
     }
   }
-  return entries[entries.length - 1].value;
+  return entries[count - 1].value;
 }
 
-function robustScale(values: readonly number[], center: number): number {
-  const deviations = values.map((value) => Math.abs(value - center));
-  return Math.max(median(deviations) * 1.4826, EPSILON);
+/** Scratch for the MAD pass; grows on demand and is reused across pixels. */
+let deviationScratch = new Float32Array(64);
+
+function robustScaleInPlace(values: Float32Array, length: number, center: number): number {
+  if (deviationScratch.length < length) {
+    deviationScratch = new Float32Array(Math.max(length, deviationScratch.length * 2));
+  }
+  for (let index = 0; index < length; index += 1) {
+    deviationScratch[index] = Math.abs(values[index] - center);
+  }
+  return Math.max(medianInPlace(deviationScratch, length) * 1.4826, EPSILON);
 }
 
-function median(values: readonly number[]): number {
-  if (values.length === 0) {
+/** In-place median via quickselect (even lengths average the two middle
+ * values, matching the previous full-sort implementation). The caller's
+ * array is permuted; all callers treat their collectors as scratch. */
+function medianInPlace(values: Float32Array, length: number): number {
+  if (length === 0) {
     throw new Error("Cannot calculate a median of an empty collection.");
   }
-  const sorted = [...values].sort((left, right) => left - right);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
+  const middle = Math.floor(length / 2);
+  const upper = quickSelect(values, middle, length);
+  return length % 2 === 0 ? (quickSelect(values, middle - 1, length) + upper) / 2 : upper;
+}
+
+function quickSelect(values: Float32Array, target: number, length: number): number {
+  let left = 0;
+  let right = length - 1;
+  while (left < right) {
+    const pivot = values[(left + right) >>> 1];
+    let low = left;
+    let high = right;
+    while (low <= high) {
+      while (values[low] < pivot) low += 1;
+      while (values[high] > pivot) high -= 1;
+      if (low <= high) {
+        const value = values[low];
+        values[low] = values[high];
+        values[high] = value;
+        low += 1;
+        high -= 1;
+      }
+    }
+    if (target <= high) {
+      right = high;
+    } else if (target >= low) {
+      left = low;
+    } else {
+      return values[target];
+    }
+  }
+  return values[target];
 }
 
 function matchesPolarity(difference: number, requiredDifference: number, polarity: DefectPolarity): boolean {

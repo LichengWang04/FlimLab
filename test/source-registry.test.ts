@@ -77,6 +77,31 @@ test("source registry re-hashes content when only the modification time changed"
   assert.equal(restarted.getPath(asset.id), filePath);
 });
 
+test("source registry rejects a replaced file that preserved size and modification time", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "filmlab-source-probe-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
+
+  const filePath = join(root, "frame-f.dng");
+  await writeFile(filePath, Buffer.from("alpha-frame-bytes-01"));
+  const indexPath = join(root, "locations.json");
+
+  const first = new SourceRegistry(indexPath);
+  const [asset] = await first.register([filePath]);
+
+  // Same length, different bytes, mtime reset to the recorded value: the
+  // cached head/tail probe must catch what the size+mtime shortcut misses.
+  assert.ok(asset.identity !== undefined);
+  await writeFile(filePath, Buffer.from("omega-frame-bytes-01"));
+  const originalMtime = new Date(asset.identity.lastModifiedAt);
+  await utimes(filePath, originalMtime, originalMtime);
+
+  const restarted = new SourceRegistry(indexPath);
+  const restored = await restarted.restore([asset]);
+  assert.deepEqual(restored.relinkedAssetIds, []);
+  assert.deepEqual(restored.missingAssets.map((missing) => missing.id), [asset.id]);
+  assert.equal(restarted.getPath(asset.id), undefined);
+});
+
 test("source registry rejects a tampered file whose bytes changed at the same size", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "filmlab-source-tamper-"));
   context.after(async () => rm(root, { recursive: true, force: true }));

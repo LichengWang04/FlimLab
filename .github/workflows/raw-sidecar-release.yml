@@ -57,9 +57,9 @@ jobs:
             requires_codesign: false
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
@@ -121,6 +121,37 @@ jobs:
 
       - run: npm run check
         shell: bash
+
+      # Rehearses the tag-only signing configuration on every main push so an
+      # expired or missing certificate surfaces before a tag build fails.
+      - name: Rehearse signing configuration availability
+        if: github.event_name == 'push' && github.ref_type != 'tag' && matrix.requires_codesign == 'true'
+        shell: bash
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          missing=""
+          if [[ "${{ matrix.platform }}" == "win32" ]]; then
+            test -n "$WIN_CSC_LINK" || missing="$missing WIN_CSC_LINK"
+            test -n "$WIN_CSC_KEY_PASSWORD" || missing="$missing WIN_CSC_KEY_PASSWORD"
+          else
+            test -n "$MAC_CSC_LINK" || missing="$missing MAC_CSC_LINK"
+            test -n "$MAC_CSC_KEY_PASSWORD" || missing="$missing MAC_CSC_KEY_PASSWORD"
+            test -n "$APPLE_API_KEY" || missing="$missing APPLE_API_KEY"
+            test -n "$APPLE_API_KEY_ID" || missing="$missing APPLE_API_KEY_ID"
+            test -n "$APPLE_API_ISSUER" || missing="$missing APPLE_API_ISSUER"
+          fi
+          if [[ -n "$missing" ]]; then
+            echo "::warning ::Release signing configuration is incomplete for ${{ matrix.platform }}; a tag build will fail until these secrets exist:$missing"
+          else
+            echo "Signing configuration is available for ${{ matrix.platform }}."
+          fi
 
       - name: Package current platform with its verified sidecar
         shell: bash
@@ -206,13 +237,18 @@ jobs:
           xcrun stapler validate "$app"
           hdiutil verify "$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
 
-      - uses: actions/upload-artifact@v4
+      - name: Remove notarization key material
+        if: always() && matrix.platform == 'darwin'
+        shell: bash
+        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: filmlab-raw-worker-${{ matrix.platform }}-${{ matrix.arch }}
           path: native/raw-worker/out/${{ matrix.platform }}-${{ matrix.arch }}/
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: filmlab-package-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
@@ -237,9 +273,9 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: filmlab-package-*
           path: release-downloads
@@ -262,12 +298,12 @@ jobs:
 
       - name: Attest release artifacts with CycloneDX SBOM
         if: github.event.repository.private == false || vars.FILMLAB_ATTESTATIONS_ENABLED == 'true'
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-checksums: publish/SHA256SUMS
           sbom-path: ${{ steps.release-metadata.outputs.sbom-path }}
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           generate_release_notes: true
           fail_on_unmatched_files: true
