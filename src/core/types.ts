@@ -57,10 +57,12 @@ export interface Recipe {
   rotate: QuarterTurn;
   /** Optional crop applied after rotation, in normalized coordinates. */
   crop?: Rect;
-  /** How the film base is determined. */
+  /** How the film base is determined: automatic envelope estimate by
+   * default, or a user-drawn unexposed border region. */
   baseMode: "roi" | "auto";
-  /** Where to sample unexposed base; relative to the delivered frame. */
-  baseRoi: Rect;
+  /** User-drawn unexposed base region; relative to the delivered frame.
+   * Only used when baseMode is "roi". */
+  baseRoi?: Rect;
   /** How the density range (Dmax) is determined. */
   dmaxMode: "auto" | "manual";
   /** Absolute density used when dmaxMode is manual. */
@@ -89,8 +91,7 @@ export interface Recipe {
 
 export const DEFAULT_RECIPE: Recipe = {
   rotate: 0,
-  baseMode: "roi",
-  baseRoi: { x: 0, y: 0, width: 0.08, height: 1 },
+  baseMode: "auto",
   dmaxMode: "auto",
   manualDmax: 1.2,
   autoNeutralize: true,

@@ -37,9 +37,9 @@ export function processNegative(source: Raster, recipe: Recipe): NegativeResult 
   const rotated = rotateRaster(source, recipe.rotate);
   const framed = recipe.crop === undefined ? rotated : cropRaster(rotated, recipe.crop);
 
-  const base = recipe.baseMode === "auto"
-    ? estimateFilmBase(framed)
-    : sampleFilmBase(framed, recipe.baseRoi);
+  const base = recipe.baseMode === "roi" && recipe.baseRoi !== undefined
+    ? sampleFilmBase(framed, recipe.baseRoi)
+    : estimateFilmBase(framed);
   const density = toRelativeDensity(framed, base.rgb);
   const anchors = measureDensityAnchors(base.rgb, density, 0.995, {
     dmaxOverride: recipe.dmaxMode === "manual" ? recipe.manualDmax : undefined,

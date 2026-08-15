@@ -527,7 +527,10 @@ describe("End-to-end negative inversion", () => {
   it("recovers a grey ramp from a masked negative", () => {
     const base: Rgb = [0.9, 0.5, 0.3];
     const frame = syntheticNegative(base, (x) => (x - 8) / 92);
-    const result = processNegative(frame, baseRecipe());
+    const result = processNegative(frame, baseRecipe({
+      baseMode: "roi",
+      baseRoi: { x: 0, y: 0, width: 0.08, height: 1 },
+    }));
 
     // Base sampling finds the true mask; the neutral tail fires auto-neutralize.
     assert.equal(result.base.method, "roi");
@@ -554,6 +557,35 @@ describe("End-to-end negative inversion", () => {
       approx(result.display.data[offset]!, result.display.data[offset + 1]!, 1e-6, `red vs green at x=${x}`);
       approx(result.display.data[offset]!, result.display.data[offset + 2]!, 1e-6, `red vs blue at x=${x}`);
     }
+  });
+
+  it("recovers a grey ramp with the default automatic base estimate", () => {
+    const base: Rgb = [0.9, 0.5, 0.3];
+    const frame = syntheticNegative(base, (x) => (x - 8) / 92);
+    const result = processNegative(frame, baseRecipe());
+
+    // The upper envelope lands on the 8% border, recovering the true mask.
+    assert.equal(result.base.method, "automatic");
+    approx(result.base.rgb[0], 0.9, 1e-6);
+    approx(result.base.rgb[1], 0.5, 1e-6);
+    approx(result.base.rgb[2], 0.3, 1e-6);
+    assert.ok(result.anchors.channelRange);
+
+    const sampleXs = [10, 30, 50, 70, 90];
+    const scales = sampleXs.map((x) => {
+      const offset = Raster.offsetOf(x, 20, 100);
+      return result.display.data[offset]! / ((x - 8) / 92);
+    });
+    const meanScale = scales.reduce((sum, value) => sum + value, 0) / scales.length;
+    assert.ok(meanScale > 0.9 && meanScale < 1.15, `mean scale ${meanScale}`);
+    for (const scale of scales) approx(scale, meanScale, meanScale * 0.02);
+  });
+
+  it("falls back to the automatic estimate when a drawn ROI is missing", () => {
+    const base: Rgb = [0.9, 0.5, 0.3];
+    const frame = syntheticNegative(base, (x) => (x - 8) / 92);
+    const result = processNegative(frame, baseRecipe({ baseMode: "roi" }));
+    assert.equal(result.base.method, "automatic");
   });
 
   it("recovers distinct colours through per-channel inversion", () => {
@@ -589,6 +621,7 @@ describe("End-to-end negative inversion", () => {
     });
     const result = processNegative(frame, baseRecipe({
       rotate: 90,
+      baseMode: "roi",
       baseRoi: { x: 0.92, y: 0, width: 0.08, height: 1 },
       autoNeutralize: false,
     }));
@@ -618,6 +651,8 @@ describe("End-to-end negative inversion", () => {
       return [base[0] * transmission, base[1] * transmission, base[2] * transmission];
     });
     const result = processNegative(frame, baseRecipe({
+      baseMode: "roi",
+      baseRoi: { x: 0, y: 0, width: 0.08, height: 1 },
       crop: { x: 0, y: 0, width: 0.5, height: 1 },
       autoNeutralize: false,
     }));
@@ -662,10 +697,11 @@ describe("End-to-end negative inversion", () => {
 });
 
 describe("Default recipe", () => {
-  it("starts from a sane state", () => {
+  it("starts from the automatic base estimate", () => {
     assert.equal(DEFAULT_RECIPE.rotate, 0);
     assert.equal(DEFAULT_RECIPE.crop, undefined);
-    assert.deepEqual(DEFAULT_RECIPE.baseRoi, { x: 0, y: 0, width: 0.08, height: 1 });
+    assert.equal(DEFAULT_RECIPE.baseMode, "auto");
+    assert.equal(DEFAULT_RECIPE.baseRoi, undefined);
     assert.equal(DEFAULT_RECIPE.dmaxMode, "auto");
     assert.equal(DEFAULT_RECIPE.autoNeutralize, true);
     assert.deepEqual(DEFAULT_RECIPE.whiteBalance, [1, 1, 1]);

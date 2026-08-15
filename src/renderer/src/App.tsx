@@ -59,10 +59,10 @@ export function App() {
         setError(null);
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : String(caught);
-        // A crop can leave the default border ROI over image content; fall
-        // back to the automatic envelope estimate instead of failing.
+        // A crop can leave a drawn base ROI over image content; fall back
+        // to the automatic envelope estimate instead of failing.
         if (BASE_ERROR.test(message) && recipe.baseMode !== "auto") {
-          setRecipe((current) => ({ ...current, baseMode: "auto" }));
+          setRecipe((current) => ({ ...current, baseMode: "auto", baseRoi: undefined }));
         } else {
           setError(message);
         }
@@ -104,7 +104,7 @@ export function App() {
       );
       context.setLineDash([]);
     };
-    if (recipe.baseMode === "roi" && (mode === "base-roi" || recipe.baseRoi !== DEFAULT_RECIPE.baseRoi)) {
+    if (recipe.baseMode === "roi" && recipe.baseRoi !== undefined && mode !== "base-roi") {
       stroke(recipe.baseRoi, "#4ade80");
     }
     if (recipe.neutralRoi !== undefined && mode !== "neutral-roi") {
@@ -289,20 +289,22 @@ export function App() {
             </Section>
 
             <Section title="片基">
-              <RadioGroup
-                value={recipe.baseMode}
-                onChange={(baseMode) => update({ baseMode })}
-                options={[
-                  { value: "roi", label: "默认选区(左侧 8%)" },
-                  { value: "auto", label: "自动估算" },
-                ]}
-              />
               <button className="btn" onClick={() => setMode("base-roi")}>框选片基区域</button>
+              {recipe.baseMode === "roi" && recipe.baseRoi !== undefined && (
+                <button
+                  className="btn ghost"
+                  onClick={() => update({ baseRoi: undefined, baseMode: "auto" })}
+                >
+                  清除选区(回到自动)
+                </button>
+              )}
               <p className="field-note">
                 片基:{baseLabel} · {baseDetail}
               </p>
               {recipe.baseMode === "auto" && (
-                <p className="field-note warn">自动估算只是上包络近似,无法替代实测未曝光片基;建议保留胶片边缘再框选。</p>
+                <p className="field-note warn">
+                  自动估算是透射上包络近似,置信度上限 0.65,无法替代实测片基;建议保留一段未曝光边缘并框选。
+                </p>
               )}
             </Section>
 
