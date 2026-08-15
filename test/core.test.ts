@@ -1,747 +1,701 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-
+import { describe, it } from "node:test";
 import {
-  applyFilmTransform,
-  applyGeometry,
+  cropRaster,
+  DEFAULT_RECIPE,
+  downscaleRaster,
+  encode16,
+  encode8,
   estimateFilmBase,
-  estimateDisplayWhitePoint,
-  fitColorChartCurves,
+  estimateWhitePoint,
+  invertDensity,
   measureDensityAnchors,
-  processFilm,
-  processFilmToScene,
+  processNegative,
   Raster,
-  rotateAndConstrain,
-  rasterToSrgbRgba,
-  sampleMonotonicCurve,
+  rotateRaster,
   sampleFilmBase,
+  srgbOetf,
+  srgbToLinear,
   toRelativeDensity,
   toneMap,
-  toneMapToSrgbRgba,
+  validateRect,
 } from "../src/core/index.ts";
-import type { CalibrationProfile, ColorChartPatch, CurveSet, Lut3d, Matrix3 } from "../src/core/index.ts";
-import { estimateAlignmentFromRgba } from "../src/renderer/src/alignment.ts";
-import { estimateFilmFrameCropFromRgba } from "../src/renderer/src/film-frame.ts";
+import type { RasterDomain, Recipe, Rect, Rgb } from "../src/core/index.ts";
 
-const identityMatrix: Matrix3 = [
-  [1, 0, 0],
-  [0, 1, 0],
-  [0, 0, 1],
-];
+type PixelFn = (x: number, y: number) => Rgb;
 
-const identityCurves: CurveSet = [
-  [
-    { x: 0, y: 0 },
-    { x: 1, y: 1 },
-  ],
-  [
-    { x: 0, y: 0 },
-    { x: 1, y: 1 },
-  ],
-  [
-    { x: 0, y: 0 },
-    { x: 1, y: 1 },
-  ],
-];
-
-test("film-base sampling is robust and relative density is zero at the base", () => {
-  const image = raster("transmission-linear-rgb", 4, 2, [
-    0.5, 0.25, 0.125, 0.5, 0.25, 0.125, 0.25, 0.125, 0.0625, 0.25, 0.125, 0.0625,
-    0.5, 0.25, 0.125, 0.5, 0.25, 0.125, 0.25, 0.125, 0.0625, 0.25, 0.125, 0.0625,
-  ]);
-  const base = sampleFilmBase(image, { x: 0, y: 0, width: 0.5, height: 1 });
-  const density = toRelativeDensity(image, base.rgb);
-
-  near(base.rgb[0], 0.5);
-  near(base.rgb[1], 0.25);
-  near(base.rgb[2], 0.125);
-  near(density.data[0], 0);
-  near(density.data[6], Math.log10(2));
-  near(density.data[7], Math.log10(2));
-  near(density.data[8], Math.log10(2));
-});
-
-test("film-base quick selection rejects an outlier without changing the median", () => {
-  const values: number[] = [];
-  for (const red of [0.46, 0.47, 0.48, 0.49, 0.5, 0.51, 0.52, 0.53, 0.54, 0.9]) {
-    values.push(red, red / 2, red / 4);
-  }
-  const base = sampleFilmBase(raster("transmission-linear-rgb", 10, 1, values), { x: 0, y: 0, width: 1, height: 1 });
-
-  near(base.rgb[0], 0.5);
-  near(base.rgb[1], 0.25);
-  near(base.rgb[2], 0.125);
-  assert.equal(base.sampleCount, 9);
-  assert.equal(base.rejectedCount, 1);
-});
-
-test("automatic film-base estimation finds a joint high-transmission envelope with capped confidence", () => {
-  const values: number[] = [];
-  const expected = [0.82, 0.55, 0.3] as const;
-  for (let pixel = 0; pixel < 1_000; pixel += 1) {
-    if (pixel < 24) {
-      const variation = 0.996 + (pixel % 4) * 0.001;
-      values.push(expected[0] * variation, expected[1] * variation, expected[2] * variation);
-    } else {
-      const density = 0.18 + ((pixel * 37) % 620) / 1_000;
-      values.push(expected[0] * density, expected[1] * density * 0.98, expected[2] * density * 0.96);
-    }
-  }
-
-  const estimate = estimateFilmBase(raster("transmission-linear-rgb", 100, 10, values));
-
-  near(estimate.rgb[0], expected[0], 0.01);
-  near(estimate.rgb[1], expected[1], 0.01);
-  near(estimate.rgb[2], expected[2], 0.01);
-  assert.equal(estimate.method, "automatic");
-  assert.ok(estimate.confidence >= 0.3);
-  assert.ok(estimate.confidence <= 0.65);
-});
-
-test("a fixed film-base reference bypasses a cropped frame ROI", () => {
-  const source = raster("transmission-linear-rgb", 2, 1, [
-    0.4, 0.25, 0.1,
-    0.2, 0.125, 0.05,
-  ]);
-  const processed = processFilmToScene(source, {
-    baseRoi: { x: 0, y: 0, width: 0.5, height: 1 },
-    baseStrategy: { kind: "reference", rgb: [0.8, 0.5, 0.2], confidence: 0.94 },
-    film: { kind: "generic" },
-  });
-
-  assert.equal(processed.base.method, "reference");
-  near(processed.base.confidence, 0.94);
-  near(processed.base.rgb[0], 0.8);
-  near(processed.density.data[0], Math.log10(2));
-  near(processed.density.data[3], Math.log10(4));
-});
-
-test("density anchors report film-base Dmin and a robust high-density Dmax", () => {
-  const density = raster("relative-density", 4, 1, [
-    0, 0, 0,
-    0.2, 0.2, 0.2,
-    0.4, 0.4, 0.4,
-    5, 5, 5,
-  ]);
-  const anchors = measureDensityAnchors([0.5, 0.5, 0.5], density, 2 / 3);
-
-  near(anchors.dmin, Math.log10(2));
-  near(anchors.range, 0.4);
-  near(anchors.dmax, Math.log10(2) + 0.4);
-});
-
-test("manual Dmax overrides automatic anchors and can be measured from an ROI", () => {
-  const density = raster("relative-density", 4, 1, [
-    0, 0, 0,
-    0.2, 0.2, 0.2,
-    0.4, 0.4, 0.4,
-    5, 5, 5,
-  ]);
-  const manual = measureDensityAnchors([0.5, 0.5, 0.5], density, 0.995, { dmaxOverride: 1.25 });
-  near(manual.dmax, 1.25);
-  near(manual.range, 1.25 - Math.log10(2));
-
-  const sampled = measureDensityAnchors(
-    [0.5, 0.5, 0.5],
-    density,
-    0.5,
-    { dmaxRoi: { x: 0.25, y: 0, width: 0.5, height: 1 } },
-  );
-  near(sampled.dmax, Math.log10(2) + 0.3);
-});
-
-test("a neutral Dmax ROI records per-channel density ranges", () => {
-  const density = raster("relative-density", 2, 1, [
-    0.1, 0.2, 0.3,
-    0.4, 0.5, 0.6,
-  ]);
-  const anchors = measureDensityAnchors(
-    [0.5, 0.5, 0.5],
-    density,
-    1,
-    { dmaxRoi: { x: 0, y: 0, width: 1, height: 1 } },
-  );
-
-  assert.ok(anchors.channelRange !== undefined);
-  near(anchors.channelRange[0], 0.4);
-  near(anchors.channelRange[1], 0.5);
-  near(anchors.channelRange[2], 0.6);
-});
-
-test("automatic density anchors only infer channel ranges from a neutral high-density tail", () => {
-  const values: number[] = [];
-  for (let pixel = 0; pixel < 100; pixel += 1) {
-    if (pixel < 12) {
-      values.push(0.92, 0.9, 0.91);
-    } else {
-      values.push(0.1 + (pixel % 5) * 0.01, 0.2, 0.65);
-    }
-  }
-  const anchors = measureDensityAnchors(
-    [0.5, 0.5, 0.5],
-    raster("relative-density", 100, 1, values),
-    0.995,
-    { inferChannelRange: true },
-  );
-
-  assert.ok(anchors.channelRange !== undefined);
-  near(anchors.channelRange[0], 0.92);
-  near(anchors.channelRange[1], 0.9);
-  near(anchors.channelRange[2], 0.91);
-});
-
-test("generic mode maps higher negative density to a brighter positive", () => {
-  const density = raster("relative-density", 2, 1, [
-    0, 0, 0,
-    Math.log10(2), Math.log10(2), Math.log10(2),
-  ]);
-  const result = applyFilmTransform(density, { kind: "generic" });
-
-  near(result.data[0], 0);
-  near(result.data[3], 1);
-  near(result.data[4], 1);
-  near(result.data[5], 1);
-  assert.equal(result.domain, "scene-linear-rgb");
-});
-
-test("generic mode keeps scene-derived channel Dmax disabled unless opted in", () => {
-  const values: number[] = [];
-  for (let pixel = 0; pixel < 100; pixel += 1) {
-    values.push(pixel < 12 ? 0.92 : 0.1, pixel < 12 ? 0.9 : 0.2, pixel < 12 ? 0.91 : 0.65);
-  }
-  const anchors = measureDensityAnchors(
-    [0.5, 0.5, 0.5],
-    raster("relative-density", 100, 1, values),
-  );
-  assert.equal(anchors.channelRange, undefined);
-});
-
-test("generic mode uses a neutral Dmax anchor to align channel response", () => {
-  const density = raster("relative-density", 1, 1, [0.4, 0.5, 0.6]);
-  const result = applyFilmTransform(
-    density,
-    // The default pre-saturation separates chroma before the per-channel
-    // anchor normalization; pin it to 1 so this test isolates alignment.
-    { kind: "generic", preSaturation: 1 },
-    undefined,
-    [0.4, 0.5, 0.6],
-  );
-
-  near(result.data[0], 9);
-  near(result.data[1], 9);
-  near(result.data[2], 9);
-});
-
-test("generic mode can separate density chroma before inversion", () => {
-  const result = applyFilmTransform(
-    raster("relative-density", 1, 1, [0.1, 0.2, 0.3]),
-    {
-      kind: "generic",
-      preSaturation: 2,
-      densityMatrix: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-    },
-  );
-  near(result.data[0], 0);
-  near(result.data[1], Math.pow(10, 0.2) - 1);
-  near(result.data[2], Math.pow(10, 0.4) - 1);
-});
-
-test("relative density sanitizes non-finite transmission samples", () => {
-  const source = raster("transmission-linear-rgb", 3, 1, [
-    0.5, 0.5, 0.5,
-    Number.NaN, 0.2, 0.2,
-    0.2, Number.POSITIVE_INFINITY, 0.2,
-  ]);
-  const density = toRelativeDensity(source, [1, 1, 1]);
-
-  for (let index = 0; index < density.data.length; index += 1) {
-    assert.ok(Number.isFinite(density.data[index]), `density sample ${index} must be finite`);
-  }
-  // Corrupt samples map to the film base (density 0) instead of failing the frame.
-  near(density.data[3], 0);
-  near(density.data[7], 0);
-});
-
-test("generic mode caps amplification beyond a small channel anchor", () => {
-  const result = applyFilmTransform(
-    raster("relative-density", 1, 1, [2, 2, 2]),
-    { kind: "generic" },
-    undefined,
-    [0.1, 0.1, 0.1],
-  );
-
-  // Without the cap, 2 / 0.1 = 20 would reach 10^20 from a badly sampled ROI.
-  near(result.data[0], Math.pow(10, 4) - 1);
-  near(result.data[1], Math.pow(10, 4) - 1);
-  near(result.data[2], Math.pow(10, 4) - 1);
-});
-
-test("tone mapping sanitizes non-finite scene values instead of propagating NaN", () => {
-  const scene = raster("scene-linear-rgb", 2, 1, [
-    Number.POSITIVE_INFINITY, 0.5, 0.5,
-    Number.NaN, 0.5, 0.5,
-  ]);
-  const mapped = toneMap(scene);
-
-  for (let index = 0; index < mapped.data.length; index += 1) {
-    assert.ok(Number.isFinite(mapped.data[index]), "tone output must stay finite");
-  }
-  // Positive infinity saturates to the display ceiling; NaN floors to black.
-  near(mapped.data[0], 1 - 1 / 65_536);
-  assert.equal(mapped.data[3], 0);
-});
-
-test("curve extrapolation caps hostile terminal slopes", () => {
-  const result = sampleMonotonicCurve([
-    { x: 0, y: 1 },
-    { x: 0.001, y: 1e6 },
-  ], 0.002);
-
-  // 1e6 * 10^(6 / 0.001 * 0.001) would reach 1e12 without the cap.
-  assert.ok(Number.isFinite(result));
-  near(result, 1e8);
-});
-
-test("film-base sampling reports rejected outliers when fewer than three joint inliers survive", () => {
-  const values: number[] = [];
-  for (let pixel = 0; pixel < 32; pixel += 1) {
-    if (pixel < 10) values.push(0.7, 0.25, 0.125);
-    else if (pixel < 20) values.push(0.5, 0.45, 0.125);
-    else if (pixel < 30) values.push(0.5, 0.25, 0.325);
-    else values.push(0.5, 0.25, 0.125);
-  }
-  const sample = sampleFilmBase(
-    raster("transmission-linear-rgb", 32, 1, values),
-    { x: 0, y: 0, width: 1, height: 1 },
-  );
-
-  assert.equal(sample.sampleCount, 32);
-  assert.equal(sample.rejectedCount, 30);
-  near(sample.confidence, 2 / 32);
-});
-
-test("color-chart curve fitting rejects non-finite samples explicitly", () => {
-  const valid: ColorChartPatch[] = [
-    { source: [0.1, 0.2, 0.3], target: [0.2, 0.3, 0.4] },
-    { source: [0.4, 0.5, 0.6], target: [0.5, 0.6, 0.7] },
-    { source: [0.7, 0.8, 0.9], target: [0.8, 0.9, 1.0] },
-  ];
-  const poisoned: ColorChartPatch[] = [
-    ...valid,
-    { source: [Number.NaN, 0.2, 0.3], target: [0.2, 0.3, 0.4] },
-  ];
-  assert.throws(() => fitColorChartCurves(poisoned), /finite/);
-  assert.ok(fitColorChartCurves(valid).length === 3);
-});
-
-test("calibrated mode applies its curves then its colour matrix", () => {
-  const density = raster("relative-density", 1, 1, [0.25, 0.5, 0.75]);
-  const result = applyFilmTransform(density, {
-    kind: "calibrated",
-    profile: {
-      id: "unit-preset",
-      version: "1",
-      calibrationId: "calibration-1",
-      captureFingerprint: "camera-light-1",
-      curves: identityCurves,
-      matrix: identityMatrix,
-    },
-  });
-
-  near(result.data[0], 0.25);
-  near(result.data[1], 0.5);
-  near(result.data[2], 0.75);
-});
-
-test("film curves clamp below and extrapolate above their density domain", () => {
-  const curve = [
-    { x: 0, y: 0.01 },
-    { x: 1, y: 1 },
-  ];
-
-  // Below the domain the endpoint still clamps; above it the terminal
-  // log-domain slope (2 D per unit here) continues instead of flattening,
-  // keeping highlight gradation and hue intact.
-  near(sampleMonotonicCurve(curve, -1), 0.01);
-  near(sampleMonotonicCurve(curve, 2), 100);
-  near(sampleMonotonicCurve(curve, 3), 10_000);
-});
-
-test("calibrated profiles keep their absolute curve domain", () => {
-  const profile: CalibrationProfile = {
-    id: "unit-calibration",
-    version: "1",
-    calibrationId: "calibration-1",
-    captureFingerprint: "camera-light-1",
-    curves: identityCurves,
-    matrix: identityMatrix,
-  };
-  const density = raster("relative-density", 1, 1, [1, 1, 1]);
-
-  const result = applyFilmTransform(density, { kind: "calibrated", profile }, 2);
-  near(result.data[0], 1);
-});
-
-test("calibrated cross-talk matrix negatives clamp to zero at the inversion stage", () => {
-  const profile: CalibrationProfile = {
-    id: "crosstalk-calibration",
-    version: "1",
-    calibrationId: "calibration-1",
-    captureFingerprint: "camera-light-1",
-    curves: identityCurves,
-    matrix: [
-      [1, -0.5, 0],
-      [0, 1, 0],
-      [0, 0, 1],
-    ] as Matrix3,
-  };
-  const density = raster("relative-density", 1, 1, [0.2, 0.9, 0.2]);
-
-  const result = applyFilmTransform(density, { kind: "calibrated", profile });
-  near(result.data[0], 0);
-  near(result.data[1], 0.9);
-  near(result.data[2], 0.2);
-});
-
-test("calibrated mode white-balances before sampling the 3D LUT", () => {
-  const constant = 0.5;
-  const lutData = new Float32Array(2 * 2 * 2 * 3);
-  lutData.fill(constant);
-  const profile: CalibrationProfile = {
-    id: "unit-calibration",
-    version: "1",
-    calibrationId: "calibration-1",
-    captureFingerprint: "camera-light-1",
-    curves: identityCurves,
-    matrix: identityMatrix,
-    lut: { size: 2, data: lutData },
-  };
-  const density = raster("relative-density", 1, 1, [0.5, 0.5, 0.5]);
-
-  // A constant LUT returns 0.5 regardless of its input; white balance must
-  // shape the LUT input, not rescale the LUT output (which would give 1.0).
-  const result = applyFilmTransform(density, { kind: "calibrated", profile, whiteBalance: [2, 2, 2] });
-  near(result.data[0], constant);
-  near(result.data[1], constant);
-  near(result.data[2], constant);
-});
-
-test("calibrated mode supports a trilinear 3D LUT", () => {
-  const lut = identityLut(2);
-  const profile: CalibrationProfile = {
-    id: "unit-calibration",
-    version: "1",
-    calibrationId: "calibration-1",
-    captureFingerprint: "camera-light-1",
-    curves: identityCurves,
-    matrix: identityMatrix,
-    lut,
-  };
-  const density = raster("relative-density", 1, 1, [0.25, 0.5, 0.75]);
-  const result = applyFilmTransform(density, { kind: "calibrated", profile });
-
-  near(result.data[0], 0.25);
-  near(result.data[1], 0.5);
-  near(result.data[2], 0.75);
-});
-
-test("geometry uses lossless right-angle rotation before crop", () => {
-  const transmission = raster("transmission-linear-rgb", 2, 1, [
-    1, 0, 0,
-    0, 1, 0,
-  ]);
-  const result = applyGeometry(transmission, { rotation: 90 });
-
-  assert.equal(result.width, 1);
-  assert.equal(result.height, 2);
-  assert.deepEqual(result.getPixel(0, 0), [1, 0, 0]);
-  assert.deepEqual(result.getPixel(0, 1), [0, 1, 0]);
-});
-
-test("geometry supports identity perspective without changing samples", () => {
-  const transmission = raster("transmission-linear-rgb", 2, 2, [
-    0.1, 0.2, 0.3, 0.4, 0.5, 0.6,
-    0.7, 0.8, 0.9, 0.2, 0.3, 0.4,
-  ]);
-  const result = applyGeometry(transmission, {
-    perspective: {
-      topLeft: { x: 0, y: 0 }, topRight: { x: 1, y: 0 },
-      bottomRight: { x: 1, y: 1 }, bottomLeft: { x: 0, y: 1 },
-    },
-  });
-
-  assert.equal(result.width, 2);
-  assert.equal(result.height, 2);
-  for (let index = 0; index < transmission.data.length; index += 1) {
-    near(result.data[index], transmission.data[index]);
-  }
-});
-
-test("fine rotation constrains the image without introducing empty corners", () => {
-  const source = Raster.filled(12, 8, "transmission-linear-rgb", [0.4, 0.3, 0.2]);
-  const result = rotateAndConstrain(source, 7.5);
-
-  assert.equal(result.width, source.width);
-  assert.equal(result.height, source.height);
-  for (let index = 0; index < result.data.length; index += 3) {
-    near(result.data[index], 0.4);
-    near(result.data[index + 1], 0.3);
-    near(result.data[index + 2], 0.2);
-  }
-});
-
-test("film-base sampling and density anchors use the final cropped frame", () => {
-  const source = raster("transmission-linear-rgb", 4, 2, [
-    0.5, 0.25, 0.125, 0.5, 0.25, 0.125, 0.25, 0.125, 0.0625, 0.25, 0.125, 0.0625,
-    0.5, 0.25, 0.125, 0.5, 0.25, 0.125, 0.25, 0.125, 0.0625, 0.25, 0.125, 0.0625,
-  ]);
-  const result = processFilm(source, {
-    baseRoi: { x: 0, y: 0, width: 1, height: 1 },
-    geometry: { crop: { x: 0.5, y: 0, width: 0.5, height: 1 } },
-    film: { kind: "generic" },
-  });
-
-  assert.equal(result.transmission.width, 2);
-  near(result.base.rgb[0], 0.25);
-  near(result.base.rgb[1], 0.125);
-  near(result.base.rgb[2], 0.0625);
-  near(result.density.data[0], 0);
-  near(result.densityAnchors.range, 0);
-});
-
-test("automatic alignment detects a tilted film-frame edge", () => {
-  const width = 240;
-  const height = 160;
-  const rgba = new Uint8Array(width * height * 4);
-  const slope = Math.tan(5 * Math.PI / 180);
+function build(width: number, height: number, domain: RasterDomain = "transmission-linear", fn: PixelFn = () => [0, 0, 0]): Raster {
+  const raster = new Raster(width, height, domain);
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      const offset = (y * width + x) * 4;
-      const upper = 30 + (x - width / 2) * slope;
-      const lower = 128 + (x - width / 2) * slope;
-      const value = y > upper && y < lower ? 230 : 18;
-      rgba[offset] = value;
-      rgba[offset + 1] = value;
-      rgba[offset + 2] = value;
-      rgba[offset + 3] = 255;
+      const offset = Raster.offsetOf(x, y, width);
+      const [r, g, b] = fn(x, y);
+      raster.data[offset] = r;
+      raster.data[offset + 1] = g;
+      raster.data[offset + 2] = b;
     }
   }
-  const estimate = estimateAlignmentFromRgba(rgba, width, height);
+  return raster;
+}
 
-  assert.ok(estimate.confidence > 0.2);
-  near(estimate.correctionDegrees, -5, 0.6);
-});
-
-test("automatic alignment favours paired film edges over interior texture", () => {
-  const width = 300;
-  const height = 200;
-  const rgba = new Uint8Array(width * height * 4);
-  const radians = 4 * Math.PI / 180;
-  const cosine = Math.cos(radians);
-  const sine = Math.sin(radians);
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const offset = (y * width + x) * 4;
-      const centeredX = x - width / 2;
-      const centeredY = y - height / 2;
-      const localX = cosine * centeredX + sine * centeredY;
-      const localY = -sine * centeredX + cosine * centeredY;
-      const inside = Math.abs(localX) < 132 && Math.abs(localY) < 76;
-      const textured = ((Math.floor(x / 18) + Math.floor(y / 14)) & 1) === 0;
-      const value = inside ? (textured ? 165 : 92) : 12;
-      rgba[offset] = value;
-      rgba[offset + 1] = value;
-      rgba[offset + 2] = value;
-      rgba[offset + 3] = 255;
-    }
-  }
-
-  const estimate = estimateAlignmentFromRgba(rgba, width, height);
-
-  assert.ok(estimate.confidence > 0.12);
-  near(estimate.correctionDegrees, -4, 0.7);
-});
-
-test("automatic crop follows the exposed image area without retaining a film-base border", () => {
-  const width = 320;
-  const height = 220;
-  const rgba = new Uint8Array(width * height * 4);
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const offset = (y * width + x) * 4;
-      let value = 12;
-      if (x >= 20 && x < 300 && y >= 15 && y < 205) value = 212;
-      if (x >= 38 && x < 282 && y >= 32 && y < 188) value = 48 + ((x * 7 + y * 11) % 90);
-      rgba[offset] = value;
-      rgba[offset + 1] = Math.round(value * 0.82);
-      rgba[offset + 2] = Math.round(value * 0.58);
-      rgba[offset + 3] = 255;
-    }
-  }
-
-  const estimate = estimateFilmFrameCropFromRgba(rgba, width, height);
-
-  assert.ok(estimate.confidence > 0.25);
-  near(estimate.crop.x, 38 / width, 0.03);
-  near(estimate.crop.y, 32 / height, 0.03);
-  near(estimate.crop.x + estimate.crop.width, 282 / width, 0.03);
-  near(estimate.crop.y + estimate.crop.height, 188 / height, 0.03);
-});
-
-test("tone mapping preserves a neutral colour axis", () => {
-  const scene = raster("scene-linear-rgb", 1, 1, [0.5, 0.5, 0.5]);
-  const result = toneMap(scene, { contrast: 1.5, saturation: 0.5 });
-
-  near(result.data[0], result.data[1]);
-  near(result.data[1], result.data[2]);
-});
-
-test("contrast anchors at mid grey and stays smooth across the white point", () => {
-  const pivot = raster("scene-linear-rgb", 1, 1, [0.18, 0.18, 0.18]);
-  const anchored = toneMap(pivot, { whitePoint: 1, contrast: 1.4 });
-  near(anchored.data[0], 0.18, 1e-6);
-
-  // A power law has the same slope on both sides of 1.0, so the white point
-  // no longer kinks (contrast 0.8 keeps the sample below the gamut guard).
-  const at = (luma: number) => toneMap(
-    raster("scene-linear-rgb", 1, 1, [luma, luma, luma]),
-    { whitePoint: 1, contrast: 0.8 },
-  ).data[0];
-  const slopeBelow = (at(1) - at(0.999)) / 0.001;
-  const slopeAbove = (at(1.001) - at(1)) / 0.001;
+function approx(actual: number | undefined, expected: number, tolerance = 1e-6, message = ""): void {
   assert.ok(
-    Math.abs(slopeBelow - slopeAbove) < 0.02,
-    `slope jumps at the white point: ${slopeBelow} vs ${slopeAbove}`,
+    actual !== undefined && Math.abs(actual - expected) <= tolerance,
+    `${message} expected ${actual} to be within ${tolerance} of ${expected}`,
   );
-});
+}
 
-test("out-of-gamut channels compress proportionally without highlight compression", () => {
-  const scene = raster("scene-linear-rgb", 1, 1, [2, 1.5, 0.5]);
-  const result = toneMap(scene, { whitePoint: 1 });
-  const ceiling = 1 - 1 / 65_536;
+function baseRecipe(overrides: Partial<Recipe> = {}): Recipe {
+  return { ...DEFAULT_RECIPE, ...overrides };
+}
 
-  near(result.data[0], ceiling, 1e-6);
-  near(result.data[1] / result.data[0], 0.75, 1e-4);
-  near(result.data[2] / result.data[0], 0.25, 1e-4);
-});
-
-test("saturation remnants floor at zero instead of clipping at encode time", () => {
-  const scene = raster("scene-linear-rgb", 1, 1, [0.5, 0.01, 0.01]);
-  const result = toneMap(scene, { whitePoint: 1, saturation: 2 });
-
-  assert.ok(result.data[0] > 0);
-  assert.ok(result.data[1] >= 0 && result.data[2] >= 0);
-});
-
-test("highlight compression rolls HDR luminance into display range", () => {
-  const scene = raster("scene-linear-rgb", 4, 1, [
-    0.5, 0.5, 0.5,
-    1, 1, 1,
-    2, 2, 2,
-    8, 8, 8,
-  ]);
-  const result = toneMap(scene, { highlightCompression: 0.5 });
-
-  assert.ok(result.data[0] < result.data[3]);
-  assert.ok(result.data[3] < result.data[6]);
-  assert.ok(result.data[6] < result.data[9]);
-  assert.ok(result.data.every((value) => value >= 0 && value < 1));
-});
-
-test("display white estimation ignores frame borders and density beyond Dmax", () => {
-  const width = 20;
-  const height = 20;
-  const density = Raster.filled(width, height, "relative-density", [0.5, 0.5, 0.5]);
-  const scene = Raster.filled(width, height, "scene-linear-rgb", [1, 1, 1]);
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      if (x === 0 || y === 0 || x === width - 1 || y === height - 1 || (x === 10 && y === 10)) {
-        const offset = (y * width + x) * 3;
-        scene.data[offset] = 100;
-        scene.data[offset + 1] = 100;
-        scene.data[offset + 2] = 100;
-        if (x === 10 && y === 10) {
-          density.data[offset] = 2;
-          density.data[offset + 1] = 2;
-          density.data[offset + 2] = 2;
-        }
-      }
-    }
-  }
-
-  near(estimateDisplayWhitePoint(density, scene, { dmin: 0.2, dmax: 1.2, range: 1 }, 1), 1);
-});
-
-test("fused preview tone mapping matches canonical display conversion", () => {
-  const scene = raster("scene-linear-rgb", 3, 1, [0.02, 0.2, 0.8, 0.4, 0.5, 0.6, 1.2, 0.8, 0.3]);
-  const settings = { exposureStops: 0.3, contrast: 1.2, highlightCompression: 0.4, saturation: 0.85 };
-
-  assert.deepEqual(toneMapToSrgbRgba(scene, settings), rasterToSrgbRgba(toneMap(scene, settings)));
-});
-
-test("the complete pipeline routes a camera-linear image through all core domains", () => {
-  const source = raster("camera-linear-rgb", 4, 2, [
-    0.5, 0.25, 0.125, 0.5, 0.25, 0.125, 0.25, 0.125, 0.0625, 0.25, 0.125, 0.0625,
-    0.5, 0.25, 0.125, 0.5, 0.25, 0.125, 0.25, 0.125, 0.0625, 0.25, 0.125, 0.0625,
-  ]);
-  const result = processFilm(source, {
-    baseRoi: { x: 0, y: 0, width: 0.5, height: 1 },
-    film: { kind: "generic" },
+describe("Raster", () => {
+  it("rejects non-positive or fractional dimensions", () => {
+    assert.throws(() => new Raster(0, 4, "transmission-linear"));
+    assert.throws(() => new Raster(4, 0, "transmission-linear"));
+    assert.throws(() => new Raster(4.5, 4, "transmission-linear"));
   });
 
-  assert.equal(result.transmission.domain, "camera-linear-rgb");
-  assert.equal(result.density.domain, "relative-density");
-  assert.equal(result.sceneLinear.domain, "scene-linear-rgb");
-  assert.equal(result.displayLinear.domain, "display-linear-rgb");
-  assert.ok(result.sceneLinear.data[6] > result.sceneLinear.data[0]);
+  it("rejects data whose length does not match the dimensions", () => {
+    assert.throws(() => new Raster(2, 2, "transmission-linear", new Float32Array(11)));
+  });
+
+  it("enforces the declared domain", () => {
+    const transmission = new Raster(1, 1, "transmission-linear");
+    transmission.assertDomain(["transmission-linear"]);
+    assert.throws(() => transmission.assertDomain(["relative-density"]));
+  });
+
+  it("clones with a detached buffer", () => {
+    const raster = build(2, 1);
+    raster.data[0] = 0.25;
+    const clone = raster.clone();
+    clone.data[0] = 0.75;
+    assert.equal(raster.data[0], 0.25);
+  });
+
+  it("computes row-major offsets", () => {
+    assert.equal(Raster.offsetOf(1, 1, 2), 9);
+  });
 });
 
-test("scene-stage processing matches the invariant outputs of the complete pipeline", () => {
-  const source = raster("transmission-linear-rgb", 4, 2, [
-    0.5, 0.25, 0.125, 0.5, 0.25, 0.125, 0.25, 0.125, 0.0625, 0.25, 0.125, 0.0625,
-    0.5, 0.25, 0.125, 0.5, 0.25, 0.125, 0.25, 0.125, 0.0625, 0.25, 0.125, 0.0625,
-  ]);
-  const settings = {
-    baseRoi: { x: 0, y: 0, width: 0.5, height: 1 },
-    film: { kind: "generic" as const },
-    tone: { exposureStops: 0.25, contrast: 1.1, highlightCompression: 0.3, saturation: 0.9 },
-  };
-  const scene = processFilmToScene(source, settings);
-  const complete = processFilm(source, settings);
+describe("Geometry", () => {
+  it("rotates 90 degrees counterclockwise", () => {
+    const source = build(2, 1, "transmission-linear", (x) => (x === 0 ? [1, 2, 3] : [4, 5, 6]));
+    const rotated = rotateRaster(source, 90);
+    assert.equal(rotated.width, 1);
+    assert.equal(rotated.height, 2);
+    assert.deepEqual([...rotated.data.slice(0, 3)], [1, 2, 3]);
+    assert.deepEqual([...rotated.data.slice(3, 6)], [4, 5, 6]);
+  });
 
-  assert.deepEqual(scene.base, complete.base);
-  assert.deepEqual(scene.densityAnchors, complete.densityAnchors);
-  assert.deepEqual(scene.sceneLinear.data, complete.sceneLinear.data);
-  assert.deepEqual(
-    toneMap(scene.sceneLinear, { ...settings.tone, whitePoint: scene.displayWhitePoint }).data,
-    complete.displayLinear.data,
-  );
+  it("restores the original after four quarter turns", () => {
+    const source = build(3, 2, "transmission-linear", (x, y) => [x, y, x + y]);
+    for (const quarter of [90, 180, 270] as const) {
+      let current = source;
+      for (let turn = 0; turn < 4; turn += 1) current = rotateRaster(current, quarter);
+      assert.deepEqual([...current.data], [...source.data]);
+      assert.equal(current.width, source.width);
+      assert.equal(current.height, source.height);
+    }
+  });
+
+  it("treats zero rotation as identity", () => {
+    const source = build(2, 2);
+    assert.equal(rotateRaster(source, 0), source);
+  });
+
+  it("crops with clamped pixel rounding", () => {
+    const source = build(10, 10, "transmission-linear", (x, y) => [x, y, 0]);
+    const cropped = cropRaster(source, { x: 0.1, y: 0.2, width: 0.3, height: 0.4 });
+    assert.equal(cropped.width, 3);
+    assert.equal(cropped.height, 4);
+    // Target (0,0) corresponds to source pixel (1,2).
+    assert.deepEqual([...cropped.data.slice(0, 3)], [1, 2, 0]);
+  });
+
+  it("clamps out-of-bounds crops to the frame", () => {
+    const source = build(10, 10, "transmission-linear", (x) => [x, 0, 0]);
+    const cropped = cropRaster(source, { x: 0.8, y: 0.8, width: 0.9, height: 0.9 });
+    assert.equal(cropped.width, 2);
+    assert.equal(cropped.height, 2);
+    assert.deepEqual([...cropped.data.slice(0, 3)], [8, 0, 0]);
+  });
+
+  it("rejects degenerate rectangles", () => {
+    assert.throws(() => validateRect({ x: 0, y: 0, width: 0, height: 1 }));
+    assert.throws(() => validateRect({ x: 0, y: 0, width: Number.NaN, height: 1 }));
+    assert.throws(() => cropRaster(build(4, 4), { x: 0, y: 0, width: 0, height: 1 }));
+  });
+
+  it("downscales with an area average", () => {
+    const source = build(2, 1, "transmission-linear", (x) => (x === 0 ? [0.2, 0.4, 0.6] : [0.8, 0.2, 0.1]));
+    const half = downscaleRaster(source, 1);
+    assert.equal(half.width, 1);
+    assert.equal(half.height, 1);
+    approx(half.data[0]!, 0.5);
+    approx(half.data[1]!, 0.3);
+    approx(half.data[2]!, 0.35);
+  });
+
+  it("never upscales and passes small frames through", () => {
+    const source = build(3, 2, "transmission-linear");
+    assert.equal(downscaleRaster(source, 8), source);
+  });
 });
 
-function raster(
-  domain: "camera-linear-rgb" | "transmission-linear-rgb" | "relative-density" | "scene-linear-rgb",
-  width: number,
-  height: number,
-  values: readonly number[],
-): Raster {
-  return new Raster(width, height, domain, new Float32Array(values));
-}
+describe("Film base sampling", () => {
+  const base: Rgb = [0.8, 0.5, 0.3];
 
-function identityLut(size: number): Lut3d {
-  const data = new Float32Array(size * size * size * 3);
-  for (let red = 0; red < size; red += 1) {
-    for (let green = 0; green < size; green += 1) {
-      for (let blue = 0; blue < size; blue += 1) {
-        const offset = (((red * size + green) * size + blue) * 3);
-        data[offset] = red / (size - 1);
-        data[offset + 1] = green / (size - 1);
-        data[offset + 2] = blue / (size - 1);
+  it("recovers the exact base from a clean border ROI", () => {
+    const frame = build(100, 20, "transmission-linear", (x, y) => {
+      const content = x >= 10 ? (x + y) / 20 * 0.1 : 0;
+      return [base[0] - content, base[1] - content, base[2] - content];
+    });
+    const sample = sampleFilmBase(frame, { x: 0, y: 0, width: 0.08, height: 1 });
+    approx(sample.rgb[0], 0.8);
+    approx(sample.rgb[1], 0.5);
+    approx(sample.rgb[2], 0.3);
+    assert.equal(sample.confidence, 1);
+    assert.equal(sample.method, "roi");
+  });
+
+  it("ignores dust and content inside the ROI", () => {
+    const frame = build(100, 20, "transmission-linear", (x, y) => {
+      // Base pixels plus a minority of bright dust and dark content.
+      const hash = (x * 31 + y * 17) % 10;
+      if (hash === 0) return [0.05, 0.05, 0.05];
+      if (hash === 1) return [0.99, 0.99, 0.99];
+      return base;
+    });
+    const sample = sampleFilmBase(frame, { x: 0, y: 0, width: 1, height: 1 });
+    approx(sample.rgb[0], 0.8);
+    approx(sample.rgb[1], 0.5);
+    approx(sample.rgb[2], 0.3);
+    assert.ok(sample.confidence >= 0.79 && sample.confidence < 1);
+  });
+
+  it("rejects an ROI that is too small", () => {
+    const frame = build(20, 20, "transmission-linear");
+    assert.throws(
+      () => sampleFilmBase(frame, { x: 0, y: 0, width: 0.01, height: 0.01 }),
+      /片基/,
+    );
+  });
+
+  it("rejects an ROI without positive samples", () => {
+    const frame = build(20, 20, "transmission-linear");
+    assert.throws(() => sampleFilmBase(frame, { x: 0, y: 0, width: 1, height: 1 }));
+  });
+
+  it("estimates the upper transmission envelope automatically", () => {
+    const envelope: Rgb = [0.7, 0.45, 0.28];
+    const frame = build(128, 128, "transmission-linear", (x, y) => {
+      const isBase = (x * 7 + y * 13) % 97 === 0;
+      const scale = isBase ? 1 : 0.2 + ((x * 3 + y * 5) % 40) / 200;
+      return [envelope[0] * scale, envelope[1] * scale, envelope[2] * scale];
+    });
+    const sample = estimateFilmBase(frame);
+    approx(sample.rgb[0], 0.7, 0.01);
+    approx(sample.rgb[1], 0.45, 0.01);
+    approx(sample.rgb[2], 0.28, 0.01);
+    assert.equal(sample.method, "automatic");
+    assert.ok(sample.confidence <= 0.65);
+  });
+
+  it("caps automatic confidence at 0.65 even for a perfect frame", () => {
+    const frame = build(64, 64, "transmission-linear", () => [0.4, 0.4, 0.4]);
+    assert.equal(estimateFilmBase(frame).confidence, 0.65);
+  });
+
+  it("requires at least 32 valid pixels for automatic estimation", () => {
+    const frame = build(2, 2, "transmission-linear", () => [0.4, 0.4, 0.4]);
+    assert.throws(() => estimateFilmBase(frame));
+  });
+});
+
+describe("Density", () => {
+  const base: Rgb = [1, 1, 1];
+
+  it("maps base transmission to density zero", () => {
+    const frame = build(8, 8, "transmission-linear", () => base);
+    const density = toRelativeDensity(frame, base);
+    assert.equal(density.domain, "relative-density");
+    for (const value of density.data) assert.equal(value, 0);
+  });
+
+  it("maps one tenth transmission to density one", () => {
+    const frame = build(4, 4, "transmission-linear", () => [0.1, 0.1, 0.1]);
+    const density = toRelativeDensity(frame, base);
+    for (const value of density.data) approx(value, 1);
+  });
+
+  it("maps non-finite or zero transmission to base (density zero)", () => {
+    const frame = build(2, 1, "transmission-linear", (x) => (
+      x === 0 ? [Number.NaN, 0, -1] : [0.1, 0.1, 0.1]
+    ));
+    const density = toRelativeDensity(frame, base);
+    assert.equal(density.data[0], 0);
+    approx(density.data[1], 6); // -log10(1e-6)
+    approx(density.data[2], 6); // negative transmission clamps to extreme density
+    approx(density.data[3], 1);
+  });
+
+  it("rejects invalid base values", () => {
+    const frame = build(4, 4, "transmission-linear");
+    assert.throws(() => toRelativeDensity(frame, [0, 1, 1]));
+    assert.throws(() => toRelativeDensity(frame, [1, 1, 1], 0));
+  });
+});
+
+describe("Density anchors", () => {
+  it("measures dmin from the base transmission", () => {
+    const base: Rgb = [0.5, 0.5, 0.5];
+    const frame = build(32, 32, "transmission-linear", () => [0.05, 0.05, 0.05]);
+    const density = toRelativeDensity(frame, base);
+    const anchors = measureDensityAnchors(base, density);
+    approx(anchors.dmin, -Math.log10(0.5));
+    approx(anchors.range, 1); // D = -log10(0.05/0.5) = 1 everywhere
+    approx(anchors.dmax, -Math.log10(0.5) + 1);
+    assert.equal(anchors.channelRange, undefined);
+  });
+
+  it("honours a manual Dmax override", () => {
+    const base: Rgb = [0.5, 0.5, 0.5];
+    const frame = build(32, 32, "transmission-linear", () => [0.05, 0.05, 0.05]);
+    const density = toRelativeDensity(frame, base);
+    const anchors = measureDensityAnchors(base, density, 0.995, { dmaxOverride: 2.0 });
+    approx(anchors.range, 2.0 - anchors.dmin);
+    assert.equal(anchors.channelRange, undefined);
+  });
+
+  it("rejects an out-of-range manual Dmax", () => {
+    const base: Rgb = [0.5, 0.5, 0.5];
+    const frame = build(8, 8, "transmission-linear");
+    const density = toRelativeDensity(frame, base);
+    assert.throws(() => measureDensityAnchors(base, density, 0.995, { dmaxOverride: 17 }));
+    assert.throws(() => measureDensityAnchors(base, density, 0.995, { dmaxOverride: -1 }));
+  });
+
+  it("measures per-channel ranges inside a neutral ROI", () => {
+    const base: Rgb = [0.8, 0.5, 0.3];
+    const frame = build(32, 32, "transmission-linear", (x) => {
+      const densities: Rgb = x < 16 ? [1.5, 1.4, 1.6] : [0.3, 0.3, 0.3];
+      return [
+        base[0] * Math.pow(10, -densities[0]),
+        base[1] * Math.pow(10, -densities[1]),
+        base[2] * Math.pow(10, -densities[2]),
+      ];
+    });
+    const density = toRelativeDensity(frame, base);
+    const anchors = measureDensityAnchors(base, density, 0.995, {
+      neutralRoi: { x: 0, y: 0, width: 0.5, height: 1 },
+    });
+    assert.ok(anchors.channelRange);
+    approx(anchors.channelRange![0], 1.5, 1e-6);
+    approx(anchors.channelRange![1], 1.4, 1e-6);
+    approx(anchors.channelRange![2], 1.6, 1e-6);
+  });
+
+  it("infers a channel range only from a convincingly neutral tail", () => {
+    const base: Rgb = [1, 1, 1];
+    const frame = build(32, 32, "transmission-linear", (x, y) => {
+      const inTail = x < 3; // ~9.4% of the frame
+      const rgb: Rgb = inTail ? [2.2, 2.0, 2.1] : [0.5, 0.6, 0.4];
+      return [
+        base[0] * Math.pow(10, -rgb[0]),
+        base[1] * Math.pow(10, -rgb[1]),
+        base[2] * Math.pow(10, -rgb[2]),
+      ];
+    });
+    const density = toRelativeDensity(frame, base);
+    const neutral = measureDensityAnchors(base, density, 0.995, { autoNeutralize: true });
+    assert.ok(neutral.channelRange);
+    approx(neutral.channelRange![0], 2.2, 0.01);
+    approx(neutral.channelRange![1], 2.0, 0.01);
+    approx(neutral.channelRange![2], 2.1, 0.01);
+  });
+
+  it("does not infer a channel range from a colourful tail", () => {
+    const base: Rgb = [1, 1, 1];
+    const frame = build(32, 32, "transmission-linear", (x) => {
+      const rgb: Rgb = x < 3 ? [2.5, 1.2, 1.2] : [0.5, 0.5, 0.5];
+      return [
+        base[0] * Math.pow(10, -rgb[0]),
+        base[1] * Math.pow(10, -rgb[1]),
+        base[2] * Math.pow(10, -rgb[2]),
+      ];
+    });
+    const density = toRelativeDensity(frame, base);
+    const anchors = measureDensityAnchors(base, density, 0.995, { autoNeutralize: true });
+    assert.equal(anchors.channelRange, undefined);
+  });
+});
+
+describe("Inversion", () => {
+  const anchors = { dmin: 0.3, dmax: 1.3, range: 1.0 };
+
+  function invert(values: Rgb[], options: { channelRange?: Rgb; wb?: Rgb; preSaturation?: number } = {}) {
+    const width = values.length;
+    const density = new Raster(width, 1, "relative-density");
+    values.forEach(([r, g, b], index) => {
+      const offset = index * 3;
+      density.data[offset] = r;
+      density.data[offset + 1] = g;
+      density.data[offset + 2] = b;
+    });
+    return invertDensity(density, {
+      ...anchors,
+      channelRange: options.channelRange,
+    }, {
+      whiteBalance: options.wb ?? [1, 1, 1],
+      preSaturation: options.preSaturation ?? 1,
+    });
+  }
+
+  it("implements the conservative 10^D - 1 transform without a channel range", () => {
+    const scene = invert([
+      [0, 0, 0],
+      [1, 1, 1],
+      [2, 2, 2],
+      [0.5, 0.5, 0.5],
+    ]);
+    approx(scene.data[0], 0);
+    approx(scene.data[3], 9);
+    approx(scene.data[6], 99);
+    approx(scene.data[9], Math.sqrt(10) - 1);
+  });
+
+  it("normalizes density by the per-channel range and caps at 4x", () => {
+    const scene = invert(
+      [[1, 1, 1], [2, 2, 2], [5, 5, 5]],
+      { channelRange: [1, 1, 1] },
+    );
+    approx(scene.data[0], 9);
+    approx(scene.data[3], 99);
+    approx(scene.data[6], 9999);
+  });
+
+  it("applies white balance after inversion", () => {
+    const scene = invert([[1, 1, 1]], { wb: [1.5, 1, 0.8], channelRange: [1, 1, 1] });
+    approx(scene.data[0], 13.5);
+    approx(scene.data[1], 9);
+    approx(scene.data[2], 7.2);
+  });
+
+  it("preserves the density-domain mean under pre-saturation", () => {
+    const density = [1.2, 0.9, 1.5] as Rgb;
+    const scene = invert([density], { preSaturation: 1.08, channelRange: [1, 1, 1] });
+    // Pre-saturation spreads channels around their mean without moving it;
+    // after 10^D - 1 the density-domain mean is recovered via log10(v + 1).
+    const mean = density.reduce((sum, value) => sum + value, 0) / 3;
+    const recovered = [0, 1, 2].map((index) => Math.log10(scene.data[index]! + 1));
+    approx((recovered[0]! + recovered[1]! + recovered[2]!) / 3, mean, 1e-6);
+  });
+
+  it("clamps negative density to zero", () => {
+    const scene = invert([[-1, -1, -1]]);
+    assert.deepEqual([...scene.data], [0, 0, 0]);
+  });
+
+  it("rejects invalid white balance and pre-saturation", () => {
+    assert.throws(() => invert([[1, 1, 1]], { wb: [Number.NaN, 1, 1] }));
+    assert.throws(() => invert([[1, 1, 1]], { preSaturation: 3 }));
+    assert.throws(() => invert([[1, 1, 1]], { channelRange: [0.01, 1, 1] }));
+  });
+});
+
+describe("Tone mapping", () => {
+  it("normalizes a solid mid-grey scene to display white", () => {
+    const scene = build(16, 16, "scene-linear-rgb", () => [0.18, 0.18, 0.18]);
+    const { display, whitePoint } = toneMap(scene, baseRecipe());
+    approx(whitePoint, 0.18);
+    for (const value of display.data) approx(value, 1);
+  });
+
+  it("brightens by one stop relative to the white point", () => {
+    const scene = build(16, 16, "scene-linear-rgb", () => [0.18, 0.18, 0.18]);
+    const { display } = toneMap(scene, baseRecipe({ exposure: 1 }));
+    for (const value of display.data) approx(value, 2);
+  });
+
+  it("applies log-domain contrast around 0.18 mid grey", () => {
+    const scene = new Raster(1, 1, "scene-linear-rgb");
+    scene.data.set([0.36, 0.36, 0.36]);
+    const { display } = toneMap(scene, baseRecipe({ contrast: 1.2 }));
+    const expected = 0.18 * Math.pow(2, 1.2) / 0.36;
+    for (const value of display.data) approx(value, expected);
+  });
+
+  it("compresses values above the knee", () => {
+    const scene = new Raster(1, 1, "scene-linear-rgb");
+    scene.data.set([1.5, 1.5, 1.5]);
+    const { display } = toneMap(scene, baseRecipe({ highlightCompression: 0.5 }));
+    // Knee: 1 + (1.5 - 1) * 0.5 = 1.25, then normalized by the white point.
+    for (const value of display.data) approx(value, 1.25 / 1.5);
+  });
+
+  it("preserves grey through saturation changes", () => {
+    const scene = build(8, 8, "scene-linear-rgb", () => [0.3, 0.3, 0.3]);
+    for (const saturation of [0, 0.5, 1, 2]) {
+      const { display } = toneMap(scene, baseRecipe({ saturation }));
+      const first = display.data[0]!;
+      for (let offset = 0; offset < display.data.length; offset += 3) {
+        approx(display.data[offset]!, first);
+        approx(display.data[offset + 1]!, first);
+        approx(display.data[offset + 2]!, first);
       }
     }
-  }
-  return { size, data };
-}
+  });
 
-function near(actual: number, expected: number, tolerance = 1e-5): void {
-  assert.ok(Math.abs(actual - expected) <= tolerance, "Expected " + actual + " to be within " + tolerance + " of " + expected + ".");
-}
+  it("desaturates to luma at saturation zero", () => {
+    const scene = build(1, 1, "scene-linear-rgb");
+    scene.data.set([0.9, 0.2, 0.1]);
+    const { display } = toneMap(scene, baseRecipe({ saturation: 0 }));
+    const luma = 0.9 * 0.2126 + 0.2 * 0.7152 + 0.1 * 0.0722;
+    for (const value of display.data) approx(value, luma / 0.9 * 0.9 / (luma));
+  });
+
+  it("ignores border content when estimating the white point", () => {
+    const width = 100;
+    const scene = build(width, 20, "scene-linear-rgb", (x) => (
+      x < 3 || x >= 97 ? [1, 1, 1] : [0.2, 0.2, 0.2]
+    ));
+    approx(estimateWhitePoint(scene), 0.2);
+  });
+
+  it("takes the highlight percentile of the central region", () => {
+    const scene = build(64, 64, "scene-linear-rgb", (x, y) => [
+      (x + y) / 128, (x + y) / 128, (x + y) / 128,
+    ]);
+    // Central 90% region spans x+y from 6 to 120; its 99.5th percentile sits
+    // at x+y = 115 on this discrete ramp.
+    approx(estimateWhitePoint(scene), 115 / 128, 0.001);
+  });
+
+  it("rejects out-of-range tone controls", () => {
+    const scene = build(4, 4, "scene-linear-rgb");
+    assert.throws(() => toneMap(scene, baseRecipe({ contrast: 2 })));
+    assert.throws(() => toneMap(scene, baseRecipe({ highlightCompression: 1.5 })));
+    assert.throws(() => toneMap(scene, baseRecipe({ saturation: -0.1 })));
+  });
+});
+
+describe("sRGB encoding", () => {
+  it("implements the IEC 61966-2-1 OETF", () => {
+    approx(srgbOetf(0), 0);
+    approx(srgbOetf(1), 1);
+    approx(srgbOetf(0.0031308), 0.04045, 1e-5);
+    approx(srgbOetf(0.5), 0.735357, 1e-5);
+  });
+
+  it("round-trips through the inverse transfer function", () => {
+    for (const value of [0, 0.001, 0.02, 0.1, 0.5, 0.9, 1]) {
+      approx(srgbToLinear(srgbOetf(value)), value, 1e-6);
+    }
+  });
+
+  it("quantizes display-linear to 8 and 16 bits", () => {
+    const display = new Raster(1, 1, "display-linear");
+    display.data.set([1, 0, 0.5]);
+    const bytes = encode8(display);
+    assert.deepEqual([...bytes], [255, 0, 188]);
+    const words = encode16(display);
+    assert.deepEqual([...words], [65535, 0, 48192]);
+  });
+
+  it("rejects non-display domains at encode time", () => {
+    const scene = new Raster(1, 1, "scene-linear-rgb");
+    assert.throws(() => encode8(scene));
+  });
+});
+
+describe("End-to-end negative inversion", () => {
+  /**
+   * Builds a synthetic masked negative from a known positive scene:
+   * T(x,y) = base / (1 + 9 * scene(x,y)). The pipeline must recover the
+   * scene (times white-point normalization) from this input.
+   */
+  function syntheticNegative(base: Rgb, scene: (x: number, y: number) => number): Raster {
+    return build(100, 40, "transmission-linear", (x, y) => {
+      const s = x < 8 ? 0 : scene(x, y); // left 8% is unexposed border
+      const transmission = 1 / (1 + 9 * s);
+      return [base[0] * transmission, base[1] * transmission, base[2] * transmission];
+    });
+  }
+
+  it("recovers a grey ramp from a masked negative", () => {
+    const base: Rgb = [0.9, 0.5, 0.3];
+    const frame = syntheticNegative(base, (x) => (x - 8) / 92);
+    const result = processNegative(frame, baseRecipe());
+
+    // Base sampling finds the true mask; the neutral tail fires auto-neutralize.
+    assert.equal(result.base.method, "roi");
+    approx(result.base.rgb[0], 0.9, 1e-6);
+    approx(result.base.rgb[1], 0.5, 1e-6);
+    approx(result.base.rgb[2], 0.3, 1e-6);
+    assert.ok(result.anchors.channelRange);
+
+    // The display output must be the scene ramp times one constant scale
+    // factor (the auto white point), with no per-pixel distortion.
+    const sampleXs = [10, 30, 50, 70, 90];
+    const scales = sampleXs.map((x) => {
+      const offset = Raster.offsetOf(x, 20, 100);
+      return result.display.data[offset]! / ((x - 8) / 92);
+    });
+    const meanScale = scales.reduce((sum, value) => sum + value, 0) / scales.length;
+    assert.ok(meanScale > 0.9 && meanScale < 1.15, `mean scale ${meanScale}`);
+    for (const scale of scales) {
+      approx(scale, meanScale, meanScale * 0.02);
+    }
+    // The recovered ramp is neutral: the orange mask leaves no colour cast.
+    for (const x of sampleXs) {
+      const offset = Raster.offsetOf(x, 20, 100);
+      approx(result.display.data[offset]!, result.display.data[offset + 1]!, 1e-6, `red vs green at x=${x}`);
+      approx(result.display.data[offset]!, result.display.data[offset + 2]!, 1e-6, `red vs blue at x=${x}`);
+    }
+  });
+
+  it("recovers distinct colours through per-channel inversion", () => {
+    const base: Rgb = [0.8, 0.5, 0.3];
+    // Pure-red positive: green and blue are zero in the scene.
+    const frame = build(64, 32, "transmission-linear", (x) => {
+      const border = x < 6;
+      const s = border ? 0 : 0.8;
+      return [
+        base[0] / (1 + 9 * s),
+        base[1],
+        base[2],
+      ];
+    });
+    const result = processNegative(frame, baseRecipe());
+    const offset = Raster.offsetOf(32, 16, 64);
+    const red = result.display.data[offset]!;
+    const green = result.display.data[offset + 1]!;
+    const blue = result.display.data[offset + 2]!;
+    assert.ok(red > 0.5, `red ${red} should dominate`);
+    assert.ok(green < 0.2, `green ${green} should stay low`);
+    assert.ok(blue < 0.2, `blue ${blue} should stay low`);
+  });
+
+  it("rotates the frame and samples the relocated border", () => {
+    const base: Rgb = [0.8, 0.5, 0.3];
+    // Border along the top of the original frame; rotation moves it to the
+    // right side, so the base ROI must move with it.
+    const frame = build(40, 100, "transmission-linear", (x, y) => {
+      const s = y < 8 ? 0 : (y - 8) / 92;
+      const transmission = 1 / (1 + 9 * s);
+      return [base[0] * transmission, base[1] * transmission, base[2] * transmission];
+    });
+    const result = processNegative(frame, baseRecipe({
+      rotate: 90,
+      baseRoi: { x: 0.92, y: 0, width: 0.08, height: 1 },
+      autoNeutralize: false,
+    }));
+    assert.equal(result.display.width, 100);
+    assert.equal(result.display.height, 40);
+    approx(result.base.rgb[0], 0.8, 1e-6);
+    approx(result.base.rgb[1], 0.5, 1e-6);
+    approx(result.base.rgb[2], 0.3, 1e-6);
+    // Without channel-range normalization the recovered positive is exactly
+    // (Tbase/T - 1) = 9s; display = 9s / whitePoint, so display/s is constant.
+    const sampleXs = [10, 30, 50, 70, 90];
+    const scales = sampleXs.map((x) => {
+      const s = (91 - x) / 92; // x maps to sourceY = 99 - x
+      const offset = Raster.offsetOf(x, 20, 100);
+      return result.display.data[offset]! / s;
+    });
+    const meanScale = scales.reduce((sum, value) => sum + value, 0) / scales.length;
+    for (const scale of scales) approx(scale, meanScale, 1e-6);
+  });
+
+  it("applies the crop before film-base sampling", () => {
+    const base: Rgb = [0.8, 0.5, 0.3];
+    // Border on the left 20%; cropping to the left half keeps border inside.
+    const frame = build(100, 40, "transmission-linear", (x) => {
+      const s = x < 20 ? 0 : (x - 20) / 80;
+      const transmission = 1 / (1 + 9 * s);
+      return [base[0] * transmission, base[1] * transmission, base[2] * transmission];
+    });
+    const result = processNegative(frame, baseRecipe({
+      crop: { x: 0, y: 0, width: 0.5, height: 1 },
+      autoNeutralize: false,
+    }));
+    assert.equal(result.display.width, 50);
+    assert.equal(result.display.height, 40);
+    assert.equal(result.base.method, "roi");
+    approx(result.base.rgb[0], 0.8, 1e-6);
+    // display = 9s / whitePoint with s = (x - 20) / 80.
+    const sampleXs = [25, 30, 35, 40, 45];
+    const scales = sampleXs.map((x) => {
+      const offset = Raster.offsetOf(x, 20, 50);
+      return result.display.data[offset]! / ((x - 20) / 80);
+    });
+    const meanScale = scales.reduce((sum, value) => sum + value, 0) / scales.length;
+    for (const scale of scales) approx(scale, meanScale, 1e-6);
+  });
+
+  it("survives corrupt pixels without failing the frame", () => {
+    const base: Rgb = [0.9, 0.5, 0.3];
+    const frame = syntheticNegative(base, (x) => (x - 8) / 92);
+    const corrupt = Raster.offsetOf(50, 20, 100);
+    frame.data[corrupt] = Number.NaN;
+    frame.data[corrupt + 1] = Number.POSITIVE_INFINITY;
+    const result = processNegative(frame, baseRecipe());
+    // The corrupted channels map to the film base and stay black; the
+    // untouched blue channel keeps its (pre-saturation boosted) ramp value.
+    const offset = Raster.offsetOf(50, 20, 100);
+    approx(result.display.data[offset]!, 0, 1e-6);
+    approx(result.display.data[offset + 1]!, 0, 1e-6);
+    approx(result.display.data[offset + 2]!, 0.55, 0.06);
+    // Neighbouring pixels are unaffected.
+    const neighbour = Raster.offsetOf(51, 20, 100);
+    approx(result.display.data[neighbour]!, 0.5, 0.06);
+    approx(result.display.data[neighbour + 1]!, 0.5, 0.06);
+    approx(result.display.data[neighbour + 2]!, 0.5, 0.06);
+  });
+
+  it("rejects non-transmission input domains", () => {
+    const density = new Raster(4, 4, "relative-density");
+    assert.throws(() => processNegative(density, baseRecipe()));
+  });
+});
+
+describe("Default recipe", () => {
+  it("starts from a sane state", () => {
+    assert.equal(DEFAULT_RECIPE.rotate, 0);
+    assert.equal(DEFAULT_RECIPE.crop, undefined);
+    assert.deepEqual(DEFAULT_RECIPE.baseRoi, { x: 0, y: 0, width: 0.08, height: 1 });
+    assert.equal(DEFAULT_RECIPE.dmaxMode, "auto");
+    assert.equal(DEFAULT_RECIPE.autoNeutralize, true);
+    assert.deepEqual(DEFAULT_RECIPE.whiteBalance, [1, 1, 1]);
+    assert.equal(DEFAULT_RECIPE.preSaturation, 1.08);
+    assert.equal(DEFAULT_RECIPE.exposure, 0);
+    assert.equal(DEFAULT_RECIPE.contrast, 1);
+    assert.equal(DEFAULT_RECIPE.highlightCompression, 0);
+    assert.equal(DEFAULT_RECIPE.saturation, 1);
+  });
+});
+
+describe("Recipe application order", () => {
+  it("keeps baseRoi relative to the delivered (cropped) frame", () => {
+    const base: Rgb = [0.8, 0.5, 0.3];
+    // The frame has a border only on its left 20%, then a content ramp.
+    const frame = build(100, 40, "transmission-linear", (x, y) => {
+      const s = x < 20 ? 0 : (x - 20) / 80;
+      const transmission = 1 / (1 + 9 * s);
+      return [base[0] * transmission, base[1] * transmission, base[2] * transmission];
+    });
+    // Crop to the content only; the default left-8% base ROI would then fail,
+    // so auto mode must still produce a usable image.
+    const result = processNegative(frame, baseRecipe({
+      baseMode: "auto",
+      crop: { x: 0.2, y: 0, width: 0.8, height: 1 },
+    }));
+    assert.equal(result.display.width, 80);
+    const offset = Raster.offsetOf(40, 20, 80);
+    const expected = 40 / 80;
+    approx(result.display.data[offset]!, expected, 0.05);
+    assert.equal(result.base.method, "automatic");
+  });
+});

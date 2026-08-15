@@ -1,16 +1,19 @@
 {
   "compilerOptions": {
-    "allowImportingTsExtensions": true,
-    "jsx": "react-jsx",
-    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "noEmit": true,
-    "skipLibCheck": true,
-    "strict": true,
-    "target": "esnext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["node"],
-    "verbatimModuleSyntax": true
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
   },
-  "include": ["electron.vite.config.ts", "src/**/*.ts", "src/**/*.tsx", "test/**/*.ts"]
+  "include": ["src", "test", "electron.vite.config.ts"]
 }

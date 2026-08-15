@@ -1,25 +1,23 @@
 node_modules/
-.tools/
-.agents/
-.reasonix/
-coverage/
-dist/
 out/
 release/
-artifacts/
-.workbuddy/
-*.filmlab/
-.git-broken-*/
-.git-wrapper-*/
-/build/generated/
-*.tsbuildinfo
+coverage/
+dist/
 *.log
+*.tsbuildinfo
 .DS_Store
-native/raw-worker/build/
-native/raw-worker/vcpkg_installed/
 
-# Real camera sources and locally rendered masters are private test material.
-# Their reproducible identities live in test-data/a7rv-local-manifest.json.
+# 本地素材与导出(用户私有数据)
 /A7R5_RAW/
 /*-positive.tif
 /*-positive.tiff
+*.filmlab/
+
+# 其他工具的工作目录与历史备份
+.agents/
+.reasonix/
+.tools/
+.workbuddy/
+.zcode/
+.git-broken-*/
+.git-wrapper-*/

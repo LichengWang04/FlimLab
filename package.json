@@ -1,39 +1,31 @@
 {
-  "name": "filmlab-core",
-  "version": "0.1.0",
+  "name": "filmlab",
+  "version": "1.0.0",
   "private": true,
   "author": {
     "name": "Licheng Wang"
   },
   "license": "UNLICENSED",
   "type": "module",
-  "main": "./out/main/index.cjs",
-  "description": "A deterministic, linear-light core for camera-scanned film negatives.",
+  "main": "./out/main/index.js",
+  "description": "负片翻拍/扫描工作台:导入负像,一键还原正像。",
   "scripts": {
-    "check:repo": "node scripts/check-repository-hygiene.cjs",
-    "check:repo:staged": "node scripts/check-repository-hygiene.cjs --staged",
-    "precommit": "npm run check:repo:staged && npm run check",
-    "verify:test-data": "node scripts/verify-local-test-data.cjs",
-    "test": "node --experimental-strip-types --test test/photon-transfer.test.ts test/core.test.ts test/repair.test.ts test/color-card.test.ts test/color-trust.test.ts test/project-service.test.ts test/project-lifecycle-service.test.ts test/frame-recipes.test.ts test/precompute-plan.test.ts test/batch-service.test.ts test/calibration.test.ts test/tiff-codec.test.ts test/input-color.test.ts test/source-registry.test.ts test/calibration-profile-service.test.ts test/raw-sidecar-release.test.ts test/a7rv-acceptance.test.ts test/security-compliance.test.ts test/application-completeness.test.ts test/preview-service.test.ts test/preview-interaction.test.ts test/preview-layout.test.ts test/image-worker-performance.test.ts test/decoded-preview-cache.test.ts test/web-demo.test.ts test/webgpu-restoration.test.ts test/waveform.test.ts test/gpu-export-limits.test.ts",
-    "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm run test && npm run check:compliance",
-    "check:compliance": "node scripts/generate-compliance-assets.cjs --check",
-    "audit:dependencies": "npm audit --audit-level=high",
-    "sbom": "node scripts/generate-compliance-assets.cjs",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "build:release-assets": "node scripts/build-release-assets.cjs && node scripts/generate-compliance-assets.cjs",
-    "benchmark:preview": "node --experimental-strip-types scripts/benchmark-preview.ts",
-    "acceptance:a7rv": "npm run build && node scripts/run-a7rv-acceptance.cjs",
-    "acceptance:masters": "node scripts/verify-master-compatibility.cjs",
-    "benchmark:raw": "npm run build && node scripts/run-a7rv-acceptance.cjs --formats tiff",
-    "verify:raw-sidecar": "node scripts/verify-raw-sidecar.cjs --ping",
     "start": "electron-vite preview",
-    "dist": "npm run build:release-assets && npm run build && electron-builder",
-    "dist:win": "npm run build:release-assets && npm run build && electron-builder --win",
-    "dist:mac": "npm run build:release-assets && npm run build && electron-builder --mac",
-    "dist:linux": "npm run build:release-assets && npm run build && electron-builder --linux",
-    "verify:installed-release": "node scripts/verify-installed-release.cjs"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test",
+    "check": "npm run typecheck && npm run test",
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:linux": "npm run build && electron-builder --linux"
+  },
+  "dependencies": {
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -45,12 +37,5 @@
     "electron-vite": "^5.0.0",
     "typescript": "^5.8.3",
     "vite": "^7.3.6"
-  },
-  "dependencies": {
-    "electron-updater": "^6.8.9",
-    "lucide-react": "^1.24.0",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "sharp": "^0.35.3"
   }
 }

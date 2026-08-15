@@ -1,87 +1,21 @@
-appId: com.filmlab.desktop
+appId: com.filmlab.app
 productName: FilmLab
-copyright: Copyright © 2026 Licheng Wang
-beforePack: ./scripts/verify-raw-sidecar.cjs
-afterPack: ./scripts/verify-raw-sidecar.cjs
 directories:
   output: release
-  buildResources: build
-artifactName: ${productName}-${version}-${os}-${arch}.${ext}
-publish:
-  provider: github
-  owner: LichengWang04
-  repo: FlimLab
-  releaseType: release
-generateUpdatesFilesForAllChannels: true
 files:
-  - out/**/*
-  - package.json
-asar: true
+  - out/**
 asarUnpack:
-  - "**/*.node"
-  - "**/node_modules/sharp/**/*"
-  - "**/node_modules/@img/**/*"
-extraResources:
-  - from: native/raw-worker/out
-    to: raw-worker
-    filter:
-      - "**/*"
-  - from: build/generated/legal
-    to: legal
-    filter:
-      - "**/*"
-  - from: docs/user-manual.md
-    to: docs/user-manual.md
+  - node_modules/sharp/**
+  - node_modules/@img/**
 win:
-  # electron-builder signs .exe extra resources with the configured Windows
-  # certificate, including the RAW sidecar. Tag builds require that certificate.
-  signExts:
-    - .exe
-  icon: build/generated/icon.ico
-  executableName: FilmLab
-  legalTrademarks: FilmLab
-  target:
-    - nsis
+  target: nsis
 nsis:
   oneClick: false
-  perMachine: false
-  allowElevation: true
   allowToChangeInstallationDirectory: true
-  createDesktopShortcut: always
-  createStartMenuShortcut: true
-  shortcutName: FilmLab
-  uninstallDisplayName: FilmLab ${version}
-  deleteAppDataOnUninstall: false
-  installerIcon: build/generated/icon.ico
-  uninstallerIcon: build/generated/icon.ico
 mac:
-  # @electron/osx-sign walks executable files below Contents, so the sidecar
-  # under Contents/Resources/raw-worker is signed with the app bundle.
-  hardenedRuntime: true
-  notarize: true
+  target: dmg
   category: public.app-category.photography
-  minimumSystemVersion: 13.0
-  icon: build/generated/icon.icns
-  entitlements: build/entitlements.mac.plist
-  entitlementsInherit: build/entitlements.mac.plist
-  target:
-    - dmg
-    - zip
-dmg:
-  sign: false
-  contents:
-    - x: 140
-      y: 220
-    - x: 420
-      y: 220
-      type: link
-      path: /Applications
 linux:
+  target: AppImage
   category: Graphics
-  maintainer: Licheng Wang
-  synopsis: Camera-scanned film negative workflow
-  description: Deterministic linear-light processing for camera-scanned film negatives.
-  executableName: filmlab
-  icon: build/generated/icon.png
-  target:
-    - AppImage
+npmRebuild: true

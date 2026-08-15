@@ -1,217 +1,118 @@
 import { Raster } from "./raster.ts";
-import type { GeometrySettings, NormalizedRoi, PerspectivePoint, PerspectiveQuad } from "./types.ts";
+import type { QuarterTurn, Rect } from "./types.ts";
 
-export function applyGeometry(
-  linearCapture: Raster,
-  settings: GeometrySettings = {},
-): Raster {
-  linearCapture.assertDomain(["camera-linear-rgb", "transmission-linear-rgb"]);
-  const rotated = rotateRightAngles(linearCapture, settings.rotation ?? 0);
-  const perspectiveCorrected = settings.perspective === undefined || isIdentityPerspective(settings.perspective)
-    ? rotated
-    : rectifyPerspective(rotated, settings.perspective);
-  const straighten = settings.straighten ?? 0;
-  const aligned = Math.abs(straighten) < 1e-9
-    ? perspectiveCorrected
-    : rotateAndConstrain(perspectiveCorrected, straighten);
-  return settings.crop === undefined ? aligned : crop(aligned, settings.crop);
-}
-
-function isIdentityPerspective(quad: PerspectiveQuad): boolean {
-  const epsilon = 1e-12;
-  return Math.abs(quad.topLeft.x) < epsilon
-    && Math.abs(quad.topLeft.y) < epsilon
-    && Math.abs(quad.topRight.x - 1) < epsilon
-    && Math.abs(quad.topRight.y) < epsilon
-    && Math.abs(quad.bottomRight.x - 1) < epsilon
-    && Math.abs(quad.bottomRight.y - 1) < epsilon
-    && Math.abs(quad.bottomLeft.x) < epsilon
-    && Math.abs(quad.bottomLeft.y - 1) < epsilon;
-}
-
-export function rotateRightAngles(
-  source: Raster,
-  rotation: 0 | 90 | 180 | 270,
-): Raster {
-  // Normalize defensively so a value that bypasses TypeScript (foreign JSON)
-  // snaps to a deterministic right angle instead of silently hitting the
-  // final else branch as "270" here and "0" in the WebGL path.
-  const normalizedRotation = (((Math.round(rotation / 90) % 4) + 4) % 4) * 90 as 0 | 90 | 180 | 270;
-  if (normalizedRotation === 0) {
-    return source;
-  }
-
-  const swapsAxes = normalizedRotation === 90 || normalizedRotation === 270;
-  const target = new Raster(
-    swapsAxes ? source.height : source.width,
-    swapsAxes ? source.width : source.height,
-    source.domain,
-  );
-
-  for (let y = 0; y < source.height; y += 1) {
-    for (let x = 0; x < source.width; x += 1) {
-      const from = (y * source.width + x) * 3;
-      let targetX: number;
-      let targetY: number;
-      if (normalizedRotation === 90) {
-        targetX = source.height - 1 - y;
-        targetY = x;
-      } else if (normalizedRotation === 180) {
-        targetX = source.width - 1 - x;
-        targetY = source.height - 1 - y;
-      } else {
-        targetX = y;
-        targetY = source.width - 1 - x;
-      }
-      const to = (targetY * target.width + targetX) * 3;
-      target.data[to] = source.data[from];
-      target.data[to + 1] = source.data[from + 1];
-      target.data[to + 2] = source.data[from + 2];
-    }
-  }
-  return target;
-}
-
-/**
- * Applies a fine clockwise rotation while scaling just enough to keep every
- * output pixel inside the source image. This mirrors a constrained crop in
- * photo editors: alignment never introduces empty or repeated corner pixels.
- */
-export function rotateAndConstrain(source: Raster, angleDegrees: number): Raster {
-  if (!Number.isFinite(angleDegrees) || Math.abs(angleDegrees) > 15) {
-    throw new Error("Straighten angle must be a finite value in [-15, 15].");
-  }
-  if (Math.abs(angleDegrees) < 1e-9) return source;
-
-  const radians = angleDegrees * Math.PI / 180;
-  const cosine = Math.cos(radians);
-  const sine = Math.sin(radians);
-  const absoluteCosine = Math.abs(cosine);
-  const absoluteSine = Math.abs(sine);
-  const scale = Math.max(
-    absoluteCosine + absoluteSine * source.height / source.width,
-    absoluteCosine + absoluteSine * source.width / source.height,
-  );
-  const centerX = (source.width - 1) * 0.5;
-  const centerY = (source.height - 1) * 0.5;
-  const output = new Raster(source.width, source.height, source.domain);
-
-  for (let y = 0; y < output.height; y += 1) {
-    for (let x = 0; x < output.width; x += 1) {
-      const outputX = (x - centerX) / scale;
-      const outputY = (y - centerY) / scale;
-      const sourceX = cosine * outputX + sine * outputY + centerX;
-      const sourceY = -sine * outputX + cosine * outputY + centerY;
-      writeBilinearSample(output, x, y, source, sourceX, sourceY);
-    }
-  }
-  return output;
-}
-
-export function crop(source: Raster, roi: NormalizedRoi): Raster {
-  validateRoi(roi);
-  const left = Math.floor(roi.x * source.width);
-  const top = Math.floor(roi.y * source.height);
-  const right = Math.ceil((roi.x + roi.width) * source.width);
-  const bottom = Math.ceil((roi.y + roi.height) * source.height);
-  const width = right - left;
-  const height = bottom - top;
-
-  if (width <= 0 || height <= 0) {
-    throw new Error("Crop resolves to an empty raster.");
-  }
-
-  const target = new Raster(width, height, source.domain);
-  for (let y = 0; y < height; y += 1) {
-    const from = ((top + y) * source.width + left) * 3;
-    const to = y * width * 3;
-    target.data.set(source.data.subarray(from, from + width * 3), to);
-  }
-  return target;
-}
-
-export function validateRoi(roi: NormalizedRoi): void {
-  const values = [roi.x, roi.y, roi.width, roi.height];
+/** Validates a normalized rectangle; throws on degenerate input. */
+export function validateRect(rect: Rect, name = "Rectangle"): void {
+  const values = [rect.x, rect.y, rect.width, rect.height];
   if (values.some((value) => !Number.isFinite(value))) {
-    throw new Error("ROI values must be finite.");
+    throw new Error(`${name} values must be finite.`);
   }
-  if (roi.x < 0 || roi.y < 0 || roi.width <= 0 || roi.height <= 0 || roi.x + roi.width > 1 || roi.y + roi.height > 1) {
-    throw new Error("ROI must be contained in the normalized [0, 1] image area.");
+  if (rect.width <= 0 || rect.height <= 0) {
+    throw new Error(`${name} must have positive width and height.`);
   }
+}
+
+/** Rounds a normalized rectangle to integer pixel bounds, clamped to size. */
+export function rectToPixels(rect: Rect, width: number, height: number): Rect {
+  validateRect(rect);
+  const left = Math.min(width - 1, Math.max(0, Math.round(rect.x * width)));
+  const top = Math.min(height - 1, Math.max(0, Math.round(rect.y * height)));
+  const right = Math.min(width, Math.max(left + 1, Math.round((rect.x + rect.width) * width)));
+  const bottom = Math.min(height, Math.max(top + 1, Math.round((rect.y + rect.height) * height)));
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+/** Rotates by a quarter-turn multiple. The domain is unchanged. */
+export function rotateRaster(source: Raster, quarter: QuarterTurn): Raster {
+  source.assertDomain(["transmission-linear", "scene-linear-rgb", "display-linear"]);
+  if (quarter === 0) return source;
+  const width = quarter === 180 ? source.width : source.height;
+  const height = quarter === 180 ? source.height : source.width;
+  const target = new Raster(width, height, source.domain);
+  const sourceData = source.data;
+  const targetData = target.data;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let sourceX: number;
+      let sourceY: number;
+      if (quarter === 90) {
+        sourceX = y;
+        sourceY = source.height - 1 - x;
+      } else if (quarter === 180) {
+        sourceX = source.width - 1 - x;
+        sourceY = source.height - 1 - y;
+      } else {
+        sourceX = source.width - 1 - y;
+        sourceY = x;
+      }
+      const sourceOffset = Raster.offsetOf(sourceX, sourceY, source.width);
+      const targetOffset = Raster.offsetOf(x, y, width);
+      targetData[targetOffset] = sourceData[sourceOffset]!;
+      targetData[targetOffset + 1] = sourceData[sourceOffset + 1]!;
+      targetData[targetOffset + 2] = sourceData[sourceOffset + 2]!;
+    }
+  }
+  return target;
+}
+
+/** Crops a normalized rectangle out of the raster. The domain is unchanged. */
+export function cropRaster(source: Raster, rect: Rect): Raster {
+  source.assertDomain(["transmission-linear", "scene-linear-rgb", "display-linear"]);
+  const pixelRect = rectToPixels(rect, source.width, source.height);
+  const target = new Raster(pixelRect.width, pixelRect.height, source.domain);
+  const sourceData = source.data;
+  const targetData = target.data;
+  for (let y = 0; y < pixelRect.height; y += 1) {
+    const sourceRow = Raster.offsetOf(pixelRect.x, pixelRect.y + y, source.width);
+    const targetRow = Raster.offsetOf(0, y, pixelRect.width);
+    targetData.set(sourceData.subarray(sourceRow, sourceRow + pixelRect.width * 3), targetRow);
+  }
+  return target;
 }
 
 /**
- * Rectifies a user-selected film quadrilateral into a rectangle. The output
- * size follows the average opposing-edge lengths, preserving useful detail
- * without inventing pixels. The mapping is intentionally inverse/bilinear so
- * every output sample has a stable source coordinate.
+ * Area-average downscale so previews stay bounded. Every target pixel is the
+ * mean of the source region it covers; this keeps borders and film grain
+ * representable without sharpening or ringing.
  */
-export function rectifyPerspective(source: Raster, quad: PerspectiveQuad): Raster {
-  source.assertDomain(["camera-linear-rgb", "transmission-linear-rgb"]);
-  validatePerspectiveQuad(quad);
-  const top = distance(quad.topLeft, quad.topRight) * source.width;
-  const bottom = distance(quad.bottomLeft, quad.bottomRight) * source.width;
-  const left = distance(quad.topLeft, quad.bottomLeft) * source.height;
-  const right = distance(quad.topRight, quad.bottomRight) * source.height;
-  const width = Math.max(1, Math.round((top + bottom) * 0.5));
-  const height = Math.max(1, Math.round((left + right) * 0.5));
-  const output = new Raster(width, height, source.domain);
-  for (let y = 0; y < height; y += 1) {
-    const v = (y + 0.5) / height;
-    for (let x = 0; x < width; x += 1) {
-      const u = (x + 0.5) / width;
-      const point = bilinearPoint(quad, u, v);
-      writeBilinearSample(output, x, y, source, point.x * source.width - 0.5, point.y * source.height - 0.5);
+export function downscaleRaster(source: Raster, maxSide: number): Raster {
+  source.assertDomain(["transmission-linear", "scene-linear-rgb", "display-linear"]);
+  if (!Number.isFinite(maxSide) || maxSide < 1) {
+    throw new Error("Downscale max side must be a positive finite value.");
+  }
+  const longest = Math.max(source.width, source.height);
+  if (longest <= maxSide) return source;
+  const scale = maxSide / longest;
+  const targetWidth = Math.max(1, Math.round(source.width * scale));
+  const targetHeight = Math.max(1, Math.round(source.height * scale));
+  const target = new Raster(targetWidth, targetHeight, source.domain);
+  const sourceData = source.data;
+  const targetData = target.data;
+
+  for (let y = 0; y < targetHeight; y += 1) {
+    const top = Math.floor(y * source.height / targetHeight);
+    const bottom = Math.max(top + 1, Math.ceil((y + 1) * source.height / targetHeight));
+    for (let x = 0; x < targetWidth; x += 1) {
+      const left = Math.floor(x * source.width / targetWidth);
+      const right = Math.max(left + 1, Math.ceil((x + 1) * source.width / targetWidth));
+      const count = (right - left) * (bottom - top);
+      let red = 0;
+      let green = 0;
+      let blue = 0;
+      for (let sourceY = top; sourceY < bottom; sourceY += 1) {
+        for (let sourceX = left; sourceX < right; sourceX += 1) {
+          const offset = Raster.offsetOf(sourceX, sourceY, source.width);
+          red += sourceData[offset]!;
+          green += sourceData[offset + 1]!;
+          blue += sourceData[offset + 2]!;
+        }
+      }
+      const offset = Raster.offsetOf(x, y, targetWidth);
+      targetData[offset] = red / count;
+      targetData[offset + 1] = green / count;
+      targetData[offset + 2] = blue / count;
     }
   }
-  return output;
-}
-
-export function validatePerspectiveQuad(quad: PerspectiveQuad): void {
-  const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
-  if (points.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1)) {
-    throw new Error("Perspective points must be finite normalized image coordinates.");
-  }
-  const area = Math.abs(
-    quad.topLeft.x * quad.topRight.y - quad.topRight.x * quad.topLeft.y
-    + quad.topRight.x * quad.bottomRight.y - quad.bottomRight.x * quad.topRight.y
-    + quad.bottomRight.x * quad.bottomLeft.y - quad.bottomLeft.x * quad.bottomRight.y
-    + quad.bottomLeft.x * quad.topLeft.y - quad.topLeft.x * quad.bottomLeft.y,
-  ) * 0.5;
-  if (area < 1e-5) {
-    throw new Error("Perspective quadrilateral must enclose a non-zero area.");
-  }
-}
-
-function bilinearPoint(quad: PerspectiveQuad, u: number, v: number): PerspectivePoint {
-  const topX = quad.topLeft.x + (quad.topRight.x - quad.topLeft.x) * u;
-  const topY = quad.topLeft.y + (quad.topRight.y - quad.topLeft.y) * u;
-  const bottomX = quad.bottomLeft.x + (quad.bottomRight.x - quad.bottomLeft.x) * u;
-  const bottomY = quad.bottomLeft.y + (quad.bottomRight.y - quad.bottomLeft.y) * u;
-  return { x: topX + (bottomX - topX) * v, y: topY + (bottomY - topY) * v };
-}
-
-function distance(left: PerspectivePoint, right: PerspectivePoint): number {
-  return Math.hypot(right.x - left.x, right.y - left.y);
-}
-
-function writeBilinearSample(target: Raster, targetX: number, targetY: number, source: Raster, sourceX: number, sourceY: number): void {
-  const x = Math.max(0, Math.min(source.width - 1, sourceX));
-  const y = Math.max(0, Math.min(source.height - 1, sourceY));
-  const left = Math.floor(x);
-  const top = Math.floor(y);
-  const right = Math.min(source.width - 1, left + 1);
-  const bottom = Math.min(source.height - 1, top + 1);
-  const fractionX = x - left;
-  const fractionY = y - top;
-  const topLeft = (top * source.width + left) * 3;
-  const topRight = (top * source.width + right) * 3;
-  const bottomLeft = (bottom * source.width + left) * 3;
-  const bottomRight = (bottom * source.width + right) * 3;
-  const offset = (targetY * target.width + targetX) * 3;
-  for (let channel = 0; channel < 3; channel += 1) {
-    const upper = source.data[topLeft + channel] + (source.data[topRight + channel] - source.data[topLeft + channel]) * fractionX;
-    const lower = source.data[bottomLeft + channel] + (source.data[bottomRight + channel] - source.data[bottomLeft + channel]) * fractionX;
-    target.data[offset + channel] = upper + (lower - upper) * fractionY;
-  }
+  return target;
 }
