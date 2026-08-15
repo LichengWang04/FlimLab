@@ -2,7 +2,8 @@ import { Raster } from "./raster.ts";
 import type { DensityAnchors, Recipe, Rgb } from "./types.ts";
 
 /**
- * Inverts relative density into scene-linear positive light.
+ * Inverts relative density into scene-linear positive light, before any
+ * white-balance gain (manual or automatic).
  *
  * Without a channel fit the transform is the conservative 10^D - 1 relative
  * transmission. With one (fitted from neutral pixels, a drawn neutral ROI,
@@ -16,17 +17,15 @@ import type { DensityAnchors, Recipe, Rgb } from "./types.ts";
 export function invertDensity(
   density: Raster,
   anchors: DensityAnchors,
-  recipe: Pick<Recipe, "whiteBalance" | "preSaturation">,
+  recipe: Pick<Recipe, "preSaturation">,
 ): Raster {
   density.assertDomain(["relative-density"]);
-  const [wbRed, wbGreen, wbBlue] = recipe.whiteBalance;
   if (
-    [wbRed, wbGreen, wbBlue].some((value) => !Number.isFinite(value) || value < 0)
-    || !Number.isFinite(recipe.preSaturation)
+    !Number.isFinite(recipe.preSaturation)
     || recipe.preSaturation < 0.5
     || recipe.preSaturation > 2
   ) {
-    throw new Error("White balance and pre-saturation must be finite and valid.");
+    throw new Error("Pre-saturation must be finite and between 0.5 and 2.");
   }
   const fit = anchors.channelFit;
   if (
@@ -55,9 +54,9 @@ export function invertDensity(
       Math.max(0, mean + (green - mean) * preSaturation),
       Math.max(0, mean + (blue - mean) * preSaturation),
     ];
-    target[offset] = positive(saturated[0], fit, 0) * wbRed;
-    target[offset + 1] = positive(saturated[1], fit, 1) * wbGreen;
-    target[offset + 2] = positive(saturated[2], fit, 2) * wbBlue;
+    target[offset] = positive(saturated[0], fit, 0);
+    target[offset + 1] = positive(saturated[1], fit, 1);
+    target[offset + 2] = positive(saturated[2], fit, 2);
   }
   return scene;
 }

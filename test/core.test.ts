@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  applyGains,
   cropRaster,
   DEFAULT_RECIPE,
   downscaleRaster,
   encode16,
   encode8,
   estimateFilmBase,
+  estimateWhiteBalance,
   estimateWhitePoint,
   invertDensity,
   measureDensityAnchors,
@@ -363,7 +365,7 @@ describe("Density anchors", () => {
     // level, including low densities where a single-anchor normalization
     // leaves a visible cast. Fitted parameters carry estimation error, so
     // values are checked loosely while channel equality stays tight.
-    const scene = invertDensity(density, anchors, { whiteBalance: [1, 1, 1], preSaturation: 1 });
+    const scene = invertDensity(density, anchors, { preSaturation: 1 });
     for (const s of levels) {
       const offsetIndex = Raster.offsetOf(levels.indexOf(s), 0, 40);
       const expected = Math.pow(10, s) - 1;
@@ -379,7 +381,7 @@ describe("Inversion", () => {
 
   function invert(
     values: Rgb[],
-    options: { channelFit?: ChannelFit; wb?: Rgb; preSaturation?: number } = {},
+    options: { channelFit?: ChannelFit; preSaturation?: number } = {},
   ) {
     const width = values.length;
     const density = new Raster(width, 1, "relative-density");
@@ -393,7 +395,6 @@ describe("Inversion", () => {
       ...anchors,
       channelFit: options.channelFit,
     }, {
-      whiteBalance: options.wb ?? [1, 1, 1],
       preSaturation: options.preSaturation ?? 1,
     });
   }
@@ -440,12 +441,15 @@ describe("Inversion", () => {
     approx(scene.data[8], Math.sqrt(10) - 1, 1e-3);
   });
 
-  it("applies white balance after inversion", () => {
-    const fit: ChannelFit = { offset: [0, 0, 0], slope: [1, 1, 1] };
-    const scene = invert([[1, 1, 1]], { wb: [1.5, 1, 0.8], channelFit: fit });
-    approx(scene.data[0], 13.5);
-    approx(scene.data[1], 9);
-    approx(scene.data[2], 7.2);
+  it("clamps negative density to zero", () => {
+    const scene = invert([[-1, -1, -1]]);
+    assert.deepEqual([...scene.data], [0, 0, 0]);
+  });
+
+  it("rejects invalid pre-saturation and channel fits", () => {
+    assert.throws(() => invert([[1, 1, 1]], { preSaturation: 3 }));
+    assert.throws(() => invert([[1, 1, 1]], { channelFit: { offset: [0, 0, 0], slope: [0.01, 1, 1] } }));
+    assert.throws(() => invert([[1, 1, 1]], { channelFit: { offset: [0, 3, 0], slope: [1, 1, 1] } }));
   });
 
   it("preserves the density-domain mean under pre-saturation", () => {
@@ -458,17 +462,104 @@ describe("Inversion", () => {
     const recovered = [0, 1, 2].map((index) => Math.log10(scene.data[index]! + 1));
     approx((recovered[0]! + recovered[1]! + recovered[2]!) / 3, mean, 1e-6);
   });
+});
 
-  it("clamps negative density to zero", () => {
-    const scene = invert([[-1, -1, -1]]);
-    assert.deepEqual([...scene.data], [0, 0, 0]);
+describe("White balance", () => {
+  it("estimates gray-world gains from per-channel medians", () => {
+    const scene = new Raster(32, 16, "scene-linear-rgb");
+    for (let i = 0; i < scene.data.length; i += 3) {
+      scene.data[i] = 0.4;
+      scene.data[i + 1] = 0.2;
+      scene.data[i + 2] = 0.1;
+    }
+    const gains = estimateWhiteBalance(scene);
+    approx(gains[0], 0.5, 1e-9);
+    approx(gains[1], 1, 1e-9);
+    approx(gains[2], 2, 1e-9);
   });
 
-  it("rejects invalid white balance, pre-saturation and channel fits", () => {
-    assert.throws(() => invert([[1, 1, 1]], { wb: [Number.NaN, 1, 1] }));
-    assert.throws(() => invert([[1, 1, 1]], { preSaturation: 3 }));
-    assert.throws(() => invert([[1, 1, 1]], { channelFit: { offset: [0, 0, 0], slope: [0.01, 1, 1] } }));
-    assert.throws(() => invert([[1, 1, 1]], { channelFit: { offset: [0, 3, 0], slope: [1, 1, 1] } }));
+  it("clamps gains to [0.25, 4] and ignores a minority of outliers", () => {
+    const scene = new Raster(64, 16, "scene-linear-rgb");
+    for (let i = 0; i < scene.data.length; i += 3) {
+      scene.data[i] = 1.0;
+      scene.data[i + 1] = 0.1;
+      scene.data[i + 2] = 0.05;
+    }
+    // 10% extreme pixels must not move the medians.
+    for (let i = 0; i < scene.data.length * 0.1; i += 3) {
+      scene.data[i] = 500;
+      scene.data[i + 1] = 500;
+      scene.data[i + 2] = 500;
+    }
+    const gains = estimateWhiteBalance(scene);
+    approx(gains[0], 0.25, 1e-9); // 0.1 / 1.0, clamped
+    approx(gains[1], 1, 1e-9);
+    approx(gains[2], 2, 1e-9); // 0.1 / 0.05, within range
+  });
+
+  it("returns identity for black or tiny frames", () => {
+    const black = new Raster(16, 16, "scene-linear-rgb");
+    assert.deepEqual(estimateWhiteBalance(black), [1, 1, 1]);
+    const tiny = new Raster(1, 1, "scene-linear-rgb");
+    tiny.data.set([0.2, 0.2, 0.2]);
+    assert.deepEqual(estimateWhiteBalance(tiny), [1, 1, 1]);
+  });
+
+  it("multiplies channels and preserves the domain", () => {
+    const scene = new Raster(1, 1, "scene-linear-rgb");
+    scene.data.set([2, 4, 8]);
+    const out = applyGains(scene, [1.5, 1, 0.5]);
+    assert.equal(out.domain, "scene-linear-rgb");
+    assert.deepEqual([...out.data], [3, 4, 4]);
+  });
+
+  it("rejects invalid gains", () => {
+    const scene = new Raster(1, 1, "scene-linear-rgb");
+    assert.throws(() => applyGains(scene, [Number.NaN, 1, 1]));
+    assert.throws(() => applyGains(scene, [1, -0.5, 1]));
+  });
+
+  it("corrects an illuminant cast end-to-end when enabled", () => {
+    // Colourful content (no channel fit fires) with a warm scene-side cast
+    // of +0.08 D red and -0.06 D blue per channel.
+    const base: Rgb = [0.8, 0.5, 0.3];
+    const cast: Rgb = [0.08, 0, -0.06];
+    const frame = build(64, 64, "transmission-linear", (x, y) => {
+      if (x < 6) return [...base]; // unexposed border
+      const channel = (x * 31 + y * 17) % 3;
+      const density: Rgb = channel === 0
+        ? [1.0, 0.15, 0.15]
+        : channel === 1
+          ? [0.15, 1.0, 0.15]
+          : [0.15, 0.15, 1.0];
+      return [
+        base[0] * Math.pow(10, -(density[0] + cast[0])),
+        base[1] * Math.pow(10, -(density[1] + cast[1])),
+        base[2] * Math.pow(10, -(density[2] + cast[2])),
+      ];
+    });
+    const withWb = processNegative(frame, baseRecipe({ autoWhiteBalance: true }));
+    const withoutWb = processNegative(frame, baseRecipe({ autoWhiteBalance: false }));
+    assert.ok(withWb.autoGains);
+
+    const median = (raster: Raster, channel: number) => {
+      const values: number[] = [];
+      for (let index = channel; index < raster.data.length; index += 3) values.push(raster.data[index]!);
+      values.sort((a, b) => a - b);
+      return values[Math.floor(values.length / 2)]!;
+    };
+    const red = median(withWb.display, 0);
+    const green = median(withWb.display, 1);
+    const blue = median(withWb.display, 2);
+    approx(red, green, green * 0.01);
+    approx(blue, green, green * 0.01);
+
+    // Without auto WB the cast stays visible in the same medians.
+    const castRed = median(withoutWb.display, 0);
+    const castGreen = median(withoutWb.display, 1);
+    const castBlue = median(withoutWb.display, 2);
+    assert.ok(castRed / castGreen > 1.3, `red/green ${castRed / castGreen} should keep the cast`);
+    assert.ok(castBlue / castGreen < 0.8, `blue/green ${castBlue / castGreen} should keep the cast`);
   });
 });
 
@@ -773,6 +864,7 @@ describe("Default recipe", () => {
     assert.equal(DEFAULT_RECIPE.dmaxMode, "auto");
     assert.equal(DEFAULT_RECIPE.autoNeutralize, true);
     assert.deepEqual(DEFAULT_RECIPE.whiteBalance, [1, 1, 1]);
+    assert.equal(DEFAULT_RECIPE.autoWhiteBalance, true);
     assert.equal(DEFAULT_RECIPE.preSaturation, 1.08);
     assert.equal(DEFAULT_RECIPE.exposure, 0);
     assert.equal(DEFAULT_RECIPE.contrast, 1);

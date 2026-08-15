@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DEFAULT_RECIPE, Raster, encode8, processNegative } from "../../core/index.ts";
-import type { BaseSample, DensityAnchors, Recipe, Rect } from "../../core/index.ts";
+import type { BaseSample, DensityAnchors, Recipe, Rect, Rgb } from "../../core/index.ts";
 import type { OpenedSource } from "../../shared/ipc.ts";
 import { RadioGroup, Section, Slider } from "./ui.tsx";
 
@@ -11,6 +11,7 @@ interface PreviewResult {
   base: BaseSample;
   anchors: DensityAnchors;
   whitePoint: number;
+  autoGains?: Rgb;
   ms: number;
 }
 
@@ -46,7 +47,7 @@ export function App() {
       try {
         const raster = new Raster(source.width, source.height, "transmission-linear", source.raster);
         const started = performance.now();
-        const { display, base, anchors, whitePoint } = processNegative(raster, recipe);
+        const { display, base, anchors, whitePoint, autoGains } = processNegative(raster, recipe);
         const bytes = encode8(display);
         const rgba = new Uint8ClampedArray(bytes.length / 3 * 4);
         for (let i = 0, j = 0; i < bytes.length; i += 3, j += 4) {
@@ -55,7 +56,7 @@ export function App() {
           rgba[j + 2] = bytes[i + 2]!;
           rgba[j + 3] = 255;
         }
-        setResult({ rgba, base, anchors, whitePoint, ms: performance.now() - started });
+        setResult({ rgba, base, anchors, whitePoint, autoGains, ms: performance.now() - started });
         setError(null);
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : String(caught);
@@ -341,7 +342,15 @@ export function App() {
                   checked={recipe.autoNeutralize}
                   onChange={(event) => update({ autoNeutralize: event.target.checked })}
                 />
-                自动中和橙罩(中性高密度锚点)
+                自动中和橙罩(中性像素拟合)
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={recipe.autoWhiteBalance}
+                  onChange={(event) => update({ autoWhiteBalance: event.target.checked })}
+                />
+                自动白平衡(灰世界中位数)
               </label>
               <button className="btn" onClick={() => setMode("neutral-roi")}>框选中性高密度区域</button>
               {recipe.neutralRoi !== undefined && (
@@ -425,6 +434,9 @@ export function App() {
                   ? "—"
                   : result.anchors.channelFit.slope.map((value) => value.toFixed(3)).join("/")}
               </span>
+              {result.autoGains !== undefined && (
+                <span>自动白平衡 {result.autoGains.map((value) => value.toFixed(2)).join("/")}</span>
+              )}
               <span>白点 {result.whitePoint.toFixed(3)} · 预览 {result.ms.toFixed(0)} ms</span>
             </>
           )}

@@ -89,6 +89,12 @@ export interface Recipe {
   neutralRoi?: Rect;
   /** Channel gains applied after inversion (green stays 1). */
   whiteBalance: Rgb;
+  /**
+   * When enabled, robust gray-world gains (per-channel medians equalized)
+   * are estimated from the scene-linear positive and multiplied with the
+   * manual white balance. Defaults on.
+   */
+  autoWhiteBalance: boolean;
   /** Density-domain saturation boost around the channel mean, 0.5..2. */
   preSaturation: number;
   /** Exposure offset in stops. */
@@ -108,6 +114,7 @@ export const DEFAULT_RECIPE: Recipe = {
   manualDmax: 1.2,
   autoNeutralize: true,
   whiteBalance: [1, 1, 1],
+  autoWhiteBalance: true,
   preSaturation: 1.08,
   exposure: 0,
   contrast: 1,

@@ -4,7 +4,8 @@ import { cropRaster, rotateRaster } from "./geometry.ts";
 import { invertDensity } from "./invert.ts";
 import { Raster } from "./raster.ts";
 import { toneMap } from "./tone.ts";
-import type { BaseSample, DensityAnchors, Recipe } from "./types.ts";
+import type { BaseSample, DensityAnchors, Recipe, Rgb } from "./types.ts";
+import { applyGains, estimateWhiteBalance } from "./wb.ts";
 
 /** Result of the full negative-to-positive pipeline. */
 export interface NegativeResult {
@@ -14,6 +15,8 @@ export interface NegativeResult {
   anchors: DensityAnchors;
   /** Scene-linear value that was normalized to display white. */
   whitePoint: number;
+  /** Automatic white-balance gains actually applied; undefined when off. */
+  autoGains?: Rgb;
 }
 
 /**
@@ -46,7 +49,17 @@ export function processNegative(source: Raster, recipe: Recipe): NegativeResult 
     neutralRoi: recipe.autoNeutralize ? recipe.neutralRoi : undefined,
     autoNeutralize: recipe.autoNeutralize,
   });
-  const scene = invertDensity(density, anchors, recipe);
+  const inverted = invertDensity(density, anchors, recipe);
+  // Auto gains are estimated from the unbalanced positive so the manual
+  // sliders cannot be fought by the estimator; both then multiply.
+  const autoGains = recipe.autoWhiteBalance ? estimateWhiteBalance(inverted) : undefined;
+  const scene = applyGains(inverted, autoGains === undefined
+    ? recipe.whiteBalance
+    : [
+      autoGains[0] * recipe.whiteBalance[0],
+      autoGains[1] * recipe.whiteBalance[1],
+      autoGains[2] * recipe.whiteBalance[2],
+    ]);
   const { display, whitePoint } = toneMap(scene, recipe);
-  return { display, base, anchors, whitePoint };
+  return { display, base, anchors, whitePoint, autoGains };
 }

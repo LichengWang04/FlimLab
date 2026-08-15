@@ -6,6 +6,7 @@ export { cropRaster, downscaleRaster, rotateRaster, rectToPixels, validateRect }
 export { invertDensity } from "./invert.ts";
 export { Raster, medianInPlace, percentile, clamp01 } from "./raster.ts";
 export { toneMap, estimateWhitePoint } from "./tone.ts";
+export { applyGains, estimateWhiteBalance } from "./wb.ts";
 export { processNegative } from "./pipeline.ts";
 export type { NegativeResult } from "./pipeline.ts";
 export { DEFAULT_RECIPE } from "./types.ts";
