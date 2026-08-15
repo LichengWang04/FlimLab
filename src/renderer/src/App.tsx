@@ -421,9 +421,9 @@ export function App() {
                 Dmin {result.anchors.dmin.toFixed(3)} · Dmax {result.anchors.dmax.toFixed(3)} · 范围 {result.anchors.range.toFixed(3)}
               </span>
               <span>
-                通道范围 {result.anchors.channelRange === undefined
+                通道拟合 {result.anchors.channelFit === undefined
                   ? "—"
-                  : result.anchors.channelRange.map((value) => value.toFixed(3)).join("/")}
+                  : result.anchors.channelFit.slope.map((value) => value.toFixed(3)).join("/")}
               </span>
               <span>白点 {result.whitePoint.toFixed(3)} · 预览 {result.ms.toFixed(0)} ms</span>
             </>

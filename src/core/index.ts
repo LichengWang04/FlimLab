@@ -11,6 +11,7 @@ export type { NegativeResult } from "./pipeline.ts";
 export { DEFAULT_RECIPE } from "./types.ts";
 export type {
   BaseSample,
+  ChannelFit,
   DensityAnchors,
   QuarterTurn,
   RasterDomain,

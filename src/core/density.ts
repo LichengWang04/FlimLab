@@ -1,6 +1,6 @@
 import { validateRect } from "./geometry.ts";
 import { Raster, percentile } from "./raster.ts";
-import type { DensityAnchors, Rect, Rgb } from "./types.ts";
+import type { ChannelFit, DensityAnchors, Rect, Rgb } from "./types.ts";
 
 const DEFAULT_EPSILON = 1e-6;
 const SAMPLE_CAP = 65_536;
@@ -120,18 +120,131 @@ export function measureDensityAnchors(
     : Math.max(0, options.dmaxOverride - dmin);
   const dmax = dmin + range;
 
-  const channelRange = roi !== undefined
-    ? channelRangesFromSamples(triples, highPercentile)
+  const channelFit = roi !== undefined
+    ? resolveChannelFit(triples, neutralDensities, highPercentile, true)
     : options.autoNeutralize === true
-      ? inferNeutralChannelRange(neutralDensities, triples, highPercentile)
+      ? resolveChannelFit(triples, neutralDensities, highPercentile, false)
       : undefined;
 
-  return channelRange === undefined
+  return channelFit === undefined
     ? { dmin, dmax, range }
-    : { dmin, dmax, range, channelRange };
+    : { dmin, dmax, range, channelFit };
 }
 
-function channelRangesFromSamples(triples: readonly Rgb[], highPercentile: number): Rgb | undefined {
+/**
+ * Prefers a robust affine fit over near-neutral pixels (handles residual
+ * per-channel offsets and contrast differences across the whole tonal
+ * range), then falls back to the single-anchor methods of the original
+ * implementation when the fit has too little support. A result close to
+ * identity is suppressed either way: an effectively neutral negative needs
+ * no correction, and suppressing it keeps colourful scenes from receiving
+ * a phantom "calibration".
+ */
+function resolveChannelFit(
+  triples: readonly Rgb[],
+  neutralDensities: readonly number[],
+  highPercentile: number,
+  roiMode: boolean,
+): ChannelFit | undefined {
+  const fit = fitNeutralResponse(triples)
+    ?? (roiMode
+      ? rangeFitFromRoi(triples, highPercentile)
+      : tailAnchorFit(neutralDensities, triples, highPercentile));
+  if (fit === undefined) return undefined;
+  const isIdentity = fit.slope.every((value) => Math.abs(value - 1) <= IDENTITY_TOLERANCE)
+    && fit.offset.every((value) => Math.abs(value) <= IDENTITY_TOLERANCE);
+  return isIdentity ? undefined : fit;
+}
+
+const FIT_MIN_CANDIDATES = 24;
+const FIT_MIN_BINS = 5;
+const FIT_MIN_SPREAD = 0.1;
+const FIT_MAX_CANDIDATES = 2048;
+const FIT_BIN_COUNT = 32;
+const IDENTITY_TOLERANCE = 0.03;
+
+/**
+ * Robust per-channel affine fit density_c ≈ offset_c + slope_c × neutral.
+ * Near-neutral pixels are binned by mean density (per-bin channel medians
+ * absorb outliers), then each channel gets a Theil–Sen line through the
+ * binned points: the median of pairwise slopes and of intercepts is stable
+ * even when a share of the candidates is coloured content that slipped
+ * through the chroma gate. Near-identity suppression happens in the caller.
+ */
+function fitNeutralResponse(triples: readonly Rgb[]): ChannelFit | undefined {
+  let candidates: Rgb[] = [];
+  let candidateMeans: number[] = [];
+  for (const triple of triples) {
+    const mean = (triple[0] + triple[1] + triple[2]) / 3;
+    const chroma = Math.max(triple[0], triple[1], triple[2]) - Math.min(triple[0], triple[1], triple[2]);
+    if (chroma <= Math.max(0.05, mean * 0.16)) {
+      candidates.push(triple);
+      candidateMeans.push(mean);
+    }
+  }
+  if (candidates.length < FIT_MIN_CANDIDATES) return undefined;
+  if (candidates.length > FIT_MAX_CANDIDATES) {
+    const stride = Math.ceil(candidates.length / FIT_MAX_CANDIDATES);
+    candidates = candidates.filter((_, index) => index % stride === 0);
+    candidateMeans = candidateMeans.filter((_, index) => index % stride === 0);
+  }
+  const minMean = Math.min(...candidateMeans);
+  const maxMean = Math.max(...candidateMeans);
+  if (maxMean - minMean < FIT_MIN_SPREAD) return undefined;
+
+  // Bin by mean density; the per-channel median of each bin is one robust
+  // point, keeping the Theil–Sen stage small and outlier-resistant.
+  const bins: { mean: number; rgb: Rgb }[] = [];
+  for (let bin = 0; bin < FIT_BIN_COUNT; bin += 1) {
+    const low = minMean + (maxMean - minMean) * bin / FIT_BIN_COUNT;
+    const high = minMean + (maxMean - minMean) * (bin + 1) / FIT_BIN_COUNT;
+    const members: Rgb[] = [];
+    const means: number[] = [];
+    for (let index = 0; index < candidates.length; index += 1) {
+      const mean = candidateMeans[index]!;
+      if (mean >= low && (mean < high || bin === FIT_BIN_COUNT - 1)) {
+        members.push(candidates[index]!);
+        means.push(mean);
+      }
+    }
+    if (members.length < 3) continue;
+    const rgb: Rgb = [
+      percentile(members.map((triple) => triple[0]), 0.5),
+      percentile(members.map((triple) => triple[1]), 0.5),
+      percentile(members.map((triple) => triple[2]), 0.5),
+    ];
+    bins.push({ mean: percentile(means, 0.5), rgb });
+  }
+  if (bins.length < FIT_MIN_BINS) return undefined;
+
+  const slope: Rgb = [0, 0, 0];
+  const offset: Rgb = [0, 0, 0];
+  for (let channel = 0; channel < 3; channel += 1) {
+    const pairwise: number[] = [];
+    for (let left = 0; left < bins.length; left += 1) {
+      for (let right = left + 1; right < bins.length; right += 1) {
+        const delta = bins[right]!.mean - bins[left]!.mean;
+        if (delta >= 0.02) {
+          pairwise.push((bins[right]!.rgb[channel]! - bins[left]!.rgb[channel]!) / delta);
+        }
+      }
+    }
+    if (pairwise.length < 4) return undefined;
+    slope[channel] = percentile(pairwise, 0.5);
+    offset[channel] = percentile(bins.map((point) => point.rgb[channel]! - slope[channel]! * point.mean), 0.5);
+  }
+  if (
+    slope.some((value) => !Number.isFinite(value) || value < 0.2 || value > 5)
+    || offset.some((value) => !Number.isFinite(value) || Math.abs(value) > 2)
+  ) {
+    return undefined;
+  }
+  return { offset, slope };
+}
+
+/** Single-anchor fallback for a user-drawn neutral ROI: per-channel 99.5th
+ * percentile, normalized through the origin as before. */
+function rangeFitFromRoi(triples: readonly Rgb[], highPercentile: number): ChannelFit | undefined {
   if (triples.length === 0) return undefined;
   const channels: [number[], number[], number[]] = [[], [], []];
   for (const triple of triples) {
@@ -139,24 +252,26 @@ function channelRangesFromSamples(triples: readonly Rgb[], highPercentile: numbe
     channels[1].push(triple[1]);
     channels[2].push(triple[2]);
   }
-  return [
-    Math.max(0.05, percentile(channels[0], highPercentile)),
-    Math.max(0.05, percentile(channels[1], highPercentile)),
-    Math.max(0.05, percentile(channels[2], highPercentile)),
-  ];
+  return {
+    offset: [0, 0, 0],
+    slope: [
+      Math.max(0.05, percentile(channels[0], highPercentile)),
+      Math.max(0.05, percentile(channels[1], highPercentile)),
+      Math.max(0.05, percentile(channels[2], highPercentile)),
+    ],
+  };
 }
 
 /**
- * Conservative automatic equivalent of a neutral high-density picker. It
- * only activates when the high-density tail contains enough low-chroma
- * samples, so a colourful scene keeps the plain relative transform instead
- * of being forced towards grey.
+ * Conservative single-anchor fallback: only activates when the high-density
+ * tail contains enough low-chroma samples, so a colourful scene keeps the
+ * plain relative transform instead of being forced towards grey.
  */
-function inferNeutralChannelRange(
+function tailAnchorFit(
   neutralDensities: readonly number[],
   triples: readonly Rgb[],
   highPercentile: number,
-): Rgb | undefined {
+): ChannelFit | undefined {
   if (triples.length < 32) return undefined;
   const threshold = percentile(neutralDensities, Math.max(0.99, highPercentile));
   const candidates: [number[], number[], number[]] = [[], [], []];
@@ -172,9 +287,12 @@ function inferNeutralChannelRange(
     }
   }
   if (candidates[0].length < 8) return undefined;
-  return [
-    Math.max(0.05, percentile(candidates[0], 0.5)),
-    Math.max(0.05, percentile(candidates[1], 0.5)),
-    Math.max(0.05, percentile(candidates[2], 0.5)),
-  ];
+  return {
+    offset: [0, 0, 0],
+    slope: [
+      Math.max(0.05, percentile(candidates[0], 0.5)),
+      Math.max(0.05, percentile(candidates[1], 0.5)),
+      Math.max(0.05, percentile(candidates[2], 0.5)),
+    ],
+  };
 }

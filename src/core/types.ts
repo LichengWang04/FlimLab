@@ -41,6 +41,18 @@ export interface BaseSample {
   sampleCount: number;
 }
 
+/**
+ * Per-channel affine response model fitted from near-neutral pixels:
+ * density_c ≈ offset_c + slope_c × neutral-density. Normalizing by this fit
+ * instead of a single high-density anchor keeps neutrals neutral across the
+ * whole tonal range even when the film base sample carries a residual
+ * per-channel offset or the channel contrasts differ.
+ */
+export interface ChannelFit {
+  offset: Rgb;
+  slope: Rgb;
+}
+
 export interface DensityAnchors {
   /** Mean optical density of the sampled film base relative to scan white. */
   dmin: number;
@@ -48,8 +60,8 @@ export interface DensityAnchors {
   dmax: number;
   /** Usable density range of the negative (Dmax - Dmin). */
   range: number;
-  /** Optional per-channel density range from a neutral high-density area. */
-  channelRange?: Rgb;
+  /** Optional per-channel affine fit from a neutral area / neutral tail. */
+  channelFit?: ChannelFit;
 }
 
 export interface Recipe {

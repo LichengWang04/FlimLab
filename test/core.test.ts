@@ -20,7 +20,7 @@ import {
   toneMap,
   validateRect,
 } from "../src/core/index.ts";
-import type { RasterDomain, Recipe, Rect, Rgb } from "../src/core/index.ts";
+import type { ChannelFit, RasterDomain, Recipe, Rect, Rgb } from "../src/core/index.ts";
 
 type PixelFn = (x: number, y: number) => Rgb;
 
@@ -257,7 +257,7 @@ describe("Density anchors", () => {
     approx(anchors.dmin, -Math.log10(0.5));
     approx(anchors.range, 1); // D = -log10(0.05/0.5) = 1 everywhere
     approx(anchors.dmax, -Math.log10(0.5) + 1);
-    assert.equal(anchors.channelRange, undefined);
+    assert.equal(anchors.channelFit, undefined);
   });
 
   it("honours a manual Dmax override", () => {
@@ -266,7 +266,7 @@ describe("Density anchors", () => {
     const density = toRelativeDensity(frame, base);
     const anchors = measureDensityAnchors(base, density, 0.995, { dmaxOverride: 2.0 });
     approx(anchors.range, 2.0 - anchors.dmin);
-    assert.equal(anchors.channelRange, undefined);
+    assert.equal(anchors.channelFit, undefined);
   });
 
   it("rejects an out-of-range manual Dmax", () => {
@@ -277,7 +277,7 @@ describe("Density anchors", () => {
     assert.throws(() => measureDensityAnchors(base, density, 0.995, { dmaxOverride: -1 }));
   });
 
-  it("measures per-channel ranges inside a neutral ROI", () => {
+  it("falls back to per-channel ranges when a neutral ROI lacks density spread", () => {
     const base: Rgb = [0.8, 0.5, 0.3];
     const frame = build(32, 32, "transmission-linear", (x) => {
       const densities: Rgb = x < 16 ? [1.5, 1.4, 1.6] : [0.3, 0.3, 0.3];
@@ -291,13 +291,14 @@ describe("Density anchors", () => {
     const anchors = measureDensityAnchors(base, density, 0.995, {
       neutralRoi: { x: 0, y: 0, width: 0.5, height: 1 },
     });
-    assert.ok(anchors.channelRange);
-    approx(anchors.channelRange![0], 1.5, 1e-6);
-    approx(anchors.channelRange![1], 1.4, 1e-6);
-    approx(anchors.channelRange![2], 1.6, 1e-6);
+    assert.ok(anchors.channelFit);
+    approx(anchors.channelFit!.slope[0], 1.5, 1e-6);
+    approx(anchors.channelFit!.slope[1], 1.4, 1e-6);
+    approx(anchors.channelFit!.slope[2], 1.6, 1e-6);
+    assert.deepEqual(anchors.channelFit!.offset, [0, 0, 0]);
   });
 
-  it("infers a channel range only from a convincingly neutral tail", () => {
+  it("falls back to a single neutral-tail anchor without density spread", () => {
     const base: Rgb = [1, 1, 1];
     const frame = build(32, 32, "transmission-linear", (x, y) => {
       const inTail = x < 3; // ~9.4% of the frame
@@ -310,13 +311,14 @@ describe("Density anchors", () => {
     });
     const density = toRelativeDensity(frame, base);
     const neutral = measureDensityAnchors(base, density, 0.995, { autoNeutralize: true });
-    assert.ok(neutral.channelRange);
-    approx(neutral.channelRange![0], 2.2, 0.01);
-    approx(neutral.channelRange![1], 2.0, 0.01);
-    approx(neutral.channelRange![2], 2.1, 0.01);
+    assert.ok(neutral.channelFit);
+    approx(neutral.channelFit!.slope[0], 2.2, 0.01);
+    approx(neutral.channelFit!.slope[1], 2.0, 0.01);
+    approx(neutral.channelFit!.slope[2], 2.1, 0.01);
+    assert.deepEqual(neutral.channelFit!.offset, [0, 0, 0]);
   });
 
-  it("does not infer a channel range from a colourful tail", () => {
+  it("does not infer a channel fit from a colourful tail", () => {
     const base: Rgb = [1, 1, 1];
     const frame = build(32, 32, "transmission-linear", (x) => {
       const rgb: Rgb = x < 3 ? [2.5, 1.2, 1.2] : [0.5, 0.5, 0.5];
@@ -328,14 +330,57 @@ describe("Density anchors", () => {
     });
     const density = toRelativeDensity(frame, base);
     const anchors = measureDensityAnchors(base, density, 0.995, { autoNeutralize: true });
-    assert.equal(anchors.channelRange, undefined);
+    assert.equal(anchors.channelFit, undefined);
+  });
+
+  it("fits an affine per-channel response from neutrals across the tonal range", () => {
+    // A neutral scene whose residual cast follows D_c = slope_c * s + offset_c
+    // at every density s. The fit must recover both parameters so neutrals
+    // stay neutral everywhere, not just at one anchor density.
+    const slope: Rgb = [1, 0.95, 1.05];
+    const offset: Rgb = [0.02, 0, 0.03];
+    const levels = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+    const base: Rgb = [1, 1, 1];
+    const frame = build(40, 40, "transmission-linear", (x) => {
+      const s = levels[x % levels.length]!;
+      return [
+        base[0] * Math.pow(10, -(slope[0] * s + offset[0])),
+        base[1] * Math.pow(10, -(slope[1] * s + offset[1])),
+        base[2] * Math.pow(10, -(slope[2] * s + offset[2])),
+      ];
+    });
+    const density = toRelativeDensity(frame, base);
+    const anchors = measureDensityAnchors(base, density, 0.995, { autoNeutralize: true });
+    assert.ok(anchors.channelFit, "affine fit should fire for a low-chroma scene");
+    approx(anchors.channelFit!.slope[0], 1, 0.02);
+    approx(anchors.channelFit!.slope[1], 0.95, 0.02);
+    approx(anchors.channelFit!.slope[2], 1.05, 0.02);
+    approx(anchors.channelFit!.offset[0], 0.02, 0.02);
+    approx(anchors.channelFit!.offset[1], 0, 0.02);
+    approx(anchors.channelFit!.offset[2], 0.03, 0.02);
+
+    // Inversion through the fit yields near-identical channels at every
+    // level, including low densities where a single-anchor normalization
+    // leaves a visible cast. Fitted parameters carry estimation error, so
+    // values are checked loosely while channel equality stays tight.
+    const scene = invertDensity(density, anchors, { whiteBalance: [1, 1, 1], preSaturation: 1 });
+    for (const s of levels) {
+      const offsetIndex = Raster.offsetOf(levels.indexOf(s), 0, 40);
+      const expected = Math.pow(10, s) - 1;
+      approx(scene.data[offsetIndex]!, expected, expected * 0.08, `red at s=${s}`);
+      approx(scene.data[offsetIndex + 1]!, scene.data[offsetIndex]!, expected * 0.02, `green at s=${s}`);
+      approx(scene.data[offsetIndex + 2]!, scene.data[offsetIndex]!, expected * 0.02, `blue at s=${s}`);
+    }
   });
 });
 
 describe("Inversion", () => {
   const anchors = { dmin: 0.3, dmax: 1.3, range: 1.0 };
 
-  function invert(values: Rgb[], options: { channelRange?: Rgb; wb?: Rgb; preSaturation?: number } = {}) {
+  function invert(
+    values: Rgb[],
+    options: { channelFit?: ChannelFit; wb?: Rgb; preSaturation?: number } = {},
+  ) {
     const width = values.length;
     const density = new Raster(width, 1, "relative-density");
     values.forEach(([r, g, b], index) => {
@@ -346,7 +391,7 @@ describe("Inversion", () => {
     });
     return invertDensity(density, {
       ...anchors,
-      channelRange: options.channelRange,
+      channelFit: options.channelFit,
     }, {
       whiteBalance: options.wb ?? [1, 1, 1],
       preSaturation: options.preSaturation ?? 1,
@@ -366,18 +411,38 @@ describe("Inversion", () => {
     approx(scene.data[9], Math.sqrt(10) - 1);
   });
 
-  it("normalizes density by the per-channel range and caps at 4x", () => {
+  it("normalizes density by the per-channel fit and caps at 4x", () => {
+    const identityFit: ChannelFit = { offset: [0, 0, 0], slope: [1, 1, 1] };
     const scene = invert(
       [[1, 1, 1], [2, 2, 2], [5, 5, 5]],
-      { channelRange: [1, 1, 1] },
+      { channelFit: identityFit },
     );
     approx(scene.data[0], 9);
     approx(scene.data[3], 99);
     approx(scene.data[6], 9999);
   });
 
+  it("neutralizes an affine channel response at every density", () => {
+    const fit: ChannelFit = { offset: [0.2, 0, -0.1], slope: [1.2, 1, 0.8] };
+    // These triples sit on the fitted lines: (D - offset) / slope = 1, 2, 0.5.
+    const scene = invert(
+      [[1.4, 1, 0.7], [2.6, 2, 1.5], [0.8, 0.5, 0.3]],
+      { channelFit: fit },
+    );
+    approx(scene.data[0], 9, 1e-3);
+    approx(scene.data[1], 9, 1e-3);
+    approx(scene.data[2], 9, 1e-3);
+    approx(scene.data[3], 99, 1e-3);
+    approx(scene.data[4], 99, 1e-3);
+    approx(scene.data[5], 99, 1e-3);
+    approx(scene.data[6], Math.sqrt(10) - 1, 1e-3);
+    approx(scene.data[7], Math.sqrt(10) - 1, 1e-3);
+    approx(scene.data[8], Math.sqrt(10) - 1, 1e-3);
+  });
+
   it("applies white balance after inversion", () => {
-    const scene = invert([[1, 1, 1]], { wb: [1.5, 1, 0.8], channelRange: [1, 1, 1] });
+    const fit: ChannelFit = { offset: [0, 0, 0], slope: [1, 1, 1] };
+    const scene = invert([[1, 1, 1]], { wb: [1.5, 1, 0.8], channelFit: fit });
     approx(scene.data[0], 13.5);
     approx(scene.data[1], 9);
     approx(scene.data[2], 7.2);
@@ -385,7 +450,8 @@ describe("Inversion", () => {
 
   it("preserves the density-domain mean under pre-saturation", () => {
     const density = [1.2, 0.9, 1.5] as Rgb;
-    const scene = invert([density], { preSaturation: 1.08, channelRange: [1, 1, 1] });
+    const fit: ChannelFit = { offset: [0, 0, 0], slope: [1, 1, 1] };
+    const scene = invert([density], { preSaturation: 1.08, channelFit: fit });
     // Pre-saturation spreads channels around their mean without moving it;
     // after 10^D - 1 the density-domain mean is recovered via log10(v + 1).
     const mean = density.reduce((sum, value) => sum + value, 0) / 3;
@@ -398,10 +464,11 @@ describe("Inversion", () => {
     assert.deepEqual([...scene.data], [0, 0, 0]);
   });
 
-  it("rejects invalid white balance and pre-saturation", () => {
+  it("rejects invalid white balance, pre-saturation and channel fits", () => {
     assert.throws(() => invert([[1, 1, 1]], { wb: [Number.NaN, 1, 1] }));
     assert.throws(() => invert([[1, 1, 1]], { preSaturation: 3 }));
-    assert.throws(() => invert([[1, 1, 1]], { channelRange: [0.01, 1, 1] }));
+    assert.throws(() => invert([[1, 1, 1]], { channelFit: { offset: [0, 0, 0], slope: [0.01, 1, 1] } }));
+    assert.throws(() => invert([[1, 1, 1]], { channelFit: { offset: [0, 3, 0], slope: [1, 1, 1] } }));
   });
 });
 
@@ -532,12 +599,13 @@ describe("End-to-end negative inversion", () => {
       baseRoi: { x: 0, y: 0, width: 0.08, height: 1 },
     }));
 
-    // Base sampling finds the true mask; the neutral tail fires auto-neutralize.
+    // Base sampling finds the true mask; the perfectly neutral ramp needs no
+    // channel fit, so the conservative transform applies.
     assert.equal(result.base.method, "roi");
     approx(result.base.rgb[0], 0.9, 1e-6);
     approx(result.base.rgb[1], 0.5, 1e-6);
     approx(result.base.rgb[2], 0.3, 1e-6);
-    assert.ok(result.anchors.channelRange);
+    assert.equal(result.anchors.channelFit, undefined);
 
     // The display output must be the scene ramp times one constant scale
     // factor (the auto white point), with no per-pixel distortion.
@@ -569,7 +637,7 @@ describe("End-to-end negative inversion", () => {
     approx(result.base.rgb[0], 0.9, 1e-6);
     approx(result.base.rgb[1], 0.5, 1e-6);
     approx(result.base.rgb[2], 0.3, 1e-6);
-    assert.ok(result.anchors.channelRange);
+    assert.equal(result.anchors.channelFit, undefined);
 
     const sampleXs = [10, 30, 50, 70, 90];
     const scales = sampleXs.map((x) => {
