@@ -179,7 +179,7 @@ test("linear DNG export writes required DNG identity and LinearRaw tags", async 
     rowsPerStrip: 2,
   });
   await writer.appendStrip(0, 2, samples);
-  await writer.finish();
+  const result = await writer.finish();
   const dng = await readFile(outputPath);
   const tags = readClassicTiffTags(dng);
 
@@ -189,6 +189,8 @@ test("linear DNG export writes required DNG identity and LinearRaw tags", async 
   assert.ok(tags.has(50707), "DNGBackwardVersion is required");
   assert.ok(tags.has(50708), "UniqueCameraModel is required");
   assert.ok(tags.has(50721), "ColorMatrix1 is required for RGB DNG");
+  assert.equal(result.colorSpace, "linear-sRGB");
+  assert.equal(result.hasEmbeddedIcc, false);
   assert.deepEqual(Array.from(readDeflatedRgb16Strips(dng)), Array.from(samples));
   const validation = await validateMasterArtifact(outputPath, "dng", { width: 2, height: 2 });
   assert.deepEqual(validation.dngTags, [50706, 50707, 50708, 50721]);

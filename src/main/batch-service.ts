@@ -3,8 +3,16 @@ import { access } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 
 import type { CalibrationProfileDocument } from "../core/calibration.ts";
-import type { BatchExportItem, BatchJobSummary, MasterExportFormat } from "../shared/contracts.ts";
+import type {
+  BatchExportItem,
+  BatchJobState,
+  BatchJobSummary,
+  MasterExportFormat,
+} from "../shared/contracts.ts";
 import type { ProcessingService } from "./processing-service.ts";
+
+const maximumActiveBatchJobs = 2;
+const maximumRetainedBatchJobs = 32;
 
 export interface BatchSource {
   readonly item: BatchExportItem;
@@ -13,16 +21,27 @@ export interface BatchSource {
   readonly calibrationProfile?: CalibrationProfileDocument;
 }
 
-interface BatchJob extends BatchJobSummary {
+type BatchJobInternalState = BatchJobState | "completed-with-errors";
+
+interface BatchJob {
+  readonly id: string;
+  readonly format: MasterExportFormat;
+  readonly state: BatchJobInternalState;
+  readonly total: number;
+  readonly completed: number;
+  readonly currentAssetId?: string;
+  readonly failedAssetIds: readonly string[];
+  readonly cancelRequested: boolean;
+  readonly error?: string;
   readonly sources: readonly BatchSource[];
   readonly outputDirectory: string;
-  readonly format: MasterExportFormat;
+  readonly finishedAt?: number;
 }
 
 /**
- * A deliberately single-file-at-a-time export queue. It keeps the utility
- * process memory bounded and makes cancellation deterministic: the current
- * file is allowed to finish its atomic write, then no further item starts.
+ * Sequential master-export queue: every frame keeps its own recipe, the active
+ * atomic write always finishes before a cancel takes effect, and each finished
+ * frame releases its full-resolution utility raster before the next starts.
  */
 export class BatchService {
   private readonly jobs = new Map<string, BatchJob>();
@@ -37,6 +56,9 @@ export class BatchService {
     outputDirectory: string,
     format: MasterExportFormat = "tiff",
   ): BatchJobSummary {
+    if ([...this.jobs.values()].filter((job) => !isTerminalJob(job)).length >= maximumActiveBatchJobs) {
+      throw new Error("同时运行的批处理任务过多，请等待当前任务完成。");
+    }
     const id = randomUUID();
     const job: BatchJob = {
       id,
@@ -61,10 +83,16 @@ export class BatchService {
 
   public cancel(id: string): BatchJobSummary | undefined {
     const current = this.jobs.get(id);
-    if (current === undefined || current.state === "completed" || current.state === "cancelled" || current.state === "failed") {
+    if (
+      current === undefined
+      || current.state === "completed"
+      || current.state === "completed-with-errors"
+      || current.state === "cancelled"
+      || current.state === "failed"
+    ) {
       return current === undefined ? undefined : summarizeJob(current);
     }
-    const next = { ...current, cancelRequested: true } satisfies BatchJob;
+    const next: BatchJob = { ...current, cancelRequested: true };
     this.jobs.set(id, next);
     return summarizeJob(next);
   }
@@ -74,12 +102,11 @@ export class BatchService {
     if (job === undefined) return;
     job = { ...job, state: "running" };
     this.jobs.set(id, job);
-
     try {
       for (let index = 0; index < job.sources.length; index += 1) {
         job = this.requireJob(id);
         if (job.cancelRequested) {
-          this.jobs.set(id, { ...job, state: "cancelled", currentAssetId: undefined });
+          this.storeTerminalJob({ ...job, state: "cancelled", currentAssetId: undefined });
           return;
         }
         const source = job.sources[index];
@@ -109,23 +136,25 @@ export class BatchService {
           });
           continue;
         } finally {
-          // Full-resolution A7R V rasters are hundreds of MiB. Batch work is
-          // deliberately sequential, so retaining a completed frame only
-          // turns a bounded queue into memory growth proportional to its size.
           await this.processing.release(source.item.assetId).catch(() => undefined);
         }
         job = this.requireJob(id);
         this.jobs.set(id, { ...job, completed: job.completed + 1, currentAssetId: undefined });
       }
       job = this.requireJob(id);
-      this.jobs.set(id, {
+      const terminalState: BatchJobInternalState = job.cancelRequested
+        ? "cancelled"
+        : job.failedAssetIds.length > 0
+          ? "completed-with-errors"
+          : "completed";
+      this.storeTerminalJob({
         ...job,
-        state: job.cancelRequested ? "cancelled" : "completed",
+        state: terminalState,
         currentAssetId: undefined,
       });
-    } catch (error: unknown) {
+    } catch (error) {
       job = this.requireJob(id);
-      this.jobs.set(id, {
+      this.storeTerminalJob({
         ...job,
         state: "failed",
         currentAssetId: undefined,
@@ -139,19 +168,33 @@ export class BatchService {
     if (job === undefined) throw new Error("Batch job no longer exists.");
     return job;
   }
+
+  private storeTerminalJob(job: BatchJob): void {
+    this.jobs.set(job.id, {
+      ...job,
+      sources: [],
+      outputDirectory: "",
+      finishedAt: Date.now(),
+    });
+    const terminalJobs = [...this.jobs.values()]
+      .filter(isTerminalJob)
+      .sort((left, right) => (left.finishedAt ?? 0) - (right.finishedAt ?? 0));
+    for (const expired of terminalJobs.slice(0, Math.max(0, terminalJobs.length - maximumRetainedBatchJobs))) {
+      this.jobs.delete(expired.id);
+    }
+  }
 }
 
-/**
- * Batch jobs retain source paths and the selected output directory so the
- * main process can continue exporting. Never return that internal object
- * across IPC: TypeScript's structural return type does not remove properties
- * at runtime.
- */
+function isTerminalJob(job: BatchJob): boolean {
+  return job.state === "completed" || job.state === "completed-with-errors"
+    || job.state === "cancelled" || job.state === "failed";
+}
+
 function summarizeJob(job: BatchJob): BatchJobSummary {
   return {
     id: job.id,
     format: job.format,
-    state: job.state,
+    state: job.state as BatchJobState,
     total: job.total,
     completed: job.completed,
     currentAssetId: job.currentAssetId,
@@ -164,7 +207,7 @@ function summarizeJob(job: BatchJob): BatchJobSummary {
 function makeOutputName(sourceName: string, index: number, format: MasterExportFormat): string {
   const extension = extname(sourceName);
   const stem = (extension.length === 0 ? sourceName : sourceName.slice(0, -extension.length))
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+    .replace(/[<>:"/\\|?* -]/g, "-")
     .trim()
     .slice(0, 80) || "frame-" + String(index + 1).padStart(3, "0");
   const outputExtension = format === "jpeg" ? ".jpg" : format === "heif" ? ".avif" : "." + format;
@@ -174,14 +217,12 @@ function makeOutputName(sourceName: string, index: number, format: MasterExportF
 async function findAvailableOutputPath(directory: string, preferredName: string): Promise<string> {
   const extension = extname(preferredName);
   const stem = preferredName.slice(0, -extension.length);
-  for (let suffix = 1; suffix <= 10_000; suffix += 1) {
-    const candidateName = suffix === 1
-      ? preferredName
-      : stem + "-" + suffix + extension;
+  for (let suffix = 1; suffix <= 10000; suffix += 1) {
+    const candidateName = suffix === 1 ? preferredName : stem + "-" + suffix + extension;
     const candidate = join(directory, candidateName);
     try {
       await access(candidate);
-    } catch (error: unknown) {
+    } catch (error) {
       if (hasCode(error, "ENOENT")) return candidate;
       throw error;
     }
@@ -190,8 +231,6 @@ async function findAvailableOutputPath(directory: string, preferredName: string)
 }
 
 function hasCode(error: unknown, code: string): boolean {
-  return typeof error === "object"
-    && error !== null
-    && "code" in error
+  return typeof error === "object" && error !== null && "code" in error
     && (error as { readonly code?: unknown }).code === code;
 }

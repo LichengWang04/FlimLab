@@ -3,9 +3,9 @@ import test from "node:test";
 
 import { scrgbFloatBufferToRaster } from "../src/main/input-color.ts";
 
-test("float scRGB input remains linear and preserves its extended range", () => {
-  const expected = [-0.02, 0.001, 0.18, 0.5, 1, 1.25];
-  const values = new Float32Array(expected);
+test("float scRGB input remains linear and gamut-maps out-of-gamut negatives", () => {
+  const expected = [0, 1 + (-0.999) / 1.02, 1 + (-0.82) / 1.02, 0.5, 1, 1.25];
+  const values = new Float32Array([-0.02, 0.001, 0.18, 0.5, 1, 1.25]);
   const raster = scrgbFloatBufferToRaster(new Uint8Array(values.buffer), 2, 1);
 
   assert.equal(raster.domain, "transmission-linear-rgb");

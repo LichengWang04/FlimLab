@@ -9,7 +9,7 @@ function request(revision: number, rotation: 0 | 90 = 0, exposureStops = 0, maxE
     revision,
     assetId: "demo-negative",
     maxEdge,
-    mode: "preset",
+    mode: "generic",
     view: "positive",
     tone: { exposureStops, contrast: 1.16, highlightCompression: 0.5, saturation: 1.04 },
     processing: {
@@ -32,8 +32,8 @@ test("demo preview reuses invariant processing while applying new tone settings"
   assert.deepEqual(first.sceneLinear, adjusted.sceneLinear);
   assert.ok((first.displayWhitePoint ?? 0) > 0);
   assert.equal(first.gpuPipeline?.sourceLinear?.length, 256 * Math.round(256 * 0.664) * 3);
-  assert.equal(first.gpuPipeline?.film.kind, "preset");
-  assert.deepEqual(first.colorTrust, { level: "uncalibrated", reason: "default-preset" });
+  assert.equal(first.gpuPipeline?.film.kind, "generic");
+  assert.deepEqual(first.colorTrust, { level: "uncalibrated", reason: "generic-mode" });
   assert.notDeepEqual(first.rgba, adjusted.rgba);
 });
 

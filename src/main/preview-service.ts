@@ -115,6 +115,7 @@ export function renderDemoPreview(request: PreviewRequest): PreviewResult {
       sourceHeight: source.height,
       baseRgb: processed.base.rgb,
       film,
+      densityRange: processed.densityAnchors.range,
     },
     base: {
       rgb: processed.base.rgb,
@@ -136,19 +137,7 @@ function getFilmMode(mode: PreviewMode, channelGains?: readonly [number, number,
     return {
       kind: "generic",
       densityGain: [1, 1, 1],
-      whiteBalance: multiplyWhiteBalance([1.04, 1, 0.96], trim),
-    };
-  }
-  if (mode === "preset") {
-    return {
-      kind: "preset",
-      preset: {
-        id: "demo-c41",
-        version: "0.1",
-        curves: C41_CURVES,
-        matrix: C41_MATRIX,
-      },
-      whiteBalance: multiplyWhiteBalance([1.04, 1, 0.96], trim),
+      whiteBalance: multiplyWhiteBalance([1, 1, 1], trim),
     };
   }
   return {
@@ -293,10 +282,8 @@ function gridGlow(u: number, v: number): number {
 
 function buildWarnings(mode: PreviewMode, base: PipelineSceneResult["base"]): readonly string[] {
   const warnings = mode === "generic"
-    ? ["通用模式：用于浏览与分享，不声明场景绝对色彩准确性。"]
-    : mode === "preset"
-      ? ["C-41 演示预设：真实胶卷、冲洗与背光仍应分别校准。"]
-      : ["演示配置文件：仅匹配内建样张，不可用于真实翻拍设备。"];
+    ? ["默认模式：用于浏览与分享，不声明场景绝对色彩准确性。"]
+    : ["演示配置文件：仅匹配内建样张，不可用于真实翻拍设备。"];
   if (base.method === "automatic") {
     warnings.push("片基来自无边框画面估算，不能替代同卷未曝光片基实测值。");
   } else if (base.rejectedCount > 0) {

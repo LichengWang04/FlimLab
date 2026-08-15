@@ -2,11 +2,11 @@ import { Raster } from "./raster.ts";
 import type { GeometrySettings, NormalizedRoi, PerspectivePoint, PerspectiveQuad } from "./types.ts";
 
 export function applyGeometry(
-  transmission: Raster,
+  linearCapture: Raster,
   settings: GeometrySettings = {},
 ): Raster {
-  transmission.assertDomain("transmission-linear-rgb");
-  const rotated = rotateRightAngles(transmission, settings.rotation ?? 0);
+  linearCapture.assertDomain(["camera-linear-rgb", "transmission-linear-rgb"]);
+  const rotated = rotateRightAngles(linearCapture, settings.rotation ?? 0);
   const perspectiveCorrected = settings.perspective === undefined || isIdentityPerspective(settings.perspective)
     ? rotated
     : rectifyPerspective(rotated, settings.perspective);
@@ -143,7 +143,7 @@ export function validateRoi(roi: NormalizedRoi): void {
  * every output sample has a stable source coordinate.
  */
 export function rectifyPerspective(source: Raster, quad: PerspectiveQuad): Raster {
-  source.assertDomain("transmission-linear-rgb");
+  source.assertDomain(["camera-linear-rgb", "transmission-linear-rgb"]);
   validatePerspectiveQuad(quad);
   const top = distance(quad.topLeft, quad.topRight) * source.width;
   const bottom = distance(quad.bottomLeft, quad.bottomRight) * source.width;

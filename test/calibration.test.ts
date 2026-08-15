@@ -6,6 +6,7 @@ import { supportsExactGpuFilmCurves } from "../src/shared/gpu-film-compatibility
 import {
   createCalibrationProfileDocument,
   fitColorChartMatrix,
+  fitColorChartCurves,
   parseCalibrationProfileDocument,
   parseCubeLut,
   sampleLut3d,
@@ -32,19 +33,21 @@ const identityCurves: CurveSet = [
 test("GPU curve compatibility rejects profiles that would require resampling", () => {
   const exactCurve = makeCurve(32);
   const oversizedCurve = makeCurve(33);
-  const preset = (curves: CurveSet) => ({
-    kind: "preset" as const,
-    preset: {
+  const profile = (curves: CurveSet) => ({
+    kind: "calibrated" as const,
+    profile: {
       id: "curve-limit-test",
       version: "1.0.0",
+      calibrationId: "curve-limit-test",
+      captureFingerprint: "test-capture",
       curves,
       matrix: identityMatrix(),
     },
   });
 
   assert.equal(supportsExactGpuFilmCurves({ kind: "generic" }), true);
-  assert.equal(supportsExactGpuFilmCurves(preset([exactCurve, exactCurve, exactCurve])), true);
-  assert.equal(supportsExactGpuFilmCurves(preset([exactCurve, oversizedCurve, exactCurve])), false);
+  assert.equal(supportsExactGpuFilmCurves(profile([exactCurve, exactCurve, exactCurve])), true);
+  assert.equal(supportsExactGpuFilmCurves(profile([exactCurve, oversizedCurve, exactCurve])), false);
 });
 
 test("calibration profiles round-trip their Float32 LUT and runtime transform", () => {
@@ -156,6 +159,27 @@ test("weighted ridge color-chart fit recovers a 3x3 matrix without an intercept"
     () => fitColorChartMatrix(sources.slice(0, 4).map((source) => ({ source, target: source }))),
     /At least 18 included color-chart patches/,
   );
+});
+
+test("color-chart curve fitting emits monotonic characteristic curves", () => {
+  const patches: ColorChartPatch[] = Array.from({ length: 18 }, (_, index) => {
+    const density = 0.08 + index / 20;
+    const signal = Math.pow(Math.pow(10, density) - 1, 1.25);
+    return {
+      id: "curve-" + index,
+      source: [density, density * 0.95, density * 1.05],
+      target: [signal, signal * 0.9, signal * 1.1],
+    };
+  });
+  const curves = fitColorChartCurves(patches);
+  for (const curve of curves) {
+    assert.ok(curve.length >= 2);
+    for (let index = 1; index < curve.length; index += 1) {
+      assert.ok(curve[index].x > curve[index - 1].x);
+      assert.ok(curve[index].y >= curve[index - 1].y);
+    }
+  }
+  assert.ok(curves[0][curves[0].length - 1].y > 0);
 });
 
 function identityMatrix(): Matrix3 {

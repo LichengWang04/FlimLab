@@ -48,6 +48,7 @@ import type {
   PreviewView,
   CalibrationProfileSummary,
   CalibrationProfileVersionSummary,
+  ColorCardCaptureContext,
   BatchJobSummary,
   MasterExportFormat,
   MasterTiffExportResult,
@@ -109,9 +110,8 @@ type PreviewQuality = "quick" | "refining" | "settled";
 type GeometryTask = "crop" | null;
 
 const modeLabels: Record<PreviewMode, string> = {
-  generic: "通用",
-  preset: "胶片预设",
-  calibrated: "校准配置",
+  generic: "默认模式",
+  calibrated: "色卡校准",
 };
 
 const viewLabels: Record<PreviewView, string> = {
@@ -180,7 +180,7 @@ const frameRecipeSyncDelayMs = 160;
 
 export function App(): ReactNode {
   const api = getFilmLabApi();
-  const [mode, setMode] = useState<PreviewMode>("preset");
+  const [mode, setMode] = useState<PreviewMode>("generic");
   const [view, setView] = useState<PreviewView>("positive");
   const [tone, setTone] = useState<ToneState>({
     exposureStops: 0,
@@ -219,6 +219,12 @@ export function App(): ReactNode {
   const [calibrationProfileId, setCalibrationProfileId] = useState<string | undefined>();
   const [calibrationVersions, setCalibrationVersions] = useState<readonly CalibrationProfileVersionSummary[]>([]);
   const [colorCardAssetId, setColorCardAssetId] = useState<string | undefined>();
+  const [calibrationCaptureContext, setCalibrationCaptureContext] = useState<Required<ColorCardCaptureContext>>({
+    lens: "",
+    filmStock: "",
+    process: "",
+    illuminationId: "",
+  });
   const [projectPresets, setProjectPresets] = useState<readonly ProjectPreset[]>([]);
   const [projectStatus, setProjectStatus] = useState("正在恢复");
   const [projectLoaded, setProjectLoaded] = useState(false);
@@ -1864,9 +1870,7 @@ export function App(): ReactNode {
     try {
       const batchItems = assetIds.map((assetId) => {
         const recipe = activeRoll.uniformRecipe?.recipe
-          ?? (assetId === activeAssetId
-            ? captureRecipe()
-            : resolveFrameRecipe(activeRoll, assetId));
+          ?? (assetId === activeAssetId ? captureRecipe() : resolveFrameRecipe(activeRoll, assetId));
         return {
           assetId,
           mode: recipe.mode,
@@ -1880,10 +1884,7 @@ export function App(): ReactNode {
         setNotice("DNG 批处理要求每一帧都使用校准配置；请先统一整卷配方。");
         return;
       }
-      const job = await api.startBatchExport({
-        format: masterExportFormat,
-        items: batchItems,
-      });
+      const job = await api.startBatchExport({ format: masterExportFormat, items: batchItems });
       if (job !== undefined) {
         setBatchJob(job);
         setNotice(describeMasterExportFormat(job.format) + " 批处理已加入队列 · 0/" + job.total);
@@ -1893,37 +1894,10 @@ export function App(): ReactNode {
     }
   };
 
-  const cancelBatch = async (): Promise<void> => {
-    if (batchJob === undefined) return;
-    const updated = await api.cancelBatchJob(batchJob.id);
-    if (updated !== undefined) setBatchJob(updated);
-  };
-
-  const savePreset = (): void => {
-    const label = window.prompt("预设名称", "自定胶片配方")?.trim();
-    if (label === undefined || label.length === 0) return;
-    const recipe = captureRecipe();
-    const preset: ProjectPreset = { id: crypto.randomUUID(), label: label.slice(0, 80), recipe };
-    setProjectPresets((current) => [preset, ...current.filter((item) => item.label !== preset.label)].slice(0, 100));
-    setNotice("已保存项目预设 · " + preset.label);
-  };
-
-  const applyPreset = (id: string): void => {
-    const preset = projectPresets.find((item) => item.id === id);
-    if (preset === undefined) return;
-    recordRecipeChange();
-    applyRecipe(preset.recipe);
-    setNotice("已应用项目预设 · " + preset.label);
-  };
-
   const exportPreview = async (): Promise<void> => {
-    if (preview === null || activeAssetId === undefined || isExporting) {
-      return;
-    }
+    if (preview === null || activeAssetId === undefined || isExporting) return;
     setIsExporting(true);
     try {
-      // The on-screen rgba can intentionally lag behind GPU-only tone edits.
-      // Produce one current CPU frame for deterministic PNG export.
       const nextRevision = revision.current + 1;
       revision.current = nextRevision;
       const exportFrame = await api.renderPreview({
@@ -1938,13 +1912,8 @@ export function App(): ReactNode {
         dmaxOverride: activeRoll.manualDmax?.value,
       });
       const png = await encodePreviewPng(exportFrame);
-      const result = await api.exportPreviewPng({
-        suggestedFileName: projectTitle + "-preview.png",
-        png,
-      });
-      setNotice(result.saved
-        ? "已导出 PNG 预览 · " + (result.fileName ?? "已保存")
-        : "已取消导出");
+      const result = await api.exportPreviewPng({ suggestedFileName: projectTitle + "-preview.png", png });
+      setNotice(result.saved ? "已导出 PNG 预览 · " + (result.fileName ?? "已保存") : "已取消导出");
     } catch (error: unknown) {
       setNotice(error instanceof Error ? error.message : "无法导出预览");
     } finally {
@@ -1953,14 +1922,7 @@ export function App(): ReactNode {
   };
 
   const exportMasterTiff = async (format: MasterExportFormat = masterExportFormat): Promise<void> => {
-    if (
-      activeAssetId === undefined
-      || activeAssetId === demoFrameId
-      || !linkedAssetIds.has(activeAssetId)
-      || isExporting
-    ) {
-      return;
-    }
+    if (activeAssetId === undefined || activeAssetId === demoFrameId || !linkedAssetIds.has(activeAssetId) || isExporting) return;
     if (format === "dng" && dngBlockedReason !== undefined) {
       setNotice(dngBlockedReason);
       return;
@@ -1971,10 +1933,9 @@ export function App(): ReactNode {
     let gpuSessionId: string | undefined;
     try {
       const source = assets.find((asset) => asset.id === activeAssetId);
-      const suggestedFileName = makeMasterFileName(projectTitle, source?.name, format);
       const request = {
         assetId: activeAssetId,
-        suggestedFileName,
+        suggestedFileName: makeMasterFileName(projectTitle, source?.name, format),
         format,
         mode,
         tone,
@@ -1985,10 +1946,9 @@ export function App(): ReactNode {
       setNotice("正在准备全分辨率 GPU 母版…");
       let result: MasterTiffExportResult;
       try {
-        const nextRevision = revision.current + 1;
-        revision.current = nextRevision;
+        revision.current += 1;
         const sourceFrame = await api.renderPreview({
-          revision: nextRevision,
+          revision: revision.current,
           assetId: activeAssetId,
           maxEdge: 32_768,
           mode,
@@ -2014,10 +1974,7 @@ export function App(): ReactNode {
           width: layout.outputWidth,
           height: layout.outputHeight,
           rowsPerStrip,
-          processingMetadata: {
-            demosaic: "edge-aware-bayer-v2",
-            gpuBackend: "WebGL2",
-          },
+          processingMetadata: { demosaic: "edge-aware-bayer-v2", gpuBackend: "WebGL2" },
         });
         if (!begin.saved || begin.sessionId === undefined) {
           setNotice("已取消导出");
@@ -2036,9 +1993,7 @@ export function App(): ReactNode {
           tileHeight: rowsPerStrip,
           collectPixels: false,
           transfer: format === "dng" ? "linear" : "srgb",
-          onProgress: (completed, total) => {
-            setNotice("GPU 母版处理中 · " + Math.round(completed / total * 100) + "%");
-          },
+          onProgress: (completed, total) => setNotice("GPU 母版处理中 · " + Math.round(completed / total * 100) + "%"),
           onTile: (tile) => api.appendGpuMasterTiffStrip({
             sessionId: begin.sessionId!,
             outputY: tile.outputY,
@@ -2069,6 +2024,23 @@ export function App(): ReactNode {
     } finally {
       setIsExporting(false);
     }
+  };
+
+  const savePreset = (): void => {
+    const label = window.prompt("预设名称", "自定胶片配方")?.trim();
+    if (label === undefined || label.length === 0) return;
+    const recipe = captureRecipe();
+    const preset: ProjectPreset = { id: crypto.randomUUID(), label: label.slice(0, 80), recipe };
+    setProjectPresets((current) => [preset, ...current.filter((item) => item.label !== preset.label)].slice(0, 100));
+    setNotice("已保存项目预设 · " + preset.label);
+  };
+
+  const applyPreset = (id: string): void => {
+    const preset = projectPresets.find((item) => item.id === id);
+    if (preset === undefined) return;
+    recordRecipeChange();
+    applyRecipe(preset.recipe);
+    setNotice("已应用项目预设 · " + preset.label);
   };
 
   const importCalibrationProfile = async (): Promise<void> => {
@@ -2109,7 +2081,7 @@ export function App(): ReactNode {
         setCalibrationProfiles((current) => current.filter((item) => item.id !== calibrationProfileId));
         setCalibrationProfileId(undefined);
         setCalibrationVersions([]);
-        if (mode === "calibrated") setMode("preset");
+        if (mode === "calibrated") setMode("generic");
         setNotice("已删除标定配置及其本机历史版本");
       }
     } catch (error: unknown) {
@@ -2144,6 +2116,12 @@ export function App(): ReactNode {
       const result = await api.generateCalibrationFromColorCard(
         colorCardAssetId,
         cardRecipe.processing,
+        {
+          lens: calibrationCaptureContext.lens.trim() || undefined,
+          filmStock: calibrationCaptureContext.filmStock.trim() || undefined,
+          process: calibrationCaptureContext.process.trim() || undefined,
+          illuminationId: calibrationCaptureContext.illuminationId.trim() || undefined,
+        },
       );
       setCalibrationProfiles((current) => [result.profile, ...current.filter((item) => item.id !== result.profile.id)]);
       recordRecipeChange();
@@ -2403,11 +2381,8 @@ export function App(): ReactNode {
                     setNotice(exportBlockedReason);
                     return;
                   }
-                  if (activeAssetId === demoFrameId) {
-                    void exportPreview();
-                  } else {
-                    void exportMasterTiff();
-                  }
+                  if (activeAssetId === demoFrameId) void exportPreview();
+                  else void exportMasterTiff();
                 }}
               >
                 <Download size={16} />
@@ -2442,13 +2417,8 @@ export function App(): ReactNode {
                       title={unavailableReason}
                       onClick={() => void exportMasterTiff(choice.format)}
                     >
-                      <span className="export-format-check">
-                        {choice.format === masterExportFormat ? <Check size={14} /> : null}
-                      </span>
-                      <span>
-                        <strong>{choice.label}</strong>
-                        <small>{unavailableReason ?? choice.detail}</small>
-                      </span>
+                      <span className="export-format-check">{choice.format === masterExportFormat ? <Check size={14} /> : null}</span>
+                      <span><strong>{choice.label}</strong><small>{unavailableReason ?? choice.detail}</small></span>
                     </button>
                   );
                 })}
@@ -2752,10 +2722,6 @@ export function App(): ReactNode {
             <PanelLeft size={16} />
             工作区
           </button>
-          <button className="footer-nav" type="button" disabled>
-            <Layers size={16} />
-            批处理
-          </button>
         </div>
       </aside>
 
@@ -2933,8 +2899,8 @@ export function App(): ReactNode {
           <div>
             <span className="eyebrow">处理配方</span>
             <strong>{mode === "calibrated"
-              ? calibrationProfiles.find((profile) => profile.id === calibrationProfileId)?.label ?? "待选择标定配置"
-              : mode === "preset" ? "默认 C-41" : "通用负片反转"}</strong>
+              ? calibrationProfiles.find((profile) => profile.id === calibrationProfileId)?.label ?? "待选择色卡校准配置"
+              : "默认负片反转"}</strong>
           </div>
           <button className="icon-button compact" type="button" aria-label="配方选项">
             <Settings2 size={16} />
@@ -2945,20 +2911,14 @@ export function App(): ReactNode {
           <div className="mode-stack" role="group" aria-label="反转模式">
             <ModeButton
               active={mode === "generic"}
-              label="通用"
+              label="默认模式"
               detail="片基、密度反转与全局平衡"
               onClick={() => changeMode("generic")}
             />
             <ModeButton
-              active={mode === "preset"}
-              label="胶片预设"
-              detail="演示 C-41 · 曲线与基础矩阵"
-              onClick={() => changeMode("preset")}
-            />
-            <ModeButton
               active={mode === "calibrated"}
-              label="校准配置"
-              detail="曲线、矩阵与 3D LUT"
+              label="色卡校准"
+              detail="色卡曲线、矩阵与 3D LUT"
               onClick={() => changeMode("calibrated")}
             />
           </div>
@@ -3008,6 +2968,12 @@ export function App(): ReactNode {
               {assets.map((asset) => <option value={asset.id} key={asset.id}>{asset.name}</option>)}
             </select>
             <button className="compact-tool" type="button" disabled={colorCardAssetId === undefined} onClick={() => void generateColorCardCalibration()}>自动识别色卡</button>
+          </div>
+          <div className="profile-actions calibration-context" aria-label="色卡拍摄上下文">
+            <input className="profile-select" aria-label="镜头" placeholder="镜头（可选）" value={calibrationCaptureContext.lens} onChange={(event) => setCalibrationCaptureContext((current) => ({ ...current, lens: event.currentTarget.value }))} />
+            <input className="profile-select" aria-label="片种" placeholder="片种（可选）" value={calibrationCaptureContext.filmStock} onChange={(event) => setCalibrationCaptureContext((current) => ({ ...current, filmStock: event.currentTarget.value }))} />
+            <input className="profile-select" aria-label="冲洗工艺" placeholder="冲洗（可选）" value={calibrationCaptureContext.process} onChange={(event) => setCalibrationCaptureContext((current) => ({ ...current, process: event.currentTarget.value }))} />
+            <input className="profile-select" aria-label="背光标识" placeholder="背光 ID（可选）" value={calibrationCaptureContext.illuminationId} onChange={(event) => setCalibrationCaptureContext((current) => ({ ...current, illuminationId: event.currentTarget.value }))} />
           </div>
           <div className="profile-actions">
             <select className="profile-select" aria-label="项目预设" value="" onChange={(event) => applyPreset(event.currentTarget.value)}>
@@ -3311,44 +3277,53 @@ export function App(): ReactNode {
           <p className="section-note">几何调整完成后，再从最终画面选取片基并计算 Dmin/Dmax。</p>
         </InspectorSection>
 
-        <InspectorSection title="修复与导出">
-          <div className="pending-row">
-            <span>当前可用</span>
-            <span>{activeAssetId === undefined
-              ? "请先添加帧"
-              : activeAssetId === demoFrameId
-                ? "8-bit sRGB PNG 预览"
-                : describeMasterExportFormat(masterExportFormat) + " · " + describeColorTrust(activeColorTrust)}</span>
-          </div>
-          <label className="export-format-field">
-            <span>{activeColorTrust.level === "device-matched" ? "色彩母版格式" : "渲染输出格式"}{activeAssetId === demoFrameId ? " · 导入真实源文件后可用" : ""}</span>
+        <InspectorSection title="修复与导出" defaultOpen>
+          <label className="slider-control">
+            <span><span>母版格式</span><output>{currentMasterExportLabel}</output></span>
             <select
-              className="profile-select"
-              aria-label="导出格式"
+              aria-label="母版格式"
               value={masterExportFormat}
-              disabled={isExporting || activeAssetId === demoFrameId}
               onChange={(event) => setMasterExportFormat(event.currentTarget.value as MasterExportFormat)}
             >
-              <option value="tiff">TIFF · 16-bit sRGB 编码 · 无损</option>
-              <option value="jpeg">JPG · 8-bit sRGB 编码 · 质量 95</option>
-              <option value="heif">HEIF（AVIF）· 10-bit sRGB 编码</option>
-              <option value="dng" disabled={dngBlockedReason !== undefined}>DNG · 16-bit 线性 sRGB · 仅设备匹配</option>
+              {masterExportChoices.map((choice) => <option key={choice.format} value={choice.format}>{choice.label}</option>)}
             </select>
           </label>
-          <p className="section-note">
-            {describeColorTrustDetail(activeColorTrust)} sRGB ICC 描述文件的显示编码，并不单独证明上游颜色准确；HEIF 使用 AV1/AVIF 编码。
-          </p>
           <RestorationInspector processing={processing} onChange={updateProcessing} />
           {batchJob === undefined ? null : (
-            <div className="pending-row" role="status" aria-live="polite" aria-atomic="true">
-              <span>{describeMasterExportFormat(batchJob.format)} 批处理 {batchJob.state}</span>
-              <span>{batchJob.completed}/{batchJob.total}{batchJob.cancelRequested ? " · 正在取消" : ""}</span>
-              {(batchJob.state === "queued" || batchJob.state === "running")
-                ? <button className="compact-tool" type="button" onClick={() => void cancelBatch()}>取消</button>
-                : null}
+            <div className="batch-status" aria-live="polite">
+              <div className="batch-status-heading">
+                <strong>{describeMasterExportFormat(batchJob.format)} 批处理</strong>
+                <span>{batchJob.completed}/{batchJob.total}</span>
+              </div>
+              <p className="section-note">
+                {batchJob.state === "failed"
+                  ? batchJob.error ?? ("有 " + batchJob.failedAssetIds.length + " 个任务失败")
+                  : batchJob.state === "completed"
+                    ? "批处理已完成。"
+                    : batchJob.state === "cancelled"
+                      ? "批处理已取消。"
+                      : batchJob.currentAssetId === undefined
+                        ? "正在等待任务…"
+                        : "正在处理 " + batchJob.currentAssetId}
+              </p>
+              {batchJob.state === "queued" || batchJob.state === "running" ? (
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={batchJob.cancelRequested}
+                  onClick={() => {
+                    void api.cancelBatchJob(batchJob.id).then((next) => {
+                      if (next !== undefined) setBatchJob(next);
+                    }).catch((error: unknown) => setNotice(error instanceof Error ? error.message : "无法取消批处理"));
+                  }}
+                >
+                  {batchJob.cancelRequested ? "正在取消…" : "取消批处理"}
+                </button>
+              ) : null}
             </div>
           )}
         </InspectorSection>
+
       </aside>
 
       <footer className="filmstrip">
@@ -3698,7 +3673,6 @@ function describeMasterExportFormat(format: MasterExportFormat): string {
 
 function resolveActiveColorTrust(mode: PreviewMode, preview: PreviewResult | null): ColorTrust {
   if (mode === "generic") return { level: "uncalibrated", reason: "generic-mode" };
-  if (mode === "preset") return { level: "uncalibrated", reason: "default-preset" };
   return preview?.colorTrust.level === "profile-unverified" || preview?.colorTrust.level === "device-matched"
     ? preview.colorTrust
     : { level: "profile-unverified", reason: "calibration-profile-missing" };
@@ -3717,9 +3691,7 @@ function describeColorTrustDetail(trust: ColorTrust): string {
     return "相机型号与 RAW 解码/去马赛克链均匹配当前校准配置，可声明为设备匹配色彩输出。";
   }
   if (trust.level === "uncalibrated") {
-    return trust.reason === "default-preset"
-      ? "默认预设可保持同卷观感一致，但其通用胶片矩阵不是相机色彩表征；输出仅采用 sRGB 显示编码。"
-      : "通用模式用于浏览和分享，没有相机色彩表征；输出仅采用 sRGB 显示编码。";
+    return "默认模式用于浏览和分享，没有相机色彩表征；输出仅采用 sRGB 显示编码。";
   }
   switch (trust.reason) {
     case "camera-mismatch":
@@ -3730,6 +3702,8 @@ function describeColorTrustDetail(trust: ColorTrust): string {
       return "已应用校准配置，但源文件缺少可验证的相机型号，设备匹配状态未知。";
     case "decoder-unavailable":
       return "已应用校准配置，但源文件缺少可验证的解码器指纹，设备匹配状态未知。";
+    case "capture-context-unavailable":
+      return "已应用校准配置，但配置缺少镜头、片种、冲洗或背光信息，不能声明设备匹配。";
     default:
       return "校准配置已应用，但完整设备匹配条件尚未验证，不能声明颜色准确性。";
   }
@@ -4451,6 +4425,30 @@ function Slider({
   );
 }
 
+function RestorationInspector({
+  processing,
+  onChange,
+}: {
+  readonly processing: ProcessingRecipe;
+  readonly onChange: (update: (current: ProcessingRecipe) => ProcessingRecipe) => void;
+}): ReactNode {
+  const restoration = processing.restoration;
+  const setToggle = (key: "dust" | "scratches", enabled: boolean): void => {
+    onChange((current) => ({
+      ...current,
+      restoration: { ...current.restoration, [key]: enabled },
+    }));
+  };
+  return (
+    <div className="mode-stack">
+      <label className="pending-row"><span>自动除尘</span><input type="checkbox" checked={restoration.dust} onChange={(event) => setToggle("dust", event.currentTarget.checked)} /></label>
+      <label className="pending-row"><span>划痕修复</span><input type="checkbox" checked={restoration.scratches} onChange={(event) => setToggle("scratches", event.currentTarget.checked)} /></label>
+      <Slider label="保边降噪" value={restoration.denoise} min={0} max={1} step={0.05} display={restoration.denoise.toFixed(2)} onChange={(value) => onChange((current) => ({ ...current, restoration: { ...current.restoration, denoise: value } }))} />
+      <Slider label="锐化" value={restoration.sharpen} min={0} max={2} step={0.05} display={restoration.sharpen.toFixed(2)} onChange={(value) => onChange((current) => ({ ...current, restoration: { ...current.restoration, sharpen: value } }))} />
+    </div>
+  );
+}
+
 function InteractiveSlider({
   label,
   value,
@@ -4681,30 +4679,6 @@ function ProcessingInspector({
         <NumberRow label="宽" value={processing.baseRoi.width} min={0.01} max={1} step={0.01} onChange={(value) => setBase("width", value)} />
         <NumberRow label="高" value={processing.baseRoi.height} min={0.01} max={1} step={0.01} onChange={(value) => setBase("height", value)} />
       </details>
-    </div>
-  );
-}
-
-function RestorationInspector({
-  processing,
-  onChange,
-}: {
-  readonly processing: ProcessingRecipe;
-  readonly onChange: (update: (current: ProcessingRecipe) => ProcessingRecipe) => void;
-}): ReactNode {
-  const restoration = processing.restoration;
-  const setToggle = (key: "dust" | "scratches", enabled: boolean): void => {
-    onChange((current) => ({
-      ...current,
-      restoration: { ...current.restoration, [key]: enabled },
-    }));
-  };
-  return (
-    <div className="mode-stack">
-      <label className="pending-row"><span>自动除尘</span><input type="checkbox" checked={restoration.dust} onChange={(event) => setToggle("dust", event.currentTarget.checked)} /></label>
-      <label className="pending-row"><span>划痕修复</span><input type="checkbox" checked={restoration.scratches} onChange={(event) => setToggle("scratches", event.currentTarget.checked)} /></label>
-      <Slider label="保边降噪" value={restoration.denoise} min={0} max={1} step={0.05} display={restoration.denoise.toFixed(2)} onChange={(value) => onChange((current) => ({ ...current, restoration: { ...current.restoration, denoise: value } }))} />
-      <Slider label="锐化" value={restoration.sharpen} min={0} max={2} step={0.05} display={restoration.sharpen.toFixed(2)} onChange={(value) => onChange((current) => ({ ...current, restoration: { ...current.restoration, sharpen: value } }))} />
     </div>
   );
 }

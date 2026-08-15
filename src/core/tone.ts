@@ -4,6 +4,12 @@ import type { ToneSettings } from "./types.ts";
 const LUMA = [0.2126, 0.7152, 0.0722] as const;
 const EPSILON = 1e-8;
 const DISPLAY_CEILING = 1 - 1 / 65_536;
+/**
+ * Contrast pivot: mid grey in scene-linear space. Contrast is applied as a
+ * power law around this anchor, which is a linear stretch in the log domain
+ * and therefore C1-continuous across the whole tonal range.
+ */
+const MID_GREY = 0.18;
 
 export const defaultToneSettings: ToneSettings = {
   exposureStops: 0,
@@ -41,11 +47,15 @@ export function toneMap(
     red = outputLuma + (red - outputLuma) * settings.saturation;
     green = outputLuma + (green - outputLuma) * settings.saturation;
     blue = outputLuma + (blue - outputLuma) * settings.saturation;
-    const gamutScale = displayGamutScale(red, green, blue, settings.highlightCompression);
+    // Gamut protection is always on: channels above the display ceiling are
+    // compressed proportionally so hue is preserved, and negative remnants
+    // of the saturation step floor at zero instead of clipping per channel
+    // at encode time.
+    const gamutScale = displayGamutScale(red, green, blue);
 
-    target.data[offset] = red * gamutScale;
-    target.data[offset + 1] = green * gamutScale;
-    target.data[offset + 2] = blue * gamutScale;
+    target.data[offset] = Math.max(0, red * gamutScale);
+    target.data[offset + 1] = Math.max(0, green * gamutScale);
+    target.data[offset + 2] = Math.max(0, blue * gamutScale);
   }
   return target;
 }
@@ -80,10 +90,10 @@ export function toneMapToSrgbRgba(
     red = outputLuma + (red - outputLuma) * settings.saturation;
     green = outputLuma + (green - outputLuma) * settings.saturation;
     blue = outputLuma + (blue - outputLuma) * settings.saturation;
-    const gamutScale = displayGamutScale(red, green, blue, settings.highlightCompression);
-    output[outputOffset] = linearToSrgbByte(red * gamutScale);
-    output[outputOffset + 1] = linearToSrgbByte(green * gamutScale);
-    output[outputOffset + 2] = linearToSrgbByte(blue * gamutScale);
+    const gamutScale = displayGamutScale(red, green, blue);
+    output[outputOffset] = linearToSrgbByte(Math.max(0, red * gamutScale));
+    output[outputOffset + 1] = linearToSrgbByte(Math.max(0, green * gamutScale));
+    output[outputOffset + 2] = linearToSrgbByte(Math.max(0, blue * gamutScale));
     output[outputOffset + 3] = 255;
   }
   return output;
@@ -102,10 +112,12 @@ export function rasterToSrgbRgba(source: Raster): Uint8Array {
 
 function mapLuminance(input: number, settings: ToneSettings): number {
   let result = input;
-  if (result > 0 && result < 1 && settings.contrast !== 1) {
-    result = 1 / (1 + Math.pow((1 - result) / result, settings.contrast));
-  } else if (result >= 1 && settings.contrast !== 1) {
-    result = 1 + (result - 1) * settings.contrast;
+  // Contrast is a power law around mid grey: a linear stretch in the log
+  // domain. Unlike a sigmoid spliced to a linear extension at 1.0, it has no
+  // slope discontinuity at the display white point and leaves the perceived
+  // exposure anchor (0.18) untouched.
+  if (result > 0 && settings.contrast !== 1) {
+    result = MID_GREY * Math.pow(result / MID_GREY, settings.contrast);
   }
   if (result > 0 && settings.highlightCompression > 0) {
     const knee = 1 / (1 + settings.highlightCompression);
@@ -117,8 +129,13 @@ function mapLuminance(input: number, settings: ToneSettings): number {
   return result;
 }
 
-function displayGamutScale(red: number, green: number, blue: number, highlightCompression: number): number {
-  if (highlightCompression <= 0) return 1;
+/**
+ * Proportional compression of out-of-display channels. This runs for every
+ * pixel regardless of the highlight-compression control: the shoulder shapes
+ * luminance, while this guard keeps RGB ratios (and therefore hue) intact
+ * for colours that still exceed the display ceiling.
+ */
+function displayGamutScale(red: number, green: number, blue: number): number {
   const maximum = Math.max(red, green, blue);
   return maximum > DISPLAY_CEILING ? DISPLAY_CEILING / maximum : 1;
 }

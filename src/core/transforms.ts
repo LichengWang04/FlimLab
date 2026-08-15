@@ -1,4 +1,4 @@
-import { samplePreparedMonotonicCurve, validateMonotonicCurve } from "./curves.ts";
+import { computeCurveDomainScale, samplePreparedMonotonicCurve, validateMonotonicCurve } from "./curves.ts";
 import { Raster } from "./raster.ts";
 import type {
   CalibrationProfile,
@@ -11,13 +11,18 @@ import type {
 
 const ONE: Rgb = [1, 1, 1];
 
-export function applyFilmTransform(density: Raster, mode: FilmMode): Raster {
+/**
+ * Applies the selected inversion mode. `densityRange` is the measured
+ * Dmax−Dmin of the delivered frame; preset curves are resampled onto it so
+ * flat and dense negatives both use the full curve, while calibrated
+ * profiles keep their absolute density domain (that domain is the
+ * device-match claim and must not follow frame content).
+ */
+export function applyFilmTransform(density: Raster, mode: FilmMode, densityRange?: number): Raster {
   density.assertDomain("relative-density");
   switch (mode.kind) {
     case "generic":
       return applyGenericTransform(density, mode.densityGain ?? ONE, mode.whiteBalance ?? ONE);
-    case "preset":
-      return applyPresetTransform(density, mode.preset, mode.whiteBalance ?? ONE);
     case "calibrated":
       return applyCalibratedTransform(density, mode.profile, mode.whiteBalance ?? ONE);
   }
@@ -45,6 +50,7 @@ export function applyPresetTransform(
   density: Raster,
   preset: FilmPreset,
   whiteBalance: Rgb = ONE,
+  densityRange?: number,
 ): Raster {
   density.assertDomain("relative-density");
   validateRgb(whiteBalance, "whiteBalance");
@@ -53,15 +59,21 @@ export function applyPresetTransform(
   validateMonotonicCurve(preset.curves[1]);
   validateMonotonicCurve(preset.curves[2]);
 
+  const domainScale = computeCurveDomainScale(preset.curves, densityRange);
   const target = new Raster(density.width, density.height, "scene-linear-rgb");
   const matrix = preset.matrix;
   for (let offset = 0; offset < density.data.length; offset += 3) {
-    const red = samplePreparedMonotonicCurve(preset.curves[0], density.data[offset]);
-    const green = samplePreparedMonotonicCurve(preset.curves[1], density.data[offset + 1]);
-    const blue = samplePreparedMonotonicCurve(preset.curves[2], density.data[offset + 2]);
-    target.data[offset] = (matrix[0][0] * red + matrix[0][1] * green + matrix[0][2] * blue) * whiteBalance[0];
-    target.data[offset + 1] = (matrix[1][0] * red + matrix[1][1] * green + matrix[1][2] * blue) * whiteBalance[1];
-    target.data[offset + 2] = (matrix[2][0] * red + matrix[2][1] * green + matrix[2][2] * blue) * whiteBalance[2];
+    const red = samplePreparedMonotonicCurve(preset.curves[0], density.data[offset] * domainScale[0]);
+    const green = samplePreparedMonotonicCurve(preset.curves[1], density.data[offset + 1] * domainScale[1]);
+    const blue = samplePreparedMonotonicCurve(preset.curves[2], density.data[offset + 2] * domainScale[2]);
+    // Cross-talk matrices have negative off-diagonal terms, so saturated
+    // colours can leave the display gamut here. Clamping to zero at the
+    // inversion stage keeps out-of-gamut values from propagating into tone
+    // mapping, where they would otherwise be clipped per channel at encode
+    // time with a visible hue shift.
+    target.data[offset] = Math.max(0, matrix[0][0] * red + matrix[0][1] * green + matrix[0][2] * blue) * whiteBalance[0];
+    target.data[offset + 1] = Math.max(0, matrix[1][0] * red + matrix[1][1] * green + matrix[1][2] * blue) * whiteBalance[1];
+    target.data[offset + 2] = Math.max(0, matrix[2][0] * red + matrix[2][1] * green + matrix[2][2] * blue) * whiteBalance[2];
   }
   return target;
 }
@@ -72,9 +84,12 @@ export function applyCalibratedTransform(
   whiteBalance: Rgb = ONE,
 ): Raster {
   validateRgb(whiteBalance, "whiteBalance");
-  const transformed = applyPresetTransform(density, profile);
+  // White balance is applied before the 3D LUT so the LUT samples an
+  // already-balanced scene-linear signal; multiplying after the LUT would
+  // rescale its non-linear output and break the fitted response.
+  const transformed = applyPresetTransform(density, profile, whiteBalance);
   if (profile.lut === undefined) {
-    return applyWhiteBalance(transformed, whiteBalance);
+    return transformed;
   }
 
   validateLut(profile.lut);
@@ -85,9 +100,9 @@ export function applyCalibratedTransform(
       transformed.data[offset + 1],
       transformed.data[offset + 2],
     ]);
-    target.data[offset] = result[0] * whiteBalance[0];
-    target.data[offset + 1] = result[1] * whiteBalance[1];
-    target.data[offset + 2] = result[2] * whiteBalance[2];
+    target.data[offset] = result[0];
+    target.data[offset + 1] = result[1];
+    target.data[offset + 2] = result[2];
   }
   return target;
 }
@@ -200,14 +215,6 @@ function lerpRgb(left: Rgb, right: Rgb, amount: number): Rgb {
     left[1] + (right[1] - left[1]) * amount,
     left[2] + (right[2] - left[2]) * amount,
   ];
-}
-
-function applyWhiteBalance(source: Raster, whiteBalance: Rgb): Raster {
-  const target = new Raster(source.width, source.height, "scene-linear-rgb");
-  for (let offset = 0; offset < source.data.length; offset += 1) {
-    target.data[offset] = source.data[offset] * whiteBalance[offset % 3];
-  }
-  return target;
 }
 
 function validateFiniteRgb(value: Rgb, name: string): void {

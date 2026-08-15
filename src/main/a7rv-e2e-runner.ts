@@ -88,7 +88,7 @@ async function runStability(spec: A7rvAcceptanceSpec, processing: ProcessingServ
         revision: cycle * sourcePaths.length + index,
         assetId,
         maxEdge: 1_024,
-        mode: "preset",
+        mode: "generic",
         view: "positive",
         tone: { exposureStops: 0, contrast: 1, highlightCompression: 0.35, saturation: 1 },
         processing: defaultProcessingRecipe,

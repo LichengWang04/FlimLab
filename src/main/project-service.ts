@@ -111,7 +111,7 @@ export function createDefaultProject(): WorkspaceProject {
     }],
     activeRollId: "default-roll",
     recipe: {
-      mode: "preset",
+      mode: "generic",
       view: "positive",
       tone: {
         exposureStops: 0,
@@ -396,7 +396,10 @@ function parseSourceIdentity(value: unknown): SourceAsset["identity"] {
 
 function parseRecipe(value: unknown): ProjectRecipe {
   const record = requireRecord(value, "处理配方");
-  if (!previewModes.includes(record.mode as ProjectRecipe["mode"])) {
+  // Version 8 projects could contain the retired C-41 preset mode. Preserve
+  // their editability by normalising it to the new default rendering on load.
+  const mode = record.mode === "preset" ? "generic" : record.mode;
+  if (!previewModes.includes(mode as ProjectRecipe["mode"])) {
     throw new Error("处理模式无效。");
   }
   if (!previewViews.includes(record.view as ProjectRecipe["view"])) {
@@ -410,7 +413,7 @@ function parseRecipe(value: unknown): ProjectRecipe {
     saturation: requireBoundedNumber(toneRecord.saturation, "饱和度", 0, 5),
   };
   return {
-    mode: record.mode as ProjectRecipe["mode"],
+    mode: mode as ProjectRecipe["mode"],
     view: record.view as ProjectRecipe["view"],
     tone,
     calibrationProfileId: parseOptionalProfileId(record.calibrationProfileId),

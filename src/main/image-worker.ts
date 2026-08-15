@@ -11,7 +11,10 @@ import {
   processFilm,
   processFilmToScene,
   Raster,
+  fitColorChartCurves,
+  fitColorChartMatrix,
   fitColorCardRaster,
+  sampleMonotonicCurve,
   matchPhotonTransferModel,
   rasterToSrgbRgba,
   toneMapToSrgbRgba,
@@ -60,39 +63,6 @@ const tiffExtensions = new Set([".tif", ".tiff"]);
 const maximumInputPixels = 80_000_000;
 const FILM_BASE_ROI = { x: 0, y: 0, width: 0.08, height: 1 } as const;
 const gpuInteractiveAnalysisEdge = 320;
-
-const C41_MATRIX: Matrix3 = [
-  [1.06, -0.04, -0.02],
-  [-0.025, 1.05, -0.025],
-  [-0.035, -0.04, 1.075],
-];
-// The three C-41 channels share one neutral characteristic curve: equal
-// relative densities map to equal scene values, so a neutral grey stays
-// neutral through the inversion. Per-channel curve asymmetry used to bend
-// each dye layer independently and produced a systematic cast on every
-// camera (shadows toward green, mid-tones/highlights toward blue). Dye
-// cross-talk is expressed by C41_MATRIX, and sensor/channel balance by the
-// preset's whiteBalance.
-const C41_CURVES: CurveSet = [
-  [
-    { x: 0, y: 0 },
-    { x: 0.24, y: 0.155 },
-    { x: 0.62, y: 0.93 },
-    { x: 1.08, y: 2.09 },
-  ],
-  [
-    { x: 0, y: 0 },
-    { x: 0.24, y: 0.155 },
-    { x: 0.62, y: 0.93 },
-    { x: 1.08, y: 2.09 },
-  ],
-  [
-    { x: 0, y: 0 },
-    { x: 0.24, y: 0.155 },
-    { x: 0.62, y: 0.93 },
-    { x: 1.08, y: 2.09 },
-  ],
-];
 
 interface CachedAsset {
   readonly source: Raster;
@@ -182,7 +152,7 @@ function calibrateColorCard(
   // The card detector intentionally works on the same geometry/base recipe
   // that the user will apply to negatives. It requires an upright,
   // perspective-rectified 6×4 ColorChecker Classic card.
-  const normalized = processFilm(
+  const processed = processFilm(
     cached.source,
     createPipelineSettings("generic", {
       exposureStops: 0,
@@ -190,13 +160,30 @@ function calibrateColorCard(
       highlightCompression: 0,
       saturation: 1,
     }, undefined, processing, undefined, undefined, cached.summary.photonTransfer),
-  ).sceneLinear;
-  const fit = fitColorCardRaster(normalized, colorCheckerClassicReferences(), {
+  );
+  // Fit from relative density, not from a generic scene transform. The chart
+  // therefore constrains both the characteristic response and the residual
+  // cross-channel matrix instead of baking the generic curve into a 3x3 fit.
+  // A few chart pixels can sit infinitesimally above the sampled film base;
+  // density is physically non-negative, so floor only those numerical
+  // excursions before the log-domain curve fit.
+  const calibrationDensity = processed.density.clone();
+  for (let offset = 0; offset < calibrationDensity.data.length; offset += 1) {
+    calibrationDensity.data[offset] = Math.max(0, calibrationDensity.data[offset]);
+  }
+  const fit = fitColorCardRaster(calibrationDensity, colorCheckerClassicReferences(), {
     detection: { layout: { columns: 6, rows: 4 }, minimumSwatchSize: 8 },
     matrix: { minimumPatchCount: 18 },
   });
+  const curves: CurveSet = fitColorChartCurves(fit.patches);
+  const curveCorrectedPatches = fit.patches.map((patch) => ({
+    ...patch,
+    source: [0, 1, 2].map((channel) => sampleMonotonicCurve(curves[channel], patch.source[channel])) as [number, number, number],
+  }));
+  const matrixFit = fitColorChartMatrix(curveCorrectedPatches, { minimumPatchCount: 18 });
   return {
-    matrix: fit.matrixFit.matrix,
+    curves,
+    matrix: matrixFit.matrix,
     detectedPatchCount: fit.samples.length,
     usedPatchCount: fit.matrixFit.usedPatchCount,
     rejectedPatchIds: fit.matrixFit.rejectedPatchIds,
@@ -364,7 +351,7 @@ function renderAsset(
   request: {
     readonly revision: number;
     readonly maxEdge: number;
-    readonly mode: "generic" | "preset" | "calibrated";
+    readonly mode: "generic" | "calibrated";
     readonly view: "positive" | "transmission" | "density";
     readonly tone: { readonly exposureStops: number; readonly contrast: number; readonly highlightCompression: number; readonly saturation: number };
     readonly processing?: ProcessingRecipe;
@@ -399,14 +386,12 @@ function renderAsset(
         "标定曲线超过 GPU 精确处理上限，请使用 CPU 母版导出。",
       );
     }
-    // Compute the display white point from the same 320-edge analysis the
-    // interactive preview uses, so the GPU master export matches what the
-    // screen shows even when the renderer's cached preview is stale
-    // (e.g. a Dmax or film-base change that has not re-rendered yet).
-    const analysisSource = getPreviewRaster(
-      cached,
-      Math.min(gpuInteractiveAnalysisEdge, request.maxEdge),
-    );
+    // GPU masters must use the same full-resolution source statistics as CPU
+    // masters. Interactive previews may use a 320-edge analysis, but reusing
+    // it here makes base/Dmax/white-point values depend on crop and detail.
+    const analysisSource = request.gpuSourceOnly
+      ? source
+      : getPreviewRaster(cached, Math.min(gpuInteractiveAnalysisEdge, request.maxEdge));
     const analysis = processFilmToScene(analysisSource, pipelineSettings);
     const gpuSource = cached.gpuBayer;
     const sourceWidth = gpuSource?.width ?? source.width;
@@ -434,6 +419,7 @@ function renderAsset(
         sourceHeight,
         baseRgb,
         film: pipelineSettings.film,
+        densityRange: analysis.densityAnchors.range,
         photonTransfer: pipelineSettings.photonTransfer,
       },
       base: {
@@ -512,6 +498,7 @@ function renderAsset(
         sourceHeight: source.height,
         baseRgb: processed.base.rgb,
         film: pipelineSettings.film,
+        densityRange: processed.densityAnchors.range,
         photonTransfer: pipelineSettings.photonTransfer,
       },
     } : {}),
@@ -549,7 +536,7 @@ function renderGpuInteractivePreview(
   request: {
     readonly revision: number;
     readonly maxEdge: number;
-    readonly mode: "generic" | "preset" | "calibrated";
+    readonly mode: "generic" | "calibrated";
     readonly view: "positive" | "transmission" | "density";
     readonly tone: { readonly exposureStops: number; readonly contrast: number; readonly highlightCompression: number; readonly saturation: number };
     readonly processing?: ProcessingRecipe;
@@ -620,6 +607,7 @@ function renderGpuInteractivePreview(
       sourceHeight,
       baseRgb: analysis.base.rgb,
       film: pipelineSettings.film,
+      densityRange: analysis.densityAnchors.range,
       photonTransfer: pipelineSettings.photonTransfer,
     },
     base: {
@@ -724,7 +712,7 @@ async function exportAsset(
 }
 
 function createPipelineSettings(
-  mode: "generic" | "preset" | "calibrated",
+  mode: "generic" | "calibrated",
   tone: { readonly exposureStops: number; readonly contrast: number; readonly highlightCompression: number; readonly saturation: number },
   calibrationProfile: CalibrationProfileDocument | undefined,
   processing: ProcessingRecipe | undefined,
@@ -773,7 +761,7 @@ function toRestorationSettings(processing: ProcessingRecipe | undefined): Restor
 }
 
 function getFilmMode(
-  mode: "generic" | "preset" | "calibrated",
+  mode: "generic" | "calibrated",
   calibrationProfile: CalibrationProfileDocument | undefined,
   channelGains?: readonly [number, number, number],
 ): FilmMode {
@@ -784,19 +772,7 @@ function getFilmMode(
     return {
       kind: "generic",
       densityGain: [1, 1, 1],
-      whiteBalance: multiplyWhiteBalance([1.04, 1, 0.96], trim),
-    };
-  }
-  if (mode === "preset") {
-    return {
-      kind: "preset",
-      preset: { id: "c41-default", version: "1.0", curves: C41_CURVES, matrix: C41_MATRIX },
-      // The neutral curve cannot correct a sensor whose blue channel
-      // responds weaker than green (typical for Sony Bayer sensors), which
-      // would otherwise bias the inversion towards blue. Same conservative
-      // default as the generic mode; a colour-card calibration remains the
-      // exact per-camera/per-film answer.
-      whiteBalance: multiplyWhiteBalance([1.04, 1, 0.96], trim),
+      whiteBalance: multiplyWhiteBalance([1, 1, 1], trim),
     };
   }
   if (calibrationProfile === undefined) {
@@ -1206,7 +1182,7 @@ function createPreviewStageKey(
   generation: number,
   request: {
     readonly maxEdge: number;
-    readonly mode: "generic" | "preset" | "calibrated";
+    readonly mode: "generic" | "calibrated";
     readonly processing?: ProcessingRecipe;
     readonly dmaxOverride?: number;
     readonly dmaxSampleRoi?: import("../shared/contracts.ts").NormalizedRoi;
@@ -1239,14 +1215,12 @@ function densityVisualization(density: Raster): Raster {
 }
 
 function buildWarnings(
-  mode: "generic" | "preset" | "calibrated",
+  mode: "generic" | "calibrated",
   colorTrust: ColorTrust,
 ): readonly string[] {
   const modeWarning = mode === "generic"
-    ? "通用模式输出仅采用 sRGB 显示编码，不包含设备相机色彩表征，不声明颜色准确性。"
-    : mode === "preset"
-      ? "默认 C-41 预设包含通用胶片矩阵，但不包含设备相机色彩表征；sRGB ICC 仅描述显示编码。"
-      : colorTrust.level === "device-matched"
+    ? "默认模式输出仅采用 sRGB 显示编码，不包含设备相机色彩表征，不声明颜色准确性。"
+    : colorTrust.level === "device-matched"
         ? "校准配置的相机型号与 RAW 解码链均已匹配，可作为设备匹配色彩输出。"
         : colorTrustReasonWarning(colorTrust);
   return [modeWarning];
@@ -1264,6 +1238,8 @@ function colorTrustReasonWarning(colorTrust: ColorTrust): string {
       return "源文件没有可验证的 RAW 解码器指纹；输出不声明设备匹配。";
     case "decoder-mismatch":
       return "RAW 解码器或去马赛克链与校准配置不一致；输出不应视为设备匹配的颜色还原。";
+    case "capture-context-unavailable":
+      return "校准配置未记录镜头、片种、冲洗或背光；请补齐拍摄上下文后再声明设备匹配。";
     default:
       return "校准配置的设备匹配状态无法验证；输出不声明颜色准确性。";
   }
@@ -1357,7 +1333,10 @@ class RawSidecarSession {
   private stderr = "";
   private closed = false;
 
-  public constructor(private readonly executable: string) {
+  private readonly executable: string;
+
+  public constructor(executable: string) {
+    this.executable = executable;
     this.child = spawn(executable, [], {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,

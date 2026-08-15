@@ -7,6 +7,7 @@ import { applyFilmTransform } from "./transforms.ts";
 import type { BaseSample, DensityAnchors, PipelineSettings } from "./types.ts";
 
 export interface PipelineResult {
+  /** Linear capture samples; camera-linear inputs intentionally retain that domain. */
   readonly transmission: Raster;
   readonly base: BaseSample;
   readonly density: Raster;
@@ -23,11 +24,10 @@ export type PipelineSceneResult = Omit<PipelineResult, "displayLinear">;
 export function processFilmToScene(source: Raster, settings: PipelineSettings): PipelineSceneResult {
   source.assertDomain(["camera-linear-rgb", "transmission-linear-rgb"]);
 
-  // Camera-linear inputs are already normalized by their decoder. Re-tagging
-  // the immutable buffer avoids an unnecessary full-frame copy.
-  const transmission = source.domain === "camera-linear-rgb"
-    ? new Raster(source.width, source.height, "transmission-linear-rgb", source.data)
-    : source;
+  // Keep camera-linear and scanner/transmission-linear semantics explicit all
+  // the way through base sampling and density. A camera RGB buffer is not a
+  // generic transmission or sRGB buffer and must never be re-labelled.
+  const transmission = source;
 
   const geometryWithoutCrop = settings.geometry === undefined
     ? undefined
@@ -54,7 +54,7 @@ export function processFilmToScene(source: Raster, settings: PipelineSettings): 
     dmaxOverride: settings.dmaxOverride,
     dmaxRoi: settings.dmaxSampleRoi,
   });
-  const sceneLinear = applyFilmTransform(density, settings.film);
+  const sceneLinear = applyFilmTransform(density, settings.film, densityAnchors.range);
   const displayWhitePoint = estimateDisplayWhitePoint(density, sceneLinear, densityAnchors);
 
   return {

@@ -121,11 +121,6 @@ export type FilmMode =
       readonly whiteBalance?: Rgb;
     }
   | {
-      readonly kind: "preset";
-      readonly preset: FilmPreset;
-      readonly whiteBalance?: Rgb;
-    }
-  | {
       readonly kind: "calibrated";
       readonly profile: CalibrationProfile;
       readonly whiteBalance?: Rgb;

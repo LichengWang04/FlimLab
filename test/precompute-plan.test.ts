@@ -79,7 +79,7 @@ test("GPU precompute payloads are invalidated when channel gains change", () => 
   };
 
   assert.notEqual(
-    createPrecomputeSettingsKey("preset", undefined, neutral),
-    createPrecomputeSettingsKey("preset", undefined, adjusted),
+    createPrecomputeSettingsKey("generic", undefined, neutral),
+    createPrecomputeSettingsKey("generic", undefined, adjusted),
   );
 });

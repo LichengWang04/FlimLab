@@ -4,6 +4,10 @@ FilmLab follows [Semantic Versioning](https://semver.org/). This file records us
 
 ## [Unreleased]
 
+### Changed
+
+- Film-inversion colour pipeline: preset curves are resampled onto each frame's measured Dmax−Dmin (calibrated profiles keep their absolute domain), curve endpoints extrapolate in the log domain instead of hard-clamping, cross-talk matrix negatives clamp at inversion, calibrated white balance moves ahead of the 3D LUT, tone contrast is a log-domain power law anchored at 0.18 mid grey, hue-preserving gamut compression is always active, and scRGB TIFF inputs floor out-of-gamut negatives. CPU and WebGL2 paths share the same formulas.
+
 ### Added
 
 - Proprietary root license, CDDL-1.0 LibRaw election, packaged third-party license bundle and combined npm/vcpkg CycloneDX SBOM.

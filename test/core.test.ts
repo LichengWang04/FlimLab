@@ -163,13 +163,15 @@ test("generic mode maps higher negative density to a brighter positive", () => {
   assert.equal(result.domain, "scene-linear-rgb");
 });
 
-test("preset mode applies its curves then its colour matrix", () => {
+test("calibrated mode applies its curves then its colour matrix", () => {
   const density = raster("relative-density", 1, 1, [0.25, 0.5, 0.75]);
   const result = applyFilmTransform(density, {
-    kind: "preset",
-    preset: {
+    kind: "calibrated",
+    profile: {
       id: "unit-preset",
       version: "1",
+      calibrationId: "calibration-1",
+      captureFingerprint: "camera-light-1",
       curves: identityCurves,
       matrix: identityMatrix,
     },
@@ -180,14 +182,77 @@ test("preset mode applies its curves then its colour matrix", () => {
   near(result.data[2], 0.75);
 });
 
-test("film curves clamp outside their calibrated density domain", () => {
+test("film curves clamp below and extrapolate above their density domain", () => {
   const curve = [
-    { x: 0, y: 0.1 },
-    { x: 1, y: 0.9 },
+    { x: 0, y: 0.01 },
+    { x: 1, y: 1 },
   ];
 
-  near(sampleMonotonicCurve(curve, -2), 0.1);
-  near(sampleMonotonicCurve(curve, 3), 0.9);
+  // Below the domain the endpoint still clamps; above it the terminal
+  // log-domain slope (2 D per unit here) continues instead of flattening,
+  // keeping highlight gradation and hue intact.
+  near(sampleMonotonicCurve(curve, -1), 0.01);
+  near(sampleMonotonicCurve(curve, 2), 100);
+  near(sampleMonotonicCurve(curve, 3), 10_000);
+});
+
+test("calibrated profiles keep their absolute curve domain", () => {
+  const profile: CalibrationProfile = {
+    id: "unit-calibration",
+    version: "1",
+    calibrationId: "calibration-1",
+    captureFingerprint: "camera-light-1",
+    curves: identityCurves,
+    matrix: identityMatrix,
+  };
+  const density = raster("relative-density", 1, 1, [1, 1, 1]);
+
+  const result = applyFilmTransform(density, { kind: "calibrated", profile }, 2);
+  near(result.data[0], 1);
+});
+
+test("calibrated cross-talk matrix negatives clamp to zero at the inversion stage", () => {
+  const profile: CalibrationProfile = {
+    id: "crosstalk-calibration",
+    version: "1",
+    calibrationId: "calibration-1",
+    captureFingerprint: "camera-light-1",
+    curves: identityCurves,
+    matrix: [
+      [1, -0.5, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ] as Matrix3,
+  };
+  const density = raster("relative-density", 1, 1, [0.2, 0.9, 0.2]);
+
+  const result = applyFilmTransform(density, { kind: "calibrated", profile });
+  near(result.data[0], 0);
+  near(result.data[1], 0.9);
+  near(result.data[2], 0.2);
+});
+
+test("calibrated mode white-balances before sampling the 3D LUT", () => {
+  const constant = 0.5;
+  const lutData = new Float32Array(2 * 2 * 2 * 3);
+  lutData.fill(constant);
+  const profile: CalibrationProfile = {
+    id: "unit-calibration",
+    version: "1",
+    calibrationId: "calibration-1",
+    captureFingerprint: "camera-light-1",
+    curves: identityCurves,
+    matrix: identityMatrix,
+    lut: { size: 2, data: lutData },
+  };
+  const density = raster("relative-density", 1, 1, [0.5, 0.5, 0.5]);
+
+  // A constant LUT returns 0.5 regardless of its input; white balance must
+  // shape the LUT input, not rescale the LUT output (which would give 1.0).
+  const result = applyFilmTransform(density, { kind: "calibrated", profile, whiteBalance: [2, 2, 2] });
+  near(result.data[0], constant);
+  near(result.data[1], constant);
+  near(result.data[2], constant);
 });
 
 test("calibrated mode supports a trilinear 3D LUT", () => {
@@ -360,6 +425,43 @@ test("tone mapping preserves a neutral colour axis", () => {
   near(result.data[1], result.data[2]);
 });
 
+test("contrast anchors at mid grey and stays smooth across the white point", () => {
+  const pivot = raster("scene-linear-rgb", 1, 1, [0.18, 0.18, 0.18]);
+  const anchored = toneMap(pivot, { whitePoint: 1, contrast: 1.4 });
+  near(anchored.data[0], 0.18, 1e-6);
+
+  // A power law has the same slope on both sides of 1.0, so the white point
+  // no longer kinks (contrast 0.8 keeps the sample below the gamut guard).
+  const at = (luma: number) => toneMap(
+    raster("scene-linear-rgb", 1, 1, [luma, luma, luma]),
+    { whitePoint: 1, contrast: 0.8 },
+  ).data[0];
+  const slopeBelow = (at(1) - at(0.999)) / 0.001;
+  const slopeAbove = (at(1.001) - at(1)) / 0.001;
+  assert.ok(
+    Math.abs(slopeBelow - slopeAbove) < 0.02,
+    `slope jumps at the white point: ${slopeBelow} vs ${slopeAbove}`,
+  );
+});
+
+test("out-of-gamut channels compress proportionally without highlight compression", () => {
+  const scene = raster("scene-linear-rgb", 1, 1, [2, 1.5, 0.5]);
+  const result = toneMap(scene, { whitePoint: 1 });
+  const ceiling = 1 - 1 / 65_536;
+
+  near(result.data[0], ceiling, 1e-6);
+  near(result.data[1] / result.data[0], 0.75, 1e-4);
+  near(result.data[2] / result.data[0], 0.25, 1e-4);
+});
+
+test("saturation remnants floor at zero instead of clipping at encode time", () => {
+  const scene = raster("scene-linear-rgb", 1, 1, [0.5, 0.01, 0.01]);
+  const result = toneMap(scene, { whitePoint: 1, saturation: 2 });
+
+  assert.ok(result.data[0] > 0);
+  assert.ok(result.data[1] >= 0 && result.data[2] >= 0);
+});
+
 test("highlight compression rolls HDR luminance into display range", () => {
   const scene = raster("scene-linear-rgb", 4, 1, [
     0.5, 0.5, 0.5,
@@ -416,7 +518,7 @@ test("the complete pipeline routes a camera-linear image through all core domain
     film: { kind: "generic" },
   });
 
-  assert.equal(result.transmission.domain, "transmission-linear-rgb");
+  assert.equal(result.transmission.domain, "camera-linear-rgb");
   assert.equal(result.density.domain, "relative-density");
   assert.equal(result.sceneLinear.domain, "scene-linear-rgb");
   assert.equal(result.displayLinear.domain, "display-linear-rgb");

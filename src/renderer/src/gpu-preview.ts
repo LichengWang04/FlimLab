@@ -121,13 +121,13 @@ class WebGlPreviewRenderer implements PreviewCanvasRenderer {
       const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
       const float EPSILON = 1e-8;
       const float DISPLAY_CEILING = 0.9999847412109375;
+      const float MID_GREY = 0.18;
 
       float mapLuminance(float inputLuma) {
         float result = inputLuma;
-        if (result > 0.0 && result < 1.0 && u_contrast != 1.0) {
-          result = 1.0 / (1.0 + pow((1.0 - result) / result, u_contrast));
-        } else if (result >= 1.0 && u_contrast != 1.0) {
-          result = 1.0 + (result - 1.0) * u_contrast;
+        // Log-domain contrast around mid grey, matching the CPU core.
+        if (result > 0.0 && u_contrast != 1.0) {
+          result = MID_GREY * pow(result / MID_GREY, u_contrast);
         }
         if (result > 0.0 && u_highlightCompression > 0.0) {
           float knee = 1.0 / (1.0 + u_highlightCompression);
@@ -162,13 +162,12 @@ class WebGlPreviewRenderer implements PreviewCanvasRenderer {
         float outputLuma = dot(mapped, LUMA);
         mapped = vec3(outputLuma) + (mapped - vec3(outputLuma)) * u_saturation;
 
-        if (u_highlightCompression > 0.0) {
-          float maximum = max(mapped.r, max(mapped.g, mapped.b));
-          if (maximum > DISPLAY_CEILING) {
-            mapped *= DISPLAY_CEILING / maximum;
-          }
+        // Unconditional hue-preserving gamut guard, matching the CPU core.
+        float maximum = max(mapped.r, max(mapped.g, mapped.b));
+        if (maximum > DISPLAY_CEILING) {
+          mapped *= DISPLAY_CEILING / maximum;
         }
-        outColor = vec4(linearToSrgb(mapped), 1.0);
+        outColor = vec4(linearToSrgb(max(mapped, vec3(0.0))), 1.0);
       }
     `);
     this.program = gl.createProgram() ?? fail("WebGL preview program could not be created.");
@@ -334,7 +333,10 @@ class Canvas2dPreviewRenderer implements PreviewCanvasRenderer {
   public readonly backend = "2d" as const;
   private readonly context: CanvasRenderingContext2D;
 
-  public constructor(private readonly canvas: HTMLCanvasElement) {
+  private readonly canvas: HTMLCanvasElement;
+
+  public constructor(canvas: HTMLCanvasElement) {
+    this.canvas = canvas;
     this.context = canvas.getContext("2d", { alpha: false, desynchronized: true })
       ?? fail("Browser cannot create a preview canvas.");
   }

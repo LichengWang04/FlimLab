@@ -45,12 +45,19 @@ export interface DisplayLinearTiffWriteResult {
   readonly outputPath: string;
   readonly byteLength: number;
   readonly bitDepth: 16;
-  readonly colorSpace: "sRGB";
-  readonly hasEmbeddedIcc: true;
+  readonly colorSpace: "sRGB" | "linear-sRGB";
+  readonly hasEmbeddedIcc: boolean;
 }
 
 const SRGB_LINEAR_THRESHOLD = 0.0031308;
 const CLASSIC_TIFF_SOFT_LIMIT = 3_500_000_000;
+/** DNG ColorMatrix1 for the LinearRaw samples emitted here (linear sRGB D65
+ * primaries converted to the DNG-required XYZ D50 reference white). */
+const LINEAR_SRGB_D65_TO_XYZ_D50 = [
+  0.4360747, 0.3850649, 0.1430804,
+  0.2225045, 0.7168786, 0.0606169,
+  0.0139322, 0.0971045, 0.7141733,
+] as const;
 const deflateAsync = promisify(deflate);
 
 let sRgbProfilePromise: Promise<Buffer> | undefined;
@@ -340,11 +347,7 @@ export class StreamingSrgb16TiffWriter {
         ? addExtra(Buffer.from("FilmLab Linear Positive\0", "ascii"))
         : undefined;
       const dngColorMatrixIndex = isDng
-        ? addExtra(signedRationalArrayBuffer([
-            3.2404542, -1.5371385, -0.4985314,
-            -0.969266, 1.8760108, 0.041556,
-            0.0556434, -0.2040259, 1.0572252,
-          ]))
+        ? addExtra(signedRationalArrayBuffer(LINEAR_SRGB_D65_TO_XYZ_D50))
         : undefined;
       const dngAsShotNeutralIndex = isDng
         ? addExtra(rationalArrayBuffer([1, 1, 1]))
@@ -430,8 +433,8 @@ export class StreamingSrgb16TiffWriter {
         outputPath: this.options.outputPath,
         byteLength: this.position,
         bitDepth: 16,
-        colorSpace: "sRGB",
-        hasEmbeddedIcc: true,
+        colorSpace: isDng ? "linear-sRGB" : "sRGB",
+        hasEmbeddedIcc: !isDng,
       };
     } catch (error) {
       await this.cancel();

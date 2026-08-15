@@ -76,6 +76,10 @@ export class ProjectLifecycleService {
   private active: ActiveSession | undefined;
   private records: RecentProjectRecord[] = [];
   private initialized = false;
+  // Startup and renderer IPC can both update the recent-project index. Keep
+  // those atomic replacements in order so Windows never sees two renames
+  // racing for the same destination file.
+  private stateWriteTail: Promise<void> = Promise.resolve();
 
   public constructor(
     projectsRoot: string,
@@ -342,15 +346,20 @@ export class ProjectLifecycleService {
   }
 
   private async writeState(state: ProjectSessionStateFile): Promise<void> {
-    await mkdir(dirname(this.stateFilePath), { recursive: true });
-    const temporary = this.stateFilePath + "." + randomUUID() + ".tmp";
-    try {
-      await writeFile(temporary, JSON.stringify(state, null, 2), "utf8");
-      await rename(temporary, this.stateFilePath);
-    } catch (error: unknown) {
-      await rm(temporary, { force: true }).catch(() => undefined);
-      throw error;
-    }
+    const pending = this.stateWriteTail.then(async () => {
+      await mkdir(dirname(this.stateFilePath), { recursive: true });
+      const temporary = this.stateFilePath + "." + randomUUID() + ".tmp";
+      try {
+        await writeFile(temporary, JSON.stringify(state, null, 2), "utf8");
+        await renameWithRetry(temporary, this.stateFilePath);
+      } catch (error: unknown) {
+        await rm(temporary, { force: true }).catch(() => undefined);
+        throw error;
+      }
+    });
+    // A failed write must not poison the queue for later saves.
+    this.stateWriteTail = pending.catch(() => undefined);
+    await pending;
   }
 
   private async writeCalibrationSnapshots(bundlePath: string, draft: WorkspaceProjectDraft): Promise<void> {
@@ -536,6 +545,23 @@ async function pruneBackups(bundlePath: string, kind: "automatic" | "manual", ma
     .sort()
     .reverse();
   for (const name of entries.slice(maximum)) await rm(join(root, name), { recursive: true, force: true });
+}
+
+async function renameWithRetry(source: string, destination: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      await rename(source, destination);
+      return;
+    } catch (error: unknown) {
+      if (!hasCode(error, "EPERM") && !hasCode(error, "EACCES") && !hasCode(error, "EBUSY")) {
+        throw error;
+      }
+      lastError = error;
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 20 * 2 ** attempt));
+    }
+  }
+  throw lastError;
 }
 
 function hasCode(error: unknown, code: string): boolean {

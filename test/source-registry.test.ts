@@ -1,102 +1,154 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { SourceRegistry } from "../src/main/source-registry.ts";
 
-test("source registry exposes identity but never the source path", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "filmlab-source-registry-"));
-  context.after(async () => rm(directory, { recursive: true, force: true }));
-  const sourcePath = join(directory, "frame-001.NEF");
-  await writeFile(sourcePath, new Uint8Array([1, 2, 3, 4]));
-  const registry = new SourceRegistry(join(directory, "private-locations.json"));
-  const [asset] = await registry.register([sourcePath]);
+test("source registry assigns opaque ids and resolves them back to paths", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "filmlab-source-register-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
 
-  assert.equal(asset.name, "frame-001.NEF");
-  assert.equal(asset.extension, "NEF");
-  assert.equal(asset.identity?.size, 4);
-  assert.match(asset.identity?.fingerprint.value ?? "", /^[a-f0-9]{64}$/);
-  assert.equal(registry.getPath(asset.id), sourcePath);
-  assert.doesNotMatch(JSON.stringify(asset), new RegExp(directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
-});
+  const content = Buffer.from("frame-alpha-content-01");
+  const filePath = join(root, "frame-a.dng");
+  await writeFile(filePath, content);
 
-test("source registry automatically restores a verified path from the private index", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "filmlab-source-restore-"));
-  context.after(async () => rm(directory, { recursive: true, force: true }));
-  const sourcePath = join(directory, "frame-001.ARW");
-  const indexPath = join(directory, "state", "source-locations.json");
-  await writeFile(sourcePath, new Uint8Array([9, 8, 7, 6, 5]));
-  const first = new SourceRegistry(indexPath);
-  const [asset] = await first.register([sourcePath]);
+  const registry = new SourceRegistry(join(root, "locations.json"));
+  const assets = await registry.register([filePath]);
+  assert.equal(assets.length, 1);
+  const asset = assets[0];
+  assert.equal(asset.name, "frame-a.dng");
+  assert.equal(asset.extension, "DNG");
+  assert.equal(asset.identity?.size, content.byteLength);
+  assert.equal(
+    asset.identity?.fingerprint.value,
+    createHash("sha256").update(content).digest("hex"),
+  );
+  assert.equal(asset.identity?.fingerprint.algorithm, "sha256-full-v1");
 
-  const restoredRegistry = new SourceRegistry(indexPath);
-  const restored = await restoredRegistry.restore([asset]);
-  assert.deepEqual(restored.relinkedAssetIds, [asset.id]);
-  assert.deepEqual(restored.missingAssets, []);
-  assert.equal(restoredRegistry.getPath(asset.id), sourcePath);
-  const privateIndex = await readFile(indexPath, "utf8");
-  assert.match(privateIndex, /frame-001\.ARW/);
-});
-
-test("directory relink uses content identity after a source is renamed", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "filmlab-source-relink-"));
-  context.after(async () => rm(directory, { recursive: true, force: true }));
-  const originalDirectory = join(directory, "original");
-  const restoredDirectory = join(directory, "restored", "nested");
-  await mkdir(originalDirectory, { recursive: true });
-  await mkdir(restoredDirectory, { recursive: true });
-  const bytes = new Uint8Array([3, 1, 4, 1, 5, 9]);
-  const originalPath = join(originalDirectory, "frame-001.NEF");
-  const restoredPath = join(restoredDirectory, "renamed-frame.NEF");
-  await writeFile(originalPath, bytes);
-  await writeFile(restoredPath, bytes);
-
-  const registry = new SourceRegistry();
-  const [asset] = await registry.register([originalPath]);
+  assert.equal(registry.has(asset.id), true);
+  assert.equal(registry.getPath(asset.id), filePath);
   registry.forget(asset.id);
-  const result = await registry.relinkDirectories([asset], [join(directory, "restored")]);
+  assert.equal(registry.has(asset.id), false);
+  assert.equal(registry.getPath(asset.id), undefined);
+});
 
+test("source registry restores paths from the machine-private location index after restart", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "filmlab-source-restore-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
+
+  const filePath = join(root, "frame-b.dng");
+  await writeFile(filePath, Buffer.from("frame-bravo-content-02"));
+  const indexPath = join(root, "locations.json");
+
+  const first = new SourceRegistry(indexPath);
+  const [asset] = await first.register([filePath]);
+
+  const restarted = new SourceRegistry(indexPath);
+  assert.equal(restarted.getPath(asset.id), undefined);
+  const result = await restarted.restore([asset]);
   assert.deepEqual(result.relinkedAssetIds, [asset.id]);
   assert.deepEqual(result.missingAssets, []);
-  assert.equal(registry.getPath(asset.id), restoredPath);
-  assert.equal(result.relinkedAssets[0]?.name, "frame-001.NEF");
+  assert.equal(restarted.getPath(asset.id), filePath);
 });
 
-test("legacy filename relink enriches the descriptor with a durable identity", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "filmlab-source-legacy-"));
-  context.after(async () => rm(directory, { recursive: true, force: true }));
-  const firstPath = join(directory, "frame-001.NEF");
-  const secondPath = join(directory, "frame-002.NEF");
-  await writeFile(firstPath, new Uint8Array([1]));
-  await writeFile(secondPath, new Uint8Array([2]));
-  const registry = new SourceRegistry();
-  const result = await registry.relink([
-    { id: "frame-a", name: "frame-001.NEF", extension: "NEF" },
-    { id: "frame-b", name: "frame-002.NEF", extension: "NEF" },
-  ], [secondPath, firstPath]);
+test("source registry re-hashes content when only the modification time changed", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "filmlab-source-rehash-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
 
-  assert.deepEqual(result.relinkedAssetIds, ["frame-a", "frame-b"]);
+  const filePath = join(root, "frame-c.dng");
+  await writeFile(filePath, Buffer.from("frame-charlie-content"));
+  const indexPath = join(root, "locations.json");
+
+  const first = new SourceRegistry(indexPath);
+  const [asset] = await first.register([filePath]);
+
+  // Same bytes, new mtime: the size+mtime fast path must fall through to a
+  // fresh SHA-256 comparison, which still matches and relinks the asset.
+  const touched = new Date("2026-01-05T08:30:00.000Z");
+  await utimes(filePath, touched, touched);
+
+  const restarted = new SourceRegistry(indexPath);
+  const result = await restarted.restore([asset]);
+  assert.deepEqual(result.relinkedAssetIds, [asset.id]);
   assert.deepEqual(result.missingAssets, []);
-  assert.ok(result.relinkedAssets.every((asset) => asset.identity !== undefined));
-  assert.equal(registry.getPath("frame-a"), firstPath);
-  assert.equal(registry.getPath("frame-b"), secondPath);
+  assert.equal(restarted.getPath(asset.id), filePath);
 });
 
-test("directory relink rejects a same-size source whose content changed", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "filmlab-source-changed-"));
-  context.after(async () => rm(directory, { recursive: true, force: true }));
-  const original = join(directory, "original.ARW");
-  const changedDirectory = join(directory, "changed");
-  await mkdir(changedDirectory);
-  await writeFile(original, new Uint8Array([1, 2, 3, 4, 5, 6]));
-  const registry = new SourceRegistry();
-  const [asset] = await registry.register([original]);
-  registry.forget(asset.id);
-  await writeFile(join(changedDirectory, "renamed.ARW"), new Uint8Array([1, 2, 3, 4, 5, 7]));
+test("source registry rejects a tampered file whose bytes changed at the same size", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "filmlab-source-tamper-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
 
-  const result = await registry.relinkDirectories([asset], [changedDirectory]);
-  assert.deepEqual(result.relinkedAssetIds, []);
-  assert.deepEqual(result.missingAssets.map((value) => value.id), [asset.id]);
+  const filePath = join(root, "frame-d.dng");
+  await writeFile(filePath, Buffer.from("alpha-frame-bytes-01"));
+  const indexPath = join(root, "locations.json");
+
+  const first = new SourceRegistry(indexPath);
+  const [asset] = await first.register([filePath]);
+
+  // Identical length, different bytes: size checks pass but the content
+  // fingerprint no longer does, so neither restore nor relink may claim it.
+  await writeFile(filePath, Buffer.from("omega-frame-bytes-01"));
+
+  const restarted = new SourceRegistry(indexPath);
+  const restored = await restarted.restore([asset]);
+  assert.deepEqual(restored.relinkedAssetIds, []);
+  assert.deepEqual(restored.missingAssets.map((missing) => missing.id), [asset.id]);
+
+  const relinked = await restarted.relink([asset], [filePath]);
+  assert.deepEqual(relinked.relinkedAssetIds, []);
+  assert.deepEqual(relinked.missingAssets.map((missing) => missing.id), [asset.id]);
+  assert.equal(restarted.getPath(asset.id), undefined);
+});
+
+test("source registry reconnects a renamed and moved file by content fingerprint", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "filmlab-source-relink-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
+
+  const originalPath = join(root, "frame-e.dng");
+  await writeFile(originalPath, Buffer.from("frame-echo-content-05"));
+  const registry = new SourceRegistry(join(root, "locations.json"));
+  const [asset] = await registry.register([originalPath]);
+
+  const archive = join(root, "archive");
+  await mkdir(archive, { recursive: true });
+  const movedPath = join(archive, "renamed-e.dng");
+  await rename(originalPath, movedPath);
+
+  const result = await registry.relinkDirectories([asset], [root]);
+  assert.deepEqual(result.relinkedAssetIds, [asset.id]);
+  assert.deepEqual(result.missingAssets, []);
+  assert.equal(registry.getPath(asset.id), movedPath);
+});
+
+test("source registry matches a legacy asset by filename once and enriches it with an identity", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "filmlab-source-legacy-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
+
+  const filePath = join(root, "frame-f.dng");
+  const content = Buffer.from("frame-foxtrot-content");
+  await writeFile(filePath, content);
+  const registry = new SourceRegistry(join(root, "locations.json"));
+
+  const legacyAsset = { id: "legacy-frame", name: "frame-f.dng", extension: "DNG" };
+  const result = await registry.relink([legacyAsset], [filePath]);
+  assert.deepEqual(result.relinkedAssetIds, ["legacy-frame"]);
+  assert.deepEqual(result.missingAssets, []);
+  const enriched = result.relinkedAssets[0];
+  assert.equal(enriched.identity?.size, content.byteLength);
+  assert.equal(
+    enriched.identity?.fingerprint.value,
+    createHash("sha256").update(content).digest("hex"),
+  );
+  assert.equal(registry.getPath("legacy-frame"), filePath);
+
+  // A name that no candidate carries stays missing instead of guessing.
+  const absent = await registry.relink(
+    [{ id: "legacy-missing", name: "absent.dng", extension: "DNG" }],
+    [filePath],
+  );
+  assert.deepEqual(absent.relinkedAssetIds, []);
+  assert.deepEqual(absent.missingAssets.map((missing) => missing.id), ["legacy-missing"]);
 });

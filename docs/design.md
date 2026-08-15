@@ -8,7 +8,7 @@ FilmLab 面向个人翻拍胶片负片，核心目标是：保留线性处理域
 
 当前不承诺：
 
-- 通用或默认胶片预设具有相机颜色准确性；
+- 默认模式具有相机颜色准确性；
 - PTC 噪声模型可以替代相机光谱响应或色卡矩阵；
 - X-Trans、Foveon、sRAW 或任意非 2×2 Bayer RAW 可解码；
 - DNG 是原始传感器马赛克的再封装；当前 DNG 是处理后的 16-bit 线性 sRGB 正像；
@@ -50,14 +50,16 @@ RAW CFA
 → 片基参考
 → A7R V PTC 低信噪比正则化（严格匹配时，仅用于密度输入）
 → relative-density-log10
-→ 通用 / 默认预设 / 标定配置反转
+→ 通用 / 标定配置反转
 → linear-srgb-d65 正像
-→ 亮度域曝光、对比度、高光压缩、饱和度
+→ 亮度域曝光、对数域对比度（锚定 0.18 中灰）、高光压缩、饱和度
 → display-linear
 → 交付编码与容器
 ```
 
-16-bit TIFF 输入分为两类：带 ICC 的显示编码 TIFF 先色彩管理到 sRGB 原色并逆 OETF；无 ICC TIFF 必须由用户保证已经线性化和完成光学校正。8-bit 图像和非 16-bit TIFF 不进入负片处理链。
+反转阶段的域规则：色卡标定配置保持绝对密度域，因为该域就是设备匹配声明本身。曲线端点按末段对数斜率外推，不做硬钳制。串扰矩阵产生的负值在反转阶段钳零；校准模式的白平衡作用于 3D LUT 之前。调色阶段的色域保护（超出显示上限的通道等比压缩、负值归零）始终生效，与高光压缩开关无关。CPU 与 WebGL2 路径共享同一组公式（GPU 以 log2/exp2 实现等价的对数外推）。
+
+16-bit TIFF 输入分为两类：带 ICC 的显示编码 TIFF 先色彩管理到 sRGB 原色并逆 OETF；无 ICC TIFF 必须由用户保证已经线性化和完成光学校正。scRGB 转换可能为超色域颜色产生负分量，输入时一律钳零，避免对数密度阶段被顶到 6.0 D 形成亮斑。8-bit 图像和非 16-bit TIFF 不进入负片处理链。
 
 ## 4. RAW 与 Sony A7R V PTC
 
@@ -79,12 +81,11 @@ PTC 描述噪声统计而非光谱响应，所以它只能改善低信号显示�
 
 | 模式/状态 | 可信度 | 可声称内容 | DNG |
 | --- | --- | --- | --- |
-| 通用模式 | `uncalibrated` | 可浏览、可编辑的未设备表征输出 | 禁止 |
-| 默认 C-41 预设 | `uncalibrated` | 预设外观，不是颜色准确还原 | 禁止 |
+| 默认模式 | `uncalibrated` | 可浏览、可编辑的未设备表征输出 | 禁止 |
 | 标定配置缺失或相机/解码器不匹配 | `profile-unverified` | 使用了配置，但不能声称设备匹配 | 禁止 |
-| 相机型号与 `decoderFingerprint` 均匹配 | `device-matched` | 设备匹配的 `linear-srgb-d65` 结果 | 允许 |
+| 相机、解码器及完整拍摄上下文均匹配 | `device-matched` | 设备匹配的 `linear-srgb-d65` 结果 | 允许 |
 
-TIFF、JPEG 和 HEIF 可以在三种可信度下导出，因为其 ICC 只声明接收端应如何解释编码值。所有母版都在 XMP 中写入可信度、原因、来源/标定相机和 `colorAccuracyClaim`。只有 `device-matched` 使用 `device-matched-linear-srgb-d65`，其他状态统一写为 `not-device-characterized`。
+TIFF、JPEG 和 HEIF 可以在两种模式的可信度状态下导出，因为其 ICC 只声明接收端应如何解释编码值。设备匹配不仅要求相机型号与 `decoderFingerprint` 一致，还要求镜头、胶片、冲洗工艺和光源等配置上下文一致；缺失上下文时不能宣称设备匹配。所有母版都在 XMP 中写入可信度、原因、来源/标定相机和 `colorAccuracyClaim`。只有 `device-matched` 使用 `device-matched-linear-srgb-d65`，其他状态统一写为 `not-device-characterized`。
 
 ## 6. 预览与母版导出
 
@@ -195,7 +196,7 @@ DNG 容器验收使用动态匹配当前相机/decoder 的“验收专用单位�
 
 ## 11. 隐私、安全与供应链边界
 
-生产 renderer 的 CSP 以 `default-src 'none'` 为基线并设置 `connect-src 'none'`，应用没有遥测或崩溃上传。发行更新只由 main 进程的 `electron-updater` 读取 GitHub Release 更新清单，renderer 只能通过窄 IPC 检查状态、确认安装或请求已知良好回滚。下载完成不会静默重启；安装前刷新项目保存队列。Windows 仅在上一稳定 NSIS 已缓存时提供回滚，新版本连续两次未显示主窗口会触发静默恢复；macOS/Linux 不尝试危险的应用目录改写，而明确要求从发行页重装。Vite 开发模式只对 localhost/127.0.0.1 的 HTTP/WebSocket 放行热更新。Electron 继续禁止 Node integration、权限请求、外部窗口与导航。
+生产 renderer 的 CSP 以 `default-src 'none'` 为基线并设置 `connect-src 'none'`，应用没有遥测或崩溃上传。发行更新只由 main 进程的 `electron-updater` 读取 GitHub Release 更新清单，renderer 只能通过窄 IPC 检查状态、确认安装或请求已知良好回滚。下载完成不会静默重启；安装前刷新项目保存队列。Windows 仅在上一稳定 NSIS 已缓存时提供回滚，新版本连续两次未显示主窗口时触发静默恢复；macOS/Linux 不尝试危险的应用目录改写，而明确要求从发行页重装。Vite 开发模式只对 localhost/127.0.0.1 的 HTTP/WebSocket 放行热更新。Electron 继续禁止 Node integration、权限请求、外部窗口与导航。
 
 ## 12. 校准生命周期、键盘与无障碍
 

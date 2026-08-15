@@ -10,6 +10,5 @@ export const maximumGpuCurvePoints = 32;
  */
 export function supportsExactGpuFilmCurves(film: FilmMode): boolean {
   if (film.kind === "generic") return true;
-  const curves = film.kind === "preset" ? film.preset.curves : film.profile.curves;
-  return curves.every((curve) => curve.length <= maximumGpuCurvePoints);
+  return film.profile.curves.every((curve) => curve.length <= maximumGpuCurvePoints);
 }

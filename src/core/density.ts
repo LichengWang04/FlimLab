@@ -5,11 +5,11 @@ import type { BaseSample, DensityAnchorOptions, DensityAnchors, NormalizedRoi, P
 
 const DEFAULT_EPSILON = 1e-6;
 
-export function sampleFilmBase(transmission: Raster, roi: NormalizedRoi): BaseSample {
-  transmission.assertDomain("transmission-linear-rgb");
+export function sampleFilmBase(linearCapture: Raster, roi: NormalizedRoi): BaseSample {
+  linearCapture.assertDomain(["camera-linear-rgb", "transmission-linear-rgb"]);
   validateRoi(roi);
 
-  const samples = collectChannelSamples(transmission, roi);
+  const samples = collectChannelSamples(linearCapture, roi);
   if (samples.count < 3) {
     throw new Error("Film-base ROI must contain at least three pixels.");
   }
@@ -98,8 +98,8 @@ export function referenceFilmBase(rgb: Rgb, confidence = 1): BaseSample {
  * separate reference is available. This cannot identify the true Dmin from a
  * single cropped scene, so confidence is deliberately capped below 0.7.
  */
-export function estimateFilmBase(transmission: Raster, upperPercentile = 0.9995): BaseSample {
-  transmission.assertDomain("transmission-linear-rgb");
+export function estimateFilmBase(linearCapture: Raster, upperPercentile = 0.9995): BaseSample {
+  linearCapture.assertDomain(["camera-linear-rgb", "transmission-linear-rgb"]);
   if (!Number.isFinite(upperPercentile) || upperPercentile < 0.98 || upperPercentile > 1) {
     throw new Error("Automatic film-base percentile must be between 0.98 and 1.");
   }
@@ -107,11 +107,11 @@ export function estimateFilmBase(transmission: Raster, upperPercentile = 0.9995)
   const red: number[] = [];
   const green: number[] = [];
   const blue: number[] = [];
-  const pixelCount = transmission.width * transmission.height;
+  const pixelCount = linearCapture.width * linearCapture.height;
   const stride = Math.max(1, Math.ceil(pixelCount / 65_536));
   for (let pixel = 0; pixel < pixelCount; pixel += stride) {
     const offset = pixel * 3;
-    const values = [transmission.data[offset], transmission.data[offset + 1], transmission.data[offset + 2]];
+    const values = [linearCapture.data[offset], linearCapture.data[offset + 1], linearCapture.data[offset + 2]];
     if (values.every((value) => Number.isFinite(value) && value > 0)) {
       red.push(values[0]);
       green.push(values[1]);
@@ -162,23 +162,23 @@ export function estimateFilmBase(transmission: Raster, upperPercentile = 0.9995)
 }
 
 export function toRelativeDensity(
-  transmission: Raster,
+  linearCapture: Raster,
   base: Rgb,
   epsilon = DEFAULT_EPSILON,
   photonTransfer?: PhotonTransferModel,
 ): Raster {
-  transmission.assertDomain("transmission-linear-rgb");
+  linearCapture.assertDomain(["camera-linear-rgb", "transmission-linear-rgb"]);
   if (!Number.isFinite(epsilon) || epsilon <= 0 || base.some((value) => !Number.isFinite(value) || value <= 0)) {
     throw new Error("Base transmission values and epsilon must be positive finite values.");
   }
 
-  const density = new Raster(transmission.width, transmission.height, "relative-density");
-  for (let offset = 0; offset < transmission.data.length; offset += 3) {
+  const density = new Raster(linearCapture.width, linearCapture.height, "relative-density");
+  for (let offset = 0; offset < linearCapture.data.length; offset += 3) {
     for (let channel = 0; channel < 3; channel += 1) {
       const signal = photonTransfer === undefined
-        ? transmission.data[offset + channel]
+        ? linearCapture.data[offset + channel]
         : regularizePhotonTransferSignal(
-            transmission.data[offset + channel],
+            linearCapture.data[offset + channel],
             photonTransfer.normalizationRangeDn[channel],
             photonTransfer,
           );

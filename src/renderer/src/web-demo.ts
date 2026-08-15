@@ -1,28 +1,41 @@
-import { defaultProcessingRecipe, type FilmLabApi, type PreviewRequest, type PreviewResult } from "../../shared/contracts.ts";
+import type { CurveSet, FilmMode, Matrix3, NormalizedRoi, Rgb } from "../../core/types.ts";
+import {
+  defaultProcessingRecipe,
+  type FilmLabApi,
+  type PreviewRequest,
+  type PreviewResult,
+  type PreviewTone,
+  type ProcessingRecipe,
+  type ProjectSessionSummary,
+} from "../../shared/contracts.ts";
 import { uncharacterizedColorTrust } from "../../shared/color-trust.ts";
-import type { FilmMode } from "../../core/types.ts";
 import {
   demoFrameId,
   projectSchemaVersion,
+  type SourceAsset,
   type WorkspaceProject,
   type WorkspaceProjectDraft,
 } from "../../shared/project.ts";
 
 let cachedApi: FilmLabApi | null = null;
-const demoSession = {
+
+const demoSession: ProjectSessionSummary = {
   id: "web-demo-session",
   projectId: "web-demo-project",
   name: "workspace.filmlab",
   readOnly: false,
   backupCount: 0,
-} as const;
+};
+
 const masterExportUiDemo = typeof window !== "undefined"
   && new URLSearchParams(window.location.search).has("master-export-demo");
-const masterExportDemoAsset = {
+
+const masterExportDemoAsset: SourceAsset = {
   id: "web-demo-master-source",
   name: "演示扫描.tiff",
   extension: ".tiff",
-} as const;
+};
+
 let demoProject: WorkspaceProject = {
   schemaVersion: projectSchemaVersion,
   rolls: [{
@@ -33,7 +46,7 @@ let demoProject: WorkspaceProject = {
   }],
   activeRollId: "default-roll",
   recipe: {
-    mode: "preset",
+    mode: "generic",
     view: "positive",
     tone: {
       exposureStops: 0,
@@ -47,15 +60,19 @@ let demoProject: WorkspaceProject = {
   updatedAt: new Date().toISOString(),
 };
 
+/**
+ * Browser-isolated visual acceptance entry (`http://localhost:5173/?web-demo`).
+ * It renders a built-in synthetic negative without touching local files and is
+ * not a substitute for the real Electron processing pipeline.
+ */
 export function createWebDemoApi(): FilmLabApi {
   if (cachedApi !== null) {
     return cachedApi;
   }
-
   cachedApi = {
     selectSourceFiles: async () => masterExportUiDemo ? [masterExportDemoAsset] : [],
-    renderPreview: async (request: PreviewRequest) => createPreview(request),
-    precomputePreview: async (request: PreviewRequest) => createPreview(request),
+    renderPreview: async (request) => createPreview(request),
+    precomputePreview: async (request) => createPreview(request),
     loadProject: async () => ({
       project: demoProject,
       session: demoSession,
@@ -104,12 +121,18 @@ export function createWebDemoApi(): FilmLabApi {
     deleteCalibrationProfile: async () => false,
     listCalibrationProfiles: async () => [],
     listCalibrationProfileVersions: async () => [],
-    restoreCalibrationProfileVersion: async () => { throw new Error("浏览器演示模式没有标定版本库。"); },
+    restoreCalibrationProfileVersion: async () => {
+      throw new Error("浏览器演示模式没有标定版本库。");
+    },
     generateCalibrationFromColorCard: async () => {
       throw new Error("浏览器演示模式不具备 RAW 色卡拟合能力。");
     },
     relinkProjectSources: async (assets) => masterExportUiDemo
-      ? { relinkedAssetIds: assets.map((asset) => asset.id), relinkedAssets: assets, missingAssets: [] }
+      ? {
+        relinkedAssetIds: assets.map((asset) => asset.id),
+        relinkedAssets: assets,
+        missingAssets: [],
+      }
       : { relinkedAssetIds: [], relinkedAssets: [], missingAssets: assets },
     startBatchExport: async () => undefined,
     getBatchJob: async () => undefined,
@@ -120,10 +143,10 @@ export function createWebDemoApi(): FilmLabApi {
     rollbackUpdate: async () => undefined,
     onUpdateStatus: () => () => undefined,
   };
-  return cachedApi!;
+  return cachedApi;
 }
 
-function cloneDefaultProcessing() {
+function cloneDefaultProcessing(): ProcessingRecipe {
   return {
     baseRoi: { ...defaultProcessingRecipe.baseRoi },
     geometry: { ...defaultProcessingRecipe.geometry },
@@ -142,7 +165,6 @@ function createPreview(request: PreviewRequest): PreviewResult {
     ? new Float32Array(width * height * 3)
     : undefined;
   const borderWidth = Math.max(3, Math.floor(width * 0.09));
-
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const offset = (y * width + x) * 4;
@@ -162,18 +184,18 @@ function createPreview(request: PreviewRequest): PreviewResult {
         }
         continue;
       }
-
       const u = (x - borderWidth) / Math.max(1, width - borderWidth - 1);
       const v = y / Math.max(1, height - 1);
-      const light = Math.exp(-Math.pow((u - 0.68) / 0.13, 2) * 0.5) * Math.exp(-Math.pow((v - 0.34) / 0.18, 2) * 0.5);
+      const light = Math.exp(-Math.pow((u - 0.68) / 0.13, 2) * 0.5)
+        * Math.exp(-Math.pow((v - 0.34) / 0.18, 2) * 0.5);
       const ridge = 0.48 + 0.18 * Math.sin(u * 10.2) + 0.08 * Math.sin(u * 23.1);
       const ground = v > ridge;
-      const windowGlow = Math.min(1, Math.max(0, Math.sin(u * 92) - 0.86) / 0.14 * Math.max(0, Math.sin(v * 74) - 0.9) / 0.1);
+      const windowGlow = Math.min(1, Math.max(0, Math.sin(u * 92) - 0.86) / 0.14
+        * Math.max(0, Math.sin(v * 74) - 0.9) / 0.1);
       const sky = Math.max(0, 1 - v * 1.75);
       let red = 0.05 + sky * 0.16 + light * 1.1;
       let green = 0.075 + sky * 0.35 + light * 0.68;
       let blue = 0.11 + sky * 0.76 + light * 0.17;
-
       if (ground) {
         const amount = Math.min(1, (v - ridge) * 2.3);
         red = 0.055 + amount * 0.16 + windowGlow * 1.45;
@@ -181,7 +203,6 @@ function createPreview(request: PreviewRequest): PreviewResult {
         blue = 0.08 + amount * 0.18 + windowGlow * 0.28;
       }
       writeDemoTransmission(gpuSourceLinear, (y * width + x) * 3, red, green, blue);
-
       if (sceneLinear !== undefined) {
         const sceneOffset = (y * width + x) * 3;
         sceneLinear[sceneOffset] = red;
@@ -190,14 +211,12 @@ function createPreview(request: PreviewRequest): PreviewResult {
         writeToneMappedPixel(rgba, offset, red, green, blue, request.tone);
         continue;
       }
-
       const multiplier = Math.pow(2, request.tone.exposureStops);
       const saturation = request.tone.saturation;
       const luma = red * 0.2126 + green * 0.7152 + blue * 0.0722;
       red = (luma + (red - luma) * saturation) * multiplier;
       green = (luma + (green - luma) * saturation) * multiplier;
       blue = (luma + (blue - luma) * saturation) * multiplier;
-
       if (request.view === "transmission") {
         red = 0.56 * Math.pow(10, -red * 0.32);
         green = 0.33 * Math.pow(10, -green * 0.32);
@@ -208,14 +227,12 @@ function createPreview(request: PreviewRequest): PreviewResult {
         green = density;
         blue = density;
       }
-
       rgba[offset] = toByte(red);
       rgba[offset + 1] = toByte(green);
       rgba[offset + 2] = toByte(blue);
       rgba[offset + 3] = 255;
     }
   }
-
   const requestedBase = request.processing?.filmBase;
   const baseRgb = requestedBase?.kind === "reference" ? requestedBase.rgb : [0.54, 0.32, 0.14] as const;
   const baseMethod = requestedBase?.kind === "reference"
@@ -261,6 +278,7 @@ function createPreview(request: PreviewRequest): PreviewResult {
       sourceHeight: height,
       baseRgb,
       film: demoGpuFilm(request.mode),
+      densityRange: Math.max(0, dmax - dmin),
     },
     base: {
       rgb: baseRgb,
@@ -288,8 +306,8 @@ function estimateDemoDmax(
   source: Float32Array,
   width: number,
   height: number,
-  base: readonly [number, number, number],
-  roi: NonNullable<PreviewRequest["dmaxSampleRoi"]>,
+  base: Rgb,
+  roi: NormalizedRoi,
 ): number {
   const left = Math.floor(roi.x * width);
   const top = Math.floor(roi.y * height);
@@ -328,19 +346,16 @@ function demoGpuFilm(mode: PreviewRequest["mode"]): FilmMode {
   if (mode === "generic") {
     return { kind: "generic", densityGain: [1, 1, 1], whiteBalance: [1, 1, 1] };
   }
-  const curves = [
+  const curves: CurveSet = [
     [{ x: 0, y: 0 }, { x: 2, y: 2 }],
     [{ x: 0, y: 0 }, { x: 2, y: 2 }],
     [{ x: 0, y: 0 }, { x: 2, y: 2 }],
-  ] as const;
-  const matrix = [
+  ];
+  const matrix: Matrix3 = [
     [1, 0, 0],
     [0, 1, 0],
     [0, 0, 1],
-  ] as const;
-  if (mode === "preset") {
-    return { kind: "preset", preset: { id: "web-demo-gpu", version: "1", curves, matrix } };
-  }
+  ];
   const lutData = new Float32Array(2 * 2 * 2 * 3);
   for (let red = 0; red < 2; red += 1) {
     for (let green = 0; green < 2; green += 1) {
@@ -372,7 +387,7 @@ function writeToneMappedPixel(
   sourceRed: number,
   sourceGreen: number,
   sourceBlue: number,
-  tone: PreviewRequest["tone"],
+  tone: PreviewTone,
 ): void {
   const exposure = Math.pow(2, tone.exposureStops);
   const red = sourceRed * exposure;
@@ -418,7 +433,7 @@ function writeToneMappedPixel(
 
 function toByte(value: number): number {
   const bounded = Math.max(0, Math.min(1, value));
-  const encoded = bounded <= 0.0031308
+  const encoded = bounded <= 0.003_130_8
     ? bounded * 12.92
     : 1.055 * Math.pow(bounded, 1 / 2.4) - 0.055;
   return Math.round(encoded * 255);

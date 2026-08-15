@@ -12,7 +12,7 @@ const profile = {
   },
 } as CalibrationProfileDocument;
 
-test("generic and default-preset output remain explicitly uncalibrated", () => {
+test("default output remains explicitly uncalibrated", () => {
   const source = {
     camera: { make: "Sony", model: "ILCE-7RM5" },
     decoderFingerprint: profile.capture.decoderFingerprint,
@@ -20,10 +20,6 @@ test("generic and default-preset output remain explicitly uncalibrated", () => {
   assert.deepEqual(evaluateColorTrust("generic", source, profile), {
     level: "uncalibrated",
     reason: "generic-mode",
-  });
-  assert.deepEqual(evaluateColorTrust("preset", source, profile), {
-    level: "uncalibrated",
-    reason: "default-preset",
   });
 });
 
@@ -73,4 +69,40 @@ test("generated calibration capture identity records the real RAW camera chain",
     decoderFingerprint: "libraw-0.22+bilinear-bayer-v1",
     camera: { make: "SONY", model: "ILCE-7RM5" },
   }));
+});
+
+test("generated calibration fingerprints include film capture context", () => {
+  const fit = {
+    decoder: "libraw-sidecar" as const,
+    decoderFingerprint: "libraw-0.22+bilinear-bayer-v1",
+    camera: { make: "SONY", model: "ILCE-7RM5" },
+  };
+  const first = createGeneratedCalibrationCaptureIdentity(fit, {
+    lens: "FE 50mm F1.4",
+    filmStock: "Portra 400",
+    process: "C-41",
+    illuminationId: "led-5000k",
+  });
+  const second = createGeneratedCalibrationCaptureIdentity(fit, {
+    ...first,
+    filmStock: "Ektar 100",
+  });
+  assert.equal(first.filmStock, "Portra 400");
+  assert.notEqual(first.captureFingerprint, second.captureFingerprint);
+});
+
+test("profiles with explicit unspecified capture context stay unverified", () => {
+  assert.equal(evaluateColorTrust("calibrated", {
+    camera: { make: "Sony", model: "ILCE-7RM5" },
+    decoderFingerprint: profile.capture.decoderFingerprint,
+  }, {
+    ...profile,
+    capture: {
+      ...profile.capture,
+      lens: "unspecified",
+      filmStock: "Portra 400",
+      process: "C-41",
+      illuminationId: "led-5000k",
+    },
+  }).reason, "capture-context-unavailable");
 });

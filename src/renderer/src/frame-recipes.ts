@@ -8,7 +8,7 @@ import type { FilmRoll, ProjectRecipe } from "../../shared/project.ts";
  */
 export function createNeutralFrameRecipe(): ProjectRecipe {
   return {
-    mode: "preset",
+    mode: "generic",
     view: "positive",
     tone: {
       exposureStops: 0,

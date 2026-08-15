@@ -31,5 +31,20 @@ export function scrgbFloatBufferToRaster(
     }
     pixels[index] = value;
   }
+
+  // Density is defined on positive channel signals, but silently clipping
+  // each negative scRGB component destroys the hue of wide-gamut scans. Do a
+  // single, explicit relative-colorimetric projection per pixel instead:
+  // move the colour toward the neutral white axis until its first component
+  // reaches zero. This preserves channel relationships and leaves in-gamut
+  // values untouched; the final sRGB boundary remains visible in metadata.
+  for (let offset = 0; offset < pixels.length; offset += 3) {
+    const minimum = Math.min(pixels[offset], pixels[offset + 1], pixels[offset + 2]);
+    if (minimum >= 0) continue;
+    const scale = 1 / (1 - minimum);
+    pixels[offset] = 1 + (pixels[offset] - 1) * scale;
+    pixels[offset + 1] = 1 + (pixels[offset + 1] - 1) * scale;
+    pixels[offset + 2] = 1 + (pixels[offset + 2] - 1) * scale;
+  }
   return new Raster(width, height, "transmission-linear-rgb", pixels);
 }

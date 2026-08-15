@@ -15,7 +15,7 @@ test("browser demo starts with a renderable built-in frame", async () => {
     revision: 7,
     assetId: demoFrameId,
     maxEdge: 256,
-    mode: "preset",
+    mode: "generic",
     view: "positive",
     tone: { exposureStops: 0, contrast: 1.16, highlightCompression: 0.5, saturation: 1.04 },
     processing: defaultProcessingRecipe,
@@ -34,8 +34,8 @@ test("browser demo starts with a renderable built-in frame", async () => {
     preview.gpuPipeline.sourceWidth * preview.gpuPipeline.sourceHeight,
   );
   assert.deepEqual(preview.gpuPipeline.bayerPattern, [0, 1, 1, 2]);
-  assert.equal(preview.gpuPipeline?.film.kind, "preset");
-  assert.deepEqual(preview.colorTrust, { level: "uncalibrated", reason: "default-preset" });
+  assert.equal(preview.gpuPipeline?.film.kind, "generic");
+  assert.deepEqual(preview.colorTrust, { level: "uncalibrated", reason: "generic-mode" });
   assert.equal(precomputed.revision, 8);
   assert.equal(precomputed.gpuPipeline?.sourceKey, preview.gpuPipeline?.sourceKey);
 
@@ -54,7 +54,7 @@ test("browser demo exposes automatic and frozen borderless film-base states", as
     revision: 8,
     assetId: demoFrameId,
     maxEdge: 128,
-    mode: "preset",
+    mode: "generic",
     view: "transmission",
     tone: { exposureStops: 0, contrast: 1.16, highlightCompression: 0.5, saturation: 1.04 },
     processing: { ...defaultProcessingRecipe, filmBase: { kind: "automatic" } },
@@ -70,7 +70,7 @@ test("browser demo exposes automatic and frozen borderless film-base states", as
     revision: 9,
     assetId: demoFrameId,
     maxEdge: 128,
-    mode: "preset",
+    mode: "generic",
     view: "positive",
     tone: { exposureStops: 0, contrast: 1.16, highlightCompression: 0.5, saturation: 1.04 },
     processing: {

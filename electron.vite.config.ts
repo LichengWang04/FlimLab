@@ -26,6 +26,10 @@ export default defineConfig({
     // interop instead of an unsupported external ESM named import.
     build: {
       rollupOptions: {
+        input: {
+          index: "src/main/index.ts",
+          "master-encoder-worker": "src/main/master-encoder-worker.ts",
+        },
         output: {
           format: "cjs",
           entryFileNames: "[name].cjs",

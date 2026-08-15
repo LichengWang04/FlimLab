@@ -10,9 +10,6 @@ export function evaluateColorTrust(
   if (mode === "generic") {
     return { level: "uncalibrated", reason: "generic-mode" };
   }
-  if (mode === "preset") {
-    return { level: "uncalibrated", reason: "default-preset" };
-  }
   if (profile === undefined) {
     return { level: "profile-unverified", reason: "calibration-profile-missing" };
   }
@@ -37,6 +34,10 @@ export function evaluateColorTrust(
   }
   if (source.decoderFingerprint !== profile.capture.decoderFingerprint) {
     return { level: "profile-unverified", reason: "decoder-mismatch", ...context };
+  }
+  const captureContext = [profile.capture.lens, profile.capture.filmStock, profile.capture.process, profile.capture.illuminationId];
+  if (captureContext.some((value) => value !== undefined && value.trim().toLocaleLowerCase("en-US") === "unspecified")) {
+    return { level: "profile-unverified", reason: "capture-context-unavailable", ...context };
   }
   return { level: "device-matched", reason: "device-match", ...context };
 }
@@ -66,7 +67,6 @@ export function colorTrustMetadata(trust: ColorTrust): Readonly<Record<string, s
 /** Used by isolated demos that intentionally have no verifiable capture device. */
 export function uncharacterizedColorTrust(mode: PreviewMode): ColorTrust {
   if (mode === "generic") return { level: "uncalibrated", reason: "generic-mode" };
-  if (mode === "preset") return { level: "uncalibrated", reason: "default-preset" };
   return { level: "profile-unverified", reason: "source-camera-unavailable" };
 }
 

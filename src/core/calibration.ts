@@ -111,6 +111,58 @@ export interface MatrixFitResult {
   readonly weightedRmse: number;
 }
 
+/**
+ * Estimate per-channel characteristic curves from chart samples expressed in
+ * relative density. The fit uses a positive power law in linear density
+ * (`gain * (10^D - 1)^gamma`) and stores a monotonic piecewise curve so the
+ * runtime can preserve highlight/shadow response instead of forcing every
+ * colour-card calibration through an identity curve.
+ */
+export function fitColorChartCurves(patches: readonly ColorChartPatch[]): CurveSet {
+  if (!Array.isArray(patches) || patches.length < 3) {
+    throw new Error("At least three color-chart patches are required for curve fitting.");
+  }
+  const accepted = patches.filter((patch) => patch.include !== false);
+  if (accepted.length < 3) {
+    throw new Error("At least three included color-chart patches are required for curve fitting.");
+  }
+  const maximumDensity = Math.max(0.05, ...accepted.flatMap((patch) => patch.source));
+  const fitChannel = (channel: 0 | 1 | 2): CurvePoint[] => {
+    const samples = accepted.flatMap((patch) => {
+      const density = patch.source[channel];
+      const target = patch.target[channel];
+      const linearDensity = Math.pow(10, density) - 1;
+      return density > 0 && target > 0 && Number.isFinite(linearDensity) && linearDensity > 0
+        ? [{ density, input: Math.log(linearDensity), output: Math.log(target) }]
+        : [];
+    });
+    let slope = 1;
+    let intercept = 0;
+    if (samples.length >= 3) {
+      const meanInput = samples.reduce((sum, sample) => sum + sample.input, 0) / samples.length;
+      const meanOutput = samples.reduce((sum, sample) => sum + sample.output, 0) / samples.length;
+      let covariance = 0;
+      let variance = 0;
+      for (const sample of samples) {
+        covariance += (sample.input - meanInput) * (sample.output - meanOutput);
+        variance += (sample.input - meanInput) ** 2;
+      }
+      if (variance > Number.EPSILON) slope = Math.min(4, Math.max(0.25, covariance / variance));
+      intercept = meanOutput - slope * meanInput;
+    }
+    const gain = Math.min(1e6, Math.max(1e-6, Math.exp(intercept)));
+    const ordinates = [0, 0.25, 0.5, 0.75, 1].map((fraction) => {
+      const density = maximumDensity * fraction;
+      return density === 0 ? 0 : gain * Math.pow(Math.max(1e-6, Math.pow(10, density) - 1), slope);
+    });
+    return ordinates.map((ordinate, index) => ({
+      x: maximumDensity * index / 4,
+      y: ordinate,
+    }));
+  };
+  return [fitChannel(0), fitChannel(1), fitChannel(2)];
+}
+
 const DEFAULT_RIDGE_LAMBDA = 1e-6;
 const DEFAULT_MINIMUM_PATCH_COUNT = 18;
 const DEFAULT_CUBE_MAXIMUM_SIZE = 33;

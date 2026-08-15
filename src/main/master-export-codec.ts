@@ -1,49 +1,66 @@
-import { mkdir, open, readFile, rename, rm, type FileHandle } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
-
-import sharp from "sharp";
-import { assertWithinTestWriteLimit, atomicTemporaryPath, removeStaleOutputArtifacts } from "./atomic-output.ts";
+import { mkdir, open, rename, rm, type FileHandle } from "node:fs/promises";
+import { dirname } from "node:path";
+import { Worker, type WorkerOptions } from "node:worker_threads";
 
 import type { MasterExportFormat } from "../shared/contracts.ts";
+import {
+  assertWithinTestWriteLimit,
+  atomicTemporaryPath,
+  removeStaleOutputArtifacts,
+} from "./atomic-output.ts";
 import {
   displayLinearToLinear16,
   displayLinearToSrgb16,
   StreamingSrgb16TiffWriter,
-  createDefaultXmp,
   writeDisplayLinearTiff,
 } from "./tiff-codec.ts";
 
-export interface MasterExportWriteResult {
+export interface StreamingMasterOptions {
+  readonly outputPath: string;
+  readonly format: MasterExportFormat;
+  readonly width: number;
+  readonly height: number;
+  readonly rowsPerStrip: number;
+  /** Extra provenance included in the default XMP packet. */
+  readonly processingMetadata?: Readonly<Record<string, string | number | boolean>>;
+  /** Deterministic ENOSPC injection used only by acceptance tests. */
+  readonly testWriteLimitBytes?: number;
+}
+
+export interface DisplayLinearMasterOptions extends StreamingMasterOptions {
+  /** Display-linear RGB samples straight from the tone stage. */
+  readonly data: Float32Array;
+}
+
+export interface MasterExportResult {
   readonly outputPath: string;
   readonly byteLength: number;
   readonly bitDepth: 8 | 10 | 16;
   readonly colorSpace: "sRGB" | "linear-sRGB";
 }
 
-export interface StreamingRgb16Writer {
+export interface StreamingMasterWriter {
   appendStrip(outputY: number, height: number, data: Uint16Array): Promise<void>;
-  finish(): Promise<MasterExportWriteResult>;
+  finish(): Promise<MasterExportResult>;
   cancel(): Promise<void>;
 }
 
-export interface StreamingMasterExportOptions {
+interface SharpEncodeWorkerData {
+  readonly rawPath: string;
   readonly outputPath: string;
-  readonly format: MasterExportFormat;
+  readonly format: "jpeg" | "heif";
   readonly width: number;
   readonly height: number;
-  readonly rowsPerStrip: number;
   readonly processingMetadata?: Readonly<Record<string, string | number | boolean>>;
-  /** Deterministic ENOSPC injection used only by acceptance tests. */
-  readonly testWriteLimitBytes?: number;
 }
 
-export interface DisplayLinearMasterExportOptions extends StreamingMasterExportOptions {
-  readonly data: Float32Array;
-}
-
+/**
+ * 按格式选择流式写出器：TIFF/DNG 直接由 TIFF 写出器落盘，
+ * JPEG/HEIF 先写原始条带、最后交由 Sharp 在 worker 线程中编码。
+ */
 export async function createStreamingMasterWriter(
-  options: StreamingMasterExportOptions,
-): Promise<StreamingRgb16Writer> {
+  options: StreamingMasterOptions,
+): Promise<StreamingMasterWriter> {
   if (options.format === "tiff" || options.format === "dng") {
     const writer = await StreamingSrgb16TiffWriter.create({
       outputPath: options.outputPath,
@@ -71,9 +88,13 @@ export async function createStreamingMasterWriter(
   return SharpStreamingWriter.create(options);
 }
 
+/**
+ * 一次性导出完整 display-linear 位图：先在 CPU 完成传递函数转换，
+ * 再按条带喂给流式写出器，失败时清理所有未发布的临时文件。
+ */
 export async function writeDisplayLinearMaster(
-  options: DisplayLinearMasterExportOptions,
-): Promise<MasterExportWriteResult> {
+  options: DisplayLinearMasterOptions,
+): Promise<MasterExportResult> {
   if (options.format === "tiff") {
     return writeDisplayLinearTiff(options);
   }
@@ -95,8 +116,12 @@ export async function writeDisplayLinearMaster(
   }
 }
 
-class SharpStreamingWriter implements StreamingRgb16Writer {
-  private readonly options: StreamingMasterExportOptions;
+/**
+ * JPEG/HEIF 流式写出器。条带先以原始样本写入同目录临时文件，
+ * finish 时再由编码 worker 一次性转成目标格式，避免主进程驻留整张位图。
+ */
+class SharpStreamingWriter implements StreamingMasterWriter {
+  private readonly options: StreamingMasterOptions;
   private readonly temporaryPath: string;
   private readonly rawPath: string;
   private readonly rawHandle: FileHandle;
@@ -105,7 +130,7 @@ class SharpStreamingWriter implements StreamingRgb16Writer {
   private closed = false;
 
   private constructor(
-    options: StreamingMasterExportOptions,
+    options: StreamingMasterOptions,
     temporaryPath: string,
     rawPath: string,
     rawHandle: FileHandle,
@@ -116,7 +141,7 @@ class SharpStreamingWriter implements StreamingRgb16Writer {
     this.rawHandle = rawHandle;
   }
 
-  public static async create(options: StreamingMasterExportOptions): Promise<SharpStreamingWriter> {
+  public static async create(options: StreamingMasterOptions): Promise<SharpStreamingWriter> {
     if (options.outputPath.trim().length === 0) throw new Error("导出路径不能为空。");
     const outputDirectory = dirname(options.outputPath);
     const temporaryPath = atomicTemporaryPath(options.outputPath);
@@ -148,53 +173,28 @@ class SharpStreamingWriter implements StreamingRgb16Writer {
     this.nextOutputY += height;
   }
 
-  public async finish(): Promise<MasterExportWriteResult> {
+  public async finish(): Promise<MasterExportResult> {
     this.assertOpen();
     try {
       if (this.nextOutputY !== this.options.height) {
         throw new Error("尚未写完全部图像行，无法完成导出。");
       }
       this.closed = true;
+      await this.rawHandle.sync();
       await this.rawHandle.close();
-      const raw = await readFile(this.rawPath);
-      const encoder = this.options.format === "jpeg"
-        ? sharp(raw, {
-            raw: { width: this.options.width, height: this.options.height, channels: 3 },
-            limitInputPixels: false,
-          })
-        : sharp(
-            new Uint16Array(raw.buffer, raw.byteOffset, raw.byteLength / Uint16Array.BYTES_PER_ELEMENT),
-            {
-              raw: { width: this.options.width, height: this.options.height, channels: 3 },
-              limitInputPixels: false,
-            },
-          ).toColourspace("rgb16");
-      const encoderWithMetadata = encoder.withXmp(createDefaultXmp(
-        this.options.processingMetadata,
-        {
-          colorSpace: "sRGB",
-          transfer: "sRGB IEC 61966-2-1",
-          bitDepth: this.options.format === "heif" ? 10 : 8,
-        },
-      ));
-      const result = this.options.format === "jpeg"
-        ? await encoderWithMetadata.withIccProfile("srgb").jpeg({
-            quality: 95,
-            chromaSubsampling: "4:4:4",
-            progressive: true,
-            mozjpeg: true,
-          }).toFile(this.temporaryPath)
-        : await encoderWithMetadata.withIccProfile("srgb").heif({
-            compression: "av1",
-            quality: 92,
-            bitdepth: 10,
-            chromaSubsampling: "4:4:4",
-            effort: 5,
-          }).toFile(this.temporaryPath);
+      const byteLength = await encodeSharpMasterInWorker({
+        rawPath: this.rawPath,
+        outputPath: this.temporaryPath,
+        format: this.options.format === "jpeg" ? "jpeg" : "heif",
+        width: this.options.width,
+        height: this.options.height,
+        processingMetadata: this.options.processingMetadata,
+      });
       await rename(this.temporaryPath, this.options.outputPath);
+      await syncDirectory(dirname(this.options.outputPath));
       return {
         outputPath: this.options.outputPath,
-        byteLength: result.size,
+        byteLength,
         bitDepth: this.options.format === "heif" ? 10 : 8,
         colorSpace: "sRGB",
       };
@@ -202,8 +202,6 @@ class SharpStreamingWriter implements StreamingRgb16Writer {
       await this.cancel();
       throw error;
     } finally {
-      // The raw sample file is only a staging artefact and must not survive
-      // a successful export either.
       await rm(this.rawPath, { force: true });
     }
   }
@@ -222,10 +220,72 @@ class SharpStreamingWriter implements StreamingRgb16Writer {
   }
 }
 
+/** JPEG 只接受 8-bit 输入；257 = 65535 / 255，保证端点映射精确。 */
 function srgb16To8BitBuffer(data: Uint16Array): Buffer {
   const output = Buffer.allocUnsafe(data.length);
   for (let index = 0; index < data.length; index += 1) {
     output[index] = Math.min(255, Math.round(data[index] / 257));
   }
   return output;
+}
+
+/**
+ * Sharp 大图编码容易顶到默认堆上限，因此放到独立 worker 线程，
+ * 并放宽其老生代内存上限。
+ */
+async function encodeSharpMasterInWorker(options: SharpEncodeWorkerData): Promise<number> {
+  const workerOptions: WorkerOptions = {
+    workerData: options,
+    resourceLimits: { maxOldGenerationSizeMb: 1024 },
+  };
+  const worker = createMasterEncoderWorker(workerOptions);
+  return new Promise<number>((resolve, reject) => {
+    let settled = false;
+    worker.once("message", (message: unknown) => {
+      settled = true;
+      if (typeof message === "object" && message !== null && "size" in message && typeof message.size === "number") {
+        resolve(message.size);
+      } else {
+        reject(new Error(
+          typeof message === "object" && message !== null && "error" in message && typeof message.error === "string"
+            ? message.error
+            : "图像编码线程返回了无效响应。",
+        ));
+      }
+    });
+    worker.once("error", reject);
+    worker.once("exit", (code) => {
+      if (!settled) reject(new Error("图像编码线程未返回结果（退出代码 " + code + "）。"));
+    });
+  });
+}
+
+/**
+ * rename 之后 fsync 目录，确保崩溃后目录项一定落盘。
+ * Windows 等平台不支持目录 fsync，相关错误码按成功处理。
+ */
+async function syncDirectory(directory: string): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(directory, "r");
+    await handle.sync();
+  } catch (error: unknown) {
+    if (!hasCode(error, "EINVAL") && !hasCode(error, "EPERM") && !hasCode(error, "EACCES") && !hasCode(error, "ENOTSUP")) {
+      throw error;
+    }
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error
+    && (error as { readonly code?: unknown }).code === code;
+}
+
+export default function createMasterEncoderWorker(options: WorkerOptions): Worker {
+  const workerEntry = import.meta.url.endsWith(".ts")
+    ? "./master-encoder-worker.ts"
+    : "./master-encoder-worker.cjs";
+  return new Worker(new URL(workerEntry, import.meta.url), options);
 }

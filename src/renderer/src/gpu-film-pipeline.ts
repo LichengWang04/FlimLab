@@ -675,6 +675,15 @@ export class WebGlFilmPipeline {
       frame.view === "positive" ? 0 : frame.view === "transmission" ? 1 : 2,
     );
     this.bindFilm(frame.pipeline.film);
+    // The only curve-bearing mode is a colour-card calibration profile. Its
+    // density domain is absolute and must not vary with image content.
+    const domainScale = [1, 1, 1] as const;
+    gl.uniform3f(
+      requireUniform(gl, this.displayProgram, "u_curveDomainScale"),
+      domainScale[0],
+      domainScale[1],
+      domainScale[2],
+    );
     gl.uniform1f(requireUniform(gl, this.displayProgram, "u_exposureStops"), frame.tone.exposureStops);
     gl.uniform1f(requireUniform(gl, this.displayProgram, "u_contrast"), frame.tone.contrast);
     gl.uniform1f(
@@ -1161,14 +1170,13 @@ function prepareFilm(film: FilmMode): PreparedFilm {
       matrix: identityMatrix,
     };
   }
-  const preset = film.kind === "preset" ? film.preset : film.profile;
   return {
     kind: 1,
     densityGain: [1, 1, 1],
     whiteBalance: film.whiteBalance ?? [1, 1, 1],
-    curves: preset.curves,
-    matrix: preset.matrix,
-    lut: film.kind === "calibrated" ? film.profile.lut : undefined,
+    curves: film.profile.curves,
+    matrix: film.profile.matrix,
+    lut: film.profile.lut,
   };
 }
 
@@ -1675,6 +1683,7 @@ const displayFragmentShader = `#version 300 es
   uniform vec2 u_bottomRight;
   uniform vec2 u_bottomLeft;
   uniform vec3 u_base;
+  uniform vec3 u_curveDomainScale;
   uniform bool u_hasPhotonTransfer;
   uniform float u_ptcReadNoiseDn;
   uniform float u_ptcElectronsPerDn;
@@ -1711,44 +1720,56 @@ const displayFragmentShader = `#version 300 es
   const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
   const float EPSILON = 1e-8;
   const float DISPLAY_CEILING = 0.9999847412109375;
+  const float MID_GREY = 0.18;
+
+  // Continues a curve past its last point with the terminal segment's log
+  // slope (exponential in linear space), mirroring the CPU core. A hard
+  // clamp flattens highlights and rotates the hue of coloured ones.
+  float extrapolateCurveEnd(vec2 previous, vec2 last, float inputValue) {
+    if (previous.y > 0.0 && last.y > 0.0) {
+      float slope = (log2(last.y) - log2(previous.y)) / (last.x - previous.x);
+      return last.y * exp2(slope * (inputValue - last.x));
+    }
+    return last.y;
+  }
 
   float curveR(float inputValue) {
     if (inputValue <= u_curveR[0].x) return u_curveR[0].y;
     for (int index = 1; index < ${maximumGpuCurvePoints}; index++) {
-      if (index >= u_curveRCount) return u_curveR[index - 1].y;
+      if (index >= u_curveRCount) break;
       if (inputValue <= u_curveR[index].x) {
         vec2 left = u_curveR[index - 1];
         vec2 right = u_curveR[index];
         return mix(left.y, right.y, (inputValue - left.x) / (right.x - left.x));
       }
     }
-    return u_curveR[u_curveRCount - 1].y;
+    return extrapolateCurveEnd(u_curveR[u_curveRCount - 2], u_curveR[u_curveRCount - 1], inputValue);
   }
 
   float curveG(float inputValue) {
     if (inputValue <= u_curveG[0].x) return u_curveG[0].y;
     for (int index = 1; index < ${maximumGpuCurvePoints}; index++) {
-      if (index >= u_curveGCount) return u_curveG[index - 1].y;
+      if (index >= u_curveGCount) break;
       if (inputValue <= u_curveG[index].x) {
         vec2 left = u_curveG[index - 1];
         vec2 right = u_curveG[index];
         return mix(left.y, right.y, (inputValue - left.x) / (right.x - left.x));
       }
     }
-    return u_curveG[u_curveGCount - 1].y;
+    return extrapolateCurveEnd(u_curveG[u_curveGCount - 2], u_curveG[u_curveGCount - 1], inputValue);
   }
 
   float curveB(float inputValue) {
     if (inputValue <= u_curveB[0].x) return u_curveB[0].y;
     for (int index = 1; index < ${maximumGpuCurvePoints}; index++) {
-      if (index >= u_curveBCount) return u_curveB[index - 1].y;
+      if (index >= u_curveBCount) break;
       if (inputValue <= u_curveB[index].x) {
         vec2 left = u_curveB[index - 1];
         vec2 right = u_curveB[index];
         return mix(left.y, right.y, (inputValue - left.x) / (right.x - left.x));
       }
     }
-    return u_curveB[u_curveBCount - 1].y;
+    return extrapolateCurveEnd(u_curveB[u_curveBCount - 2], u_curveB[u_curveBCount - 1], inputValue);
   }
 
   vec3 sampleLut(vec3 value) {
@@ -1786,22 +1807,28 @@ const displayFragmentShader = `#version 300 es
     if (u_filmKind == 0) {
       return max(pow(vec3(10.0), density * u_densityGain) - 1.0, 0.0) * u_whiteBalance;
     }
-    vec3 curved = vec3(curveR(density.r), curveG(density.g), curveB(density.b));
-    vec3 transformed = vec3(
+    vec3 curved = vec3(
+      curveR(density.r * u_curveDomainScale.r),
+      curveG(density.g * u_curveDomainScale.g),
+      curveB(density.b * u_curveDomainScale.b)
+    );
+    // Negative cross-talk products floor at zero here, and white balance is
+    // applied before the 3D LUT so the LUT samples a balanced signal;
+    // both mirror the CPU transform exactly.
+    vec3 transformed = max(vec3(
       dot(u_matrix0, curved),
       dot(u_matrix1, curved),
       dot(u_matrix2, curved)
-    );
+    ), vec3(0.0)) * u_whiteBalance;
     if (u_hasLut) transformed = sampleLut(transformed);
-    return transformed * u_whiteBalance;
+    return transformed;
   }
 
   float mapLuminance(float inputLuma) {
     float result = inputLuma;
-    if (result > 0.0 && result < 1.0 && u_contrast != 1.0) {
-      result = 1.0 / (1.0 + pow((1.0 - result) / result, u_contrast));
-    } else if (result >= 1.0 && u_contrast != 1.0) {
-      result = 1.0 + (result - 1.0) * u_contrast;
+    // Log-domain contrast around mid grey: smooth across the white point.
+    if (result > 0.0 && u_contrast != 1.0) {
+      result = MID_GREY * pow(result / MID_GREY, u_contrast);
     }
     if (result > 0.0 && u_highlightCompression > 0.0) {
       float knee = 1.0 / (1.0 + u_highlightCompression);
@@ -1827,11 +1854,11 @@ const displayFragmentShader = `#version 300 es
     vec3 mapped = normalized * (sourceLuma > EPSILON ? mappedLuma / sourceLuma : 0.0);
     float outputLuma = dot(mapped, LUMA);
     mapped = vec3(outputLuma) + (mapped - vec3(outputLuma)) * u_saturation;
-    if (u_highlightCompression > 0.0) {
-      float maximum = max(mapped.r, max(mapped.g, mapped.b));
-      if (maximum > DISPLAY_CEILING) mapped *= DISPLAY_CEILING / maximum;
-    }
-    return mapped;
+    // Gamut protection is unconditional: compress channels above the
+    // display ceiling proportionally to preserve hue, then floor negatives.
+    float maximum = max(mapped.r, max(mapped.g, mapped.b));
+    if (maximum > DISPLAY_CEILING) mapped *= DISPLAY_CEILING / maximum;
+    return max(mapped, vec3(0.0));
   }
 
   vec2 geometryToSourceUv(vec2 pixel) {

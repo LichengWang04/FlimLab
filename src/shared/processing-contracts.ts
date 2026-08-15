@@ -1,5 +1,5 @@
 import type { CalibrationProfileDocument } from "../core/calibration.ts";
-import type { Matrix3, PhotonTransferModel } from "../core/types.ts";
+import type { CurveSet, Matrix3, PhotonTransferModel } from "../core/types.ts";
 import type {
   MasterExportFormat,
   PreviewMode,
@@ -132,6 +132,7 @@ export interface TiffExportSummary {
 }
 
 export interface ColorCardFitSummary {
+  readonly curves: CurveSet;
   readonly matrix: Matrix3;
   readonly detectedPatchCount: number;
   readonly usedPatchCount: number;

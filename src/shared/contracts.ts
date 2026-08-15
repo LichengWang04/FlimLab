@@ -1,4 +1,6 @@
-export const previewModes = ["generic", "preset", "calibrated"] as const;
+/** The only selectable colour renderings: an uncalibrated default and a
+ * colour-card-derived calibration profile. */
+export const previewModes = ["generic", "calibrated"] as const;
 export type PreviewMode = (typeof previewModes)[number];
 
 export const previewViews = ["positive", "transmission", "density"] as const;
@@ -8,13 +10,13 @@ export type ColorTrustLevel = "uncalibrated" | "profile-unverified" | "device-ma
 
 export type ColorTrustReason =
   | "generic-mode"
-  | "default-preset"
   | "calibration-profile-missing"
   | "source-camera-unavailable"
   | "profile-camera-unavailable"
   | "camera-mismatch"
   | "decoder-unavailable"
   | "decoder-mismatch"
+  | "capture-context-unavailable"
   | "device-match";
 
 /**
@@ -187,6 +189,12 @@ export interface GpuPipelinePayload {
   readonly sourceHeight: number;
   readonly baseRgb: readonly [number, number, number];
   readonly film: FilmMode;
+  /**
+   * Measured Dmax−Dmin of the delivered frame (including any manual Dmax
+   * override). Calibrated profiles retain their absolute density domain;
+   * this value is used for diagnostics and display-white estimation.
+   */
+  readonly densityRange?: number;
   readonly photonTransfer?: PhotonTransferModel;
 }
 
@@ -288,6 +296,14 @@ export interface ColorCardCalibrationResult {
   readonly usedPatchCount: number;
   readonly rejectedPatchIds: readonly string[];
   readonly edgeScore: number;
+}
+
+/** Capture conditions that materially affect a film colour profile. */
+export interface ColorCardCaptureContext {
+  readonly lens?: string;
+  readonly filmStock?: string;
+  readonly process?: string;
+  readonly illuminationId?: string;
 }
 
 export interface ProjectRelinkResult {
@@ -420,7 +436,7 @@ export interface FilmLabApi {
   readonly listCalibrationProfiles: () => Promise<readonly CalibrationProfileSummary[]>;
   readonly listCalibrationProfileVersions: (id: string) => Promise<readonly CalibrationProfileVersionSummary[]>;
   readonly restoreCalibrationProfileVersion: (id: string, version: string) => Promise<CalibrationProfileSummary>;
-  readonly generateCalibrationFromColorCard: (assetId: string, processing?: ProcessingRecipe) => Promise<ColorCardCalibrationResult>;
+  readonly generateCalibrationFromColorCard: (assetId: string, processing?: ProcessingRecipe, capture?: ColorCardCaptureContext) => Promise<ColorCardCalibrationResult>;
   readonly relinkProjectSources: (assets: readonly SourceAsset[]) => Promise<ProjectRelinkResult>;
   readonly startBatchExport: (request: BatchExportRequest) => Promise<BatchJobSummary | undefined>;
   readonly getBatchJob: (jobId: string) => Promise<BatchJobSummary | undefined>;

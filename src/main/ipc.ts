@@ -1,37 +1,63 @@
-import { basename, dirname, extname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { basename, dirname, extname, join } from "node:path";
 
-import { BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
+import { dialog, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from "electron";
 
+import {
+  createCalibrationProfileDocument,
+  type CalibrationProfileDocument,
+} from "../core/calibration.ts";
+import {
+  colorTrustAllowsFormat,
+  colorTrustMetadata,
+  evaluateColorTrust,
+} from "../shared/color-trust.ts";
 import {
   maximumBackgroundPreviewEdge,
   previewModes,
   previewViews,
+  type BatchExportItem,
   type BatchExportRequest,
+  type ColorCardCaptureContext,
+  type ColorTrust,
+  type FilmBaseOverride,
   type GpuMasterTiffBeginRequest,
   type GpuMasterTiffStripRequest,
   type MasterExportFormat,
   type MasterTiffExportRequest,
+  type NormalizedRoi,
   type OpenRecentProjectRequest,
-  type ProcessingRecipe,
+  type PerspectivePoint,
+  type PreviewMode,
   type PreviewRequest,
+  type PreviewTone,
+  type PreviewView,
+  type ProcessingRecipe,
+  type ProjectLoadResult,
+  type RestorationControls,
   type SourceAsset,
 } from "../shared/contracts.ts";
-import { createCalibrationProfileDocument } from "../core/calibration.ts";
-import type { CurveSet } from "../core/types.ts";
-import { colorTrustAllowsFormat, colorTrustMetadata, evaluateColorTrust } from "../shared/color-trust.ts";
-import { BatchService } from "./batch-service.ts";
+import type { SourceIdentity } from "../shared/project.ts";
+import type { DecodedSourceSummary } from "../shared/processing-contracts.ts";
+import { BatchService, type BatchSource } from "./batch-service.ts";
 import { createGeneratedCalibrationCaptureIdentity } from "./calibration-capture.ts";
-import { CalibrationProfileService } from "./calibration-profile-service.ts";
+import type { CalibrationProfileService } from "./calibration-profile-service.ts";
 import { exportPreviewPng } from "./export-service.ts";
-import { ProcessingService } from "./processing-service.ts";
-import { renderDemoPreview } from "./preview-service.ts";
-import { ProjectLifecycleService, type LifecycleProjectLoad } from "./project-lifecycle-service.ts";
-import { SourceRegistry } from "./source-registry.ts";
+import {
+  gpuMasterDimensionsAreWithinLimits,
+  gpuStripPayloadIsWithinLimits,
+} from "./gpu-export-limits.ts";
 import {
   createStreamingMasterWriter,
-  type StreamingRgb16Writer,
+  type StreamingMasterWriter,
 } from "./master-export-codec.ts";
+import { renderDemoPreview } from "./preview-service.ts";
+import type { ProcessingService } from "./processing-service.ts";
+import type {
+  LifecycleProjectLoad,
+  ProjectLifecycleService,
+} from "./project-lifecycle-service.ts";
+import type { SourceRegistry } from "./source-registry.ts";
 
 const PREVIEW_CHANNEL = "preview:render";
 const PRECOMPUTE_PREVIEW_CHANNEL = "preview:precompute";
@@ -63,6 +89,46 @@ const START_BATCH_EXPORT_CHANNEL = "batch:start";
 const GET_BATCH_JOB_CHANNEL = "batch:get";
 const CANCEL_BATCH_JOB_CHANNEL = "batch:cancel";
 
+const maximumGpuTiffSessions = 2;
+const gpuTiffSessionIdleTimeoutMs = 2 * 60_000;
+
+interface GpuTiffSession {
+  readonly writer: StreamingMasterWriter;
+  readonly fileName: string;
+  readonly format: MasterExportFormat;
+  readonly width: number;
+  readonly height: number;
+  readonly rowsPerStrip: number;
+  readonly outputPath: string;
+  readonly assetId: string;
+  readonly sourcePath: string;
+  readonly mode: PreviewMode;
+  readonly tone: PreviewTone;
+  readonly calibrationProfile: CalibrationProfileDocument | undefined;
+  readonly processing: ProcessingRecipe | undefined;
+  readonly dmaxOverride: number | undefined;
+  readonly colorTrust: ColorTrust;
+  timeout?: NodeJS.Timeout;
+}
+
+interface ProjectWriteRequest {
+  readonly sessionId: string;
+  readonly project: unknown;
+}
+
+interface MasterExportSpec {
+  readonly label: string;
+  readonly shortLabel: string;
+  readonly extensions: string[];
+  readonly defaultExtension: string;
+}
+
+/**
+ * Registers every renderer-facing IPC channel. The renderer only ever sees
+ * opaque asset/session IDs; absolute source paths stay inside SourceRegistry
+ * and all disk writes happen in the main or utility processes.
+ * Returns a cleanup that abandons any live GPU streaming sessions.
+ */
 export function registerIpcHandlers(
   getMainWindow: () => BrowserWindow | null,
   projectService: ProjectLifecycleService,
@@ -72,23 +138,9 @@ export function registerIpcHandlers(
   calibrationProfiles: CalibrationProfileService,
 ): () => Promise<void> {
   const batchService = new BatchService(processingService);
-  const gpuTiffSessions = new Map<string, {
-    readonly writer: StreamingRgb16Writer;
-    readonly fileName: string;
-    readonly format: MasterExportFormat;
-    readonly width: number;
-    readonly height: number;
-    readonly rowsPerStrip: number;
-    readonly outputPath: string;
-    readonly assetId: string;
-    readonly sourcePath: string;
-    readonly mode: import("../shared/contracts.ts").PreviewMode;
-    readonly tone: import("../shared/contracts.ts").PreviewTone;
-    readonly calibrationProfile?: import("../core/calibration.ts").CalibrationProfileDocument;
-    readonly processing?: ProcessingRecipe;
-    readonly dmaxOverride?: number;
-    readonly colorTrust: import("../shared/contracts.ts").ColorTrust;
-  }>();
+  const gpuTiffSessions = new Map<string, GpuTiffSession>();
+  let pendingGpuTiffSessions = 0;
+
   ipcMain.removeHandler(PREVIEW_CHANNEL);
   ipcMain.removeHandler(PRECOMPUTE_PREVIEW_CHANNEL);
   ipcMain.removeHandler(SELECT_SOURCES_CHANNEL);
@@ -137,11 +189,7 @@ export function registerIpcHandlers(
 
   ipcMain.handle(PRECOMPUTE_PREVIEW_CHANNEL, async (event, value: unknown) => {
     assertTrustedSender(event, getMainWindow);
-    if (
-      !isPreviewRequest(value)
-      || value.gpuSourceOnly === true
-      || value.maxEdge > maximumBackgroundPreviewEdge
-    ) {
+    if (!isPreviewRequest(value) || value.gpuSourceOnly === true || value.maxEdge > maximumBackgroundPreviewEdge) {
       throw new Error("后台预计算请求无效。");
     }
     if (value.assetId === "demo-negative") {
@@ -155,13 +203,12 @@ export function registerIpcHandlers(
     return backgroundProcessingService.render(value.assetId, sourcePath, value, profile);
   });
 
-  ipcMain.handle(SELECT_SOURCES_CHANNEL, async (event): Promise<readonly SourceAsset[]> => {
+  ipcMain.handle(SELECT_SOURCES_CHANNEL, async (event) => {
     assertTrustedSender(event, getMainWindow);
     const parent = getMainWindow();
     if (parent === null) {
       throw new Error("应用窗口不可用。");
     }
-
     const result = await dialog.showOpenDialog(parent, {
       title: "导入胶片翻拍源文件",
       buttonLabel: "导入",
@@ -174,7 +221,6 @@ export function registerIpcHandlers(
         { name: "所有文件", extensions: ["*"] },
       ],
     });
-
     if (result.canceled) {
       return [];
     }
@@ -330,61 +376,71 @@ export function registerIpcHandlers(
   ipcMain.handle(BEGIN_GPU_TIFF_CHANNEL, async (event, value: unknown) => {
     assertTrustedSender(event, getMainWindow);
     const request = parseGpuMasterTiffBeginRequest(value);
-    const format = request.format ?? "tiff";
-    const exportSpec = getMasterExportSpec(format);
-    const sourcePath = sourceRegistry.getPath(request.assetId);
-    if (sourcePath === undefined) throw new Error("GPU 母版的源文件尚未重新连接。");
-    const calibrationProfile = await getCalibrationProfile(request, calibrationProfiles);
-    const source = await processingService.inspectSource(request.assetId, sourcePath, undefined, true);
-    const colorTrust = evaluateColorTrust(request.mode, source, calibrationProfile);
-    if (!colorTrustAllowsFormat(format, colorTrust)) {
-      throw new Error("DNG 色彩母版仅支持相机与解码链均匹配的校准配置。");
+    if (gpuTiffSessions.size + pendingGpuTiffSessions >= maximumGpuTiffSessions) {
+      throw new Error("同时进行的 GPU 母版导出过多，请先完成或取消当前导出。");
     }
-    const parent = getMainWindow();
-    if (parent === null) throw new Error("应用窗口不可用。");
-    const selection = await dialog.showSaveDialog(parent, {
-      title: "导出 GPU " + exportSpec.label,
-      buttonLabel: "导出 " + exportSpec.shortLabel,
-      defaultPath: normalizeMasterFileName(request.suggestedFileName, format),
-      filters: [{ name: exportSpec.label, extensions: exportSpec.extensions }],
-      properties: ["showOverwriteConfirmation"],
-    });
-    if (selection.canceled || selection.filePath === undefined) return { saved: false };
-    const outputPath = forceMasterExtension(selection.filePath, format);
-    const writer = await createStreamingMasterWriter({
-      outputPath,
-      format,
-      width: request.width,
-      height: request.height,
-      rowsPerStrip: request.rowsPerStrip,
-      processingMetadata: {
-        ...(request.processingMetadata ?? {}),
-        application: "FilmLab",
-        pipeline: "webgl2-pbo-streaming",
+    pendingGpuTiffSessions += 1;
+    try {
+      const format = request.format ?? "tiff";
+      const exportSpec = getMasterExportSpec(format);
+      const sourcePath = sourceRegistry.getPath(request.assetId);
+      if (sourcePath === undefined) throw new Error("GPU 母版的源文件尚未重新连接。");
+      const calibrationProfile = await getCalibrationProfile(request, calibrationProfiles);
+      const source = await processingService.inspectSource(request.assetId, sourcePath, undefined, true);
+      const colorTrust = evaluateColorTrust(request.mode, source, calibrationProfile);
+      if (!colorTrustAllowsFormat(format, colorTrust)) {
+        throw new Error("DNG 色彩母版仅支持相机与解码链均匹配的校准配置。");
+      }
+      const parent = getMainWindow();
+      if (parent === null) throw new Error("应用窗口不可用。");
+      const selection = await dialog.showSaveDialog(parent, {
+        title: "导出 GPU " + exportSpec.label,
+        buttonLabel: "导出 " + exportSpec.shortLabel,
+        defaultPath: normalizeMasterFileName(request.suggestedFileName, format),
+        filters: [{ name: exportSpec.label, extensions: exportSpec.extensions }],
+        properties: ["showOverwriteConfirmation"],
+      });
+      if (selection.canceled || selection.filePath === undefined) return { saved: false };
+      const outputPath = forceMasterExtension(selection.filePath, format);
+      const writer = await createStreamingMasterWriter({
+        outputPath,
         format,
-        calibrationProfileId: calibrationProfile?.id ?? "",
-        ...colorTrustMetadata(colorTrust),
-      },
-    });
-    const sessionId = randomUUID();
-    gpuTiffSessions.set(sessionId, {
-      writer,
-      fileName: basename(outputPath),
-      format,
-      width: request.width,
-      height: request.height,
-      rowsPerStrip: request.rowsPerStrip,
-      outputPath,
-      assetId: request.assetId,
-      sourcePath,
-      mode: request.mode,
-      tone: request.tone,
-      calibrationProfile,
-      processing: request.processing,
-      dmaxOverride: request.dmaxOverride,
-      colorTrust,
-    });
-    return { saved: true, sessionId, colorTrust };
+        width: request.width,
+        height: request.height,
+        rowsPerStrip: request.rowsPerStrip,
+        processingMetadata: {
+          ...request.processingMetadata ?? {},
+          application: "FilmLab",
+          pipeline: "webgl2-pbo-streaming",
+          format,
+          calibrationProfileId: calibrationProfile?.id ?? "",
+          ...decodedSourceMetadata(source),
+          ...colorTrustMetadata(colorTrust),
+        },
+      });
+      const sessionId = randomUUID();
+      gpuTiffSessions.set(sessionId, {
+        writer,
+        fileName: basename(outputPath),
+        format,
+        width: request.width,
+        height: request.height,
+        rowsPerStrip: request.rowsPerStrip,
+        outputPath,
+        assetId: request.assetId,
+        sourcePath,
+        mode: request.mode,
+        tone: request.tone,
+        calibrationProfile,
+        processing: request.processing,
+        dmaxOverride: request.dmaxOverride,
+        colorTrust,
+      });
+      refreshGpuTiffSessionTimeout(sessionId, gpuTiffSessions);
+      return { saved: true, sessionId, colorTrust };
+    } finally {
+      pendingGpuTiffSessions -= 1;
+    }
   });
 
   ipcMain.handle(APPEND_GPU_TIFF_STRIP_CHANNEL, async (event, value: unknown) => {
@@ -392,26 +448,22 @@ export function registerIpcHandlers(
     const request = parseGpuMasterTiffStripRequest(value);
     const session = gpuTiffSessions.get(request.sessionId);
     if (session === undefined) throw new Error("GPU TIFF streaming session does not exist.");
-    if (
-      request.width !== session.width
-      || request.height > session.rowsPerStrip
-    ) {
+    if (request.width !== session.width || request.height > session.rowsPerStrip || request.outputY + request.height > session.height) {
       throw new Error("GPU TIFF strip dimensions do not match the streaming session.");
     }
     await session.writer.appendStrip(request.outputY, request.height, request.rgb16);
+    refreshGpuTiffSessionTimeout(request.sessionId, gpuTiffSessions);
   });
 
   ipcMain.handle(FINISH_GPU_TIFF_CHANNEL, async (event, value: unknown) => {
     assertTrustedSender(event, getMainWindow);
     const sessionId = parseGpuTiffSessionId(value);
-    const session = gpuTiffSessions.get(sessionId);
+    const session = takeGpuTiffSession(sessionId, gpuTiffSessions);
     if (session === undefined) throw new Error("GPU TIFF streaming session does not exist.");
     try {
       await session.writer.finish();
-      gpuTiffSessions.delete(sessionId);
     } catch {
       await session.writer.cancel().catch(() => undefined);
-      gpuTiffSessions.delete(sessionId);
       const exported = await processingService.exportTiff(session.assetId, session.sourcePath, {
         outputPath: session.outputPath,
         suggestedFileName: session.fileName,
@@ -442,18 +494,16 @@ export function registerIpcHandlers(
   ipcMain.handle(CANCEL_GPU_TIFF_CHANNEL, async (event, value: unknown) => {
     assertTrustedSender(event, getMainWindow);
     const sessionId = parseGpuTiffSessionId(value);
-    const session = gpuTiffSessions.get(sessionId);
+    const session = takeGpuTiffSession(sessionId, gpuTiffSessions);
     if (session === undefined) return;
-    gpuTiffSessions.delete(sessionId);
     await session.writer.cancel();
   });
 
   ipcMain.handle(FALLBACK_GPU_TIFF_CHANNEL, async (event, value: unknown) => {
     assertTrustedSender(event, getMainWindow);
     const sessionId = parseGpuTiffSessionId(value);
-    const session = gpuTiffSessions.get(sessionId);
+    const session = takeGpuTiffSession(sessionId, gpuTiffSessions);
     if (session === undefined) throw new Error("GPU 母版回退会话不存在。");
-    gpuTiffSessions.delete(sessionId);
     await session.writer.cancel();
     const exported = await processingService.exportTiff(session.assetId, session.sourcePath, {
       outputPath: session.outputPath,
@@ -530,29 +580,34 @@ export function registerIpcHandlers(
       request.processing,
     );
     const id = "color-card-" + randomUUID();
-    const capture = createGeneratedCalibrationCaptureIdentity(fit);
+    const capture = createGeneratedCalibrationCaptureIdentity(fit, request.capture);
     const document = createCalibrationProfileDocument({
       id,
       version: "1.0",
       calibrationId: id,
       captureFingerprint: capture.captureFingerprint,
-      curves: IDENTITY_CURVES,
+      curves: fit.curves,
       matrix: fit.matrix,
     }, {
       name: "色卡标定 " + new Date().toLocaleDateString("zh-CN"),
       createdAt: new Date().toISOString(),
       capture: {
         cameraModel: capture.cameraModel,
+        lens: capture.lens,
+        filmStock: capture.filmStock,
+        process: capture.process,
+        illuminationId: capture.illuminationId,
         decoderFingerprint: capture.decoderFingerprint,
         demosaic: capture.demosaic,
       },
       fit: {
-        algorithm: "color-card-grid-v1 / weighted-ridge-matrix / identity-curves",
+        algorithm: "color-card-grid-v2 / density-power-curves / weighted-ridge-matrix",
         patchCount: fit.usedPatchCount,
         rejectedPatchIds: fit.rejectedPatchIds,
         warnings: [
           "自动工作流识别已校正、正向、6×4 ColorChecker Classic 网格。",
-          "此版本生成矩阵配置并使用单位特性曲线；对特定胶片应在受控拍摄下复核色差与曲线。",
+          "此版本同时拟合相对密度特性曲线和通道矩阵；请记录镜头、片种、冲洗和背光后再声明设备匹配。",
+          "当前生成请求未提供完整拍摄上下文时，配置会保持为未验证状态。",
         ],
       },
     });
@@ -578,7 +633,7 @@ export function registerIpcHandlers(
       properties: ["openDirectory", "createDirectory"],
     });
     if (directory.canceled || directory.filePaths[0] === undefined) return undefined;
-    const sources = await Promise.all(request.items.map(async (item) => {
+    const sources: BatchSource[] = await Promise.all(request.items.map(async (item) => {
       if (item.assetId === "demo-negative") throw new Error("批处理仅支持已导入的 RAW 或 16-bit TIFF 源文件。");
       const sourcePath = sourceRegistry.getPath(item.assetId);
       if (sourcePath === undefined) throw new Error("批处理有未重新连接的源文件；请先重新连接项目源文件。");
@@ -602,14 +657,53 @@ export function registerIpcHandlers(
     return typeof jobId === "string" ? batchService.cancel(jobId) : undefined;
   });
 
-  // The renderer owns streaming GPU TIFF sessions; when the window is closed
-  // or the app quits, no FINISH/CANCEL message will ever arrive for sessions
-  // that are still open. Return a cleanup hook so the main process can cancel
-  // every live writer (closing its file handle and removing .tmp files).
   return async () => {
     const sessions = [...gpuTiffSessions.values()];
     gpuTiffSessions.clear();
+    for (const session of sessions) clearTimeout(session.timeout);
     await Promise.allSettled(sessions.map((session) => session.writer.cancel()));
+  };
+}
+
+function refreshGpuTiffSessionTimeout(
+  sessionId: string,
+  sessions: Map<string, GpuTiffSession>,
+): void {
+  const session = sessions.get(sessionId);
+  if (session === undefined) return;
+  clearTimeout(session.timeout);
+  session.timeout = setTimeout(() => {
+    if (sessions.get(sessionId) !== session) return;
+    sessions.delete(sessionId);
+    void session.writer.cancel().catch(() => undefined);
+  }, gpuTiffSessionIdleTimeoutMs);
+  session.timeout.unref();
+}
+
+function takeGpuTiffSession(
+  sessionId: string,
+  sessions: Map<string, GpuTiffSession>,
+): GpuTiffSession | undefined {
+  const session = sessions.get(sessionId);
+  if (session === undefined) return undefined;
+  sessions.delete(sessionId);
+  clearTimeout(session.timeout);
+  return session;
+}
+
+function decodedSourceMetadata(source: DecodedSourceSummary): Record<string, string> {
+  const demosaic = source.sourceDomain === "camera-linear-bayer"
+    ? "edge-aware-bayer-v2"
+    : source.decoder === "libraw-sidecar"
+      ? source.decoderFingerprint?.split("+").at(-1) ?? "unknown"
+      : "none";
+  return {
+    decoder: source.decoder,
+    sourceDomain: source.sourceDomain,
+    demosaic,
+    ...source.decoderFingerprint === undefined ? {} : { decoderFingerprint: source.decoderFingerprint },
+    ...source.camera?.make === undefined ? {} : { cameraMake: source.camera.make },
+    ...source.camera?.model === undefined ? {} : { cameraModel: source.camera.model },
   };
 }
 
@@ -626,7 +720,7 @@ function assertTrustedSender(
 async function enrichProjectLoad(
   loaded: LifecycleProjectLoad,
   sourceRegistry: SourceRegistry,
-) {
+): Promise<ProjectLoadResult> {
   const assets = loaded.project.rolls.flatMap((roll) => roll.assets);
   const relinked = await sourceRegistry.restore(assets);
   return { ...loaded, ...relinked };
@@ -638,10 +732,7 @@ function requireMainWindow(getMainWindow: () => BrowserWindow | null): BrowserWi
   return parent;
 }
 
-function parseProjectWriteRequest(value: unknown): {
-  readonly sessionId: string;
-  readonly project: unknown;
-} {
+function parseProjectWriteRequest(value: unknown): ProjectWriteRequest {
   if (typeof value !== "object" || value === null) throw new Error("项目保存请求无效。");
   const record = value as Record<string, unknown>;
   if (typeof record.sessionId !== "string" || !/^[a-f0-9]{64}$/.test(record.sessionId)) {
@@ -653,10 +744,7 @@ function parseProjectWriteRequest(value: unknown): {
 function parseOpenRecentProjectRequest(value: unknown): OpenRecentProjectRequest {
   if (typeof value !== "object" || value === null) throw new Error("最近项目请求无效。");
   const record = value as Record<string, unknown>;
-  if (
-    typeof record.id !== "string" || !/^[a-f0-9]{64}$/.test(record.id)
-    || typeof record.readOnly !== "boolean"
-  ) throw new Error("最近项目请求无效。");
+  if (typeof record.id !== "string" || !/^[a-f0-9]{64}$/.test(record.id) || typeof record.readOnly !== "boolean") throw new Error("最近项目请求无效。");
   return { id: record.id, readOnly: record.readOnly };
 }
 
@@ -674,32 +762,26 @@ function isPreviewRequest(value: unknown): value is PreviewRequest {
     || typeof request.maxEdge !== "number"
     || request.maxEdge < 256
     || request.maxEdge > (request.gpuSourceOnly === true ? 32_768 : 2_048)
-    || !previewModes.includes(request.mode as PreviewRequest["mode"])
-    || !previewViews.includes(request.view as PreviewRequest["view"])
+    || !previewModes.includes(request.mode as PreviewMode)
+    || !previewViews.includes(request.view as PreviewView)
     || typeof request.tone !== "object"
     || request.tone === null
   ) {
     return false;
   }
-
   const tone = request.tone as Record<string, unknown>;
   const gpuBase = request.gpuBaseRgb;
-  const gpuFieldsAreValid = (request.gpuInteractive === undefined || typeof request.gpuInteractive === "boolean")
-    && (
-      request.gpuReuseSourceKey === undefined
-      || (
-        typeof request.gpuReuseSourceKey === "string"
+  const gpuFieldsAreValid =
+    (request.gpuInteractive === undefined || typeof request.gpuInteractive === "boolean")
+    && (request.gpuReuseSourceKey === undefined
+      || (typeof request.gpuReuseSourceKey === "string"
         && request.gpuReuseSourceKey.length > 0
-        && request.gpuReuseSourceKey.length <= 512
-      )
-    )
+        && request.gpuReuseSourceKey.length <= 512))
     && (request.gpuSourceOnly === undefined || typeof request.gpuSourceOnly === "boolean")
     && (request.gpuSourceOnly !== true
-      || (
-        Array.isArray(gpuBase)
+      || (Array.isArray(gpuBase)
         && gpuBase.length === 3
-        && gpuBase.every((item) => typeof item === "number" && Number.isFinite(item) && item > 0)
-      ));
+        && gpuBase.every((item) => typeof item === "number" && Number.isFinite(item) && item > 0)));
   const toneIsValid = [
     tone.exposureStops,
     tone.contrast,
@@ -711,14 +793,15 @@ function isPreviewRequest(value: unknown): value is PreviewRequest {
     && isDmaxOverride(request.dmaxOverride)
     && (request.dmaxSampleRoi === undefined || isRoi(request.dmaxSampleRoi))
     && (request.calibrationProfileId === undefined
-      || (typeof request.calibrationProfileId === "string" && /^[a-zA-Z0-9._-]{1,128}$/.test(request.calibrationProfileId)))
+      || (typeof request.calibrationProfileId === "string"
+        && /^[a-zA-Z0-9._-]{1,128}$/.test(request.calibrationProfileId)))
     && isProcessingRecipe(request.processing);
 }
 
 async function getCalibrationProfile(
-  request: Pick<PreviewRequest, "mode" | "calibrationProfileId">,
+  request: { readonly mode: PreviewMode; readonly calibrationProfileId?: string },
   profiles: CalibrationProfileService,
-) {
+): Promise<CalibrationProfileDocument | undefined> {
   if (request.mode !== "calibrated") {
     return undefined;
   }
@@ -737,16 +820,16 @@ function parseMasterTiffRequest(value: unknown): MasterTiffExportRequest {
     throw new Error("TIFF 导出请求无效。");
   }
   const record = value as Record<string, unknown>;
-  const previewRequest: PreviewRequest = {
+  const previewRequest = {
     revision: 1,
     assetId: typeof record.assetId === "string" ? record.assetId : "",
     maxEdge: 256,
-    mode: record.mode as PreviewRequest["mode"],
+    mode: record.mode,
     view: "positive",
-    tone: record.tone as PreviewRequest["tone"],
-    calibrationProfileId: record.calibrationProfileId as string | undefined,
-    processing: record.processing as ProcessingRecipe | undefined,
-    dmaxOverride: record.dmaxOverride as number | undefined,
+    tone: record.tone,
+    calibrationProfileId: record.calibrationProfileId,
+    processing: record.processing,
+    dmaxOverride: record.dmaxOverride,
   };
   if (
     !isPreviewRequest(previewRequest)
@@ -759,7 +842,7 @@ function parseMasterTiffRequest(value: unknown): MasterTiffExportRequest {
   return {
     assetId: previewRequest.assetId,
     suggestedFileName: record.suggestedFileName,
-    format: record.format as MasterExportFormat | undefined,
+    format: record.format,
     mode: previewRequest.mode,
     tone: previewRequest.tone,
     calibrationProfileId: previewRequest.calibrationProfileId,
@@ -773,19 +856,19 @@ function parseGpuMasterTiffBeginRequest(value: unknown): GpuMasterTiffBeginReque
     throw new Error("GPU TIFF streaming request is invalid.");
   }
   const record = value as Record<string, unknown>;
-  const width = record.width;
-  const height = record.height;
-  const rowsPerStrip = record.rowsPerStrip;
-  const previewRequest: PreviewRequest = {
+  const width = record.width as number;
+  const height = record.height as number;
+  const rowsPerStrip = record.rowsPerStrip as number;
+  const previewRequest = {
     revision: 1,
     assetId: typeof record.assetId === "string" ? record.assetId : "",
     maxEdge: 256,
-    mode: record.mode as PreviewRequest["mode"],
+    mode: record.mode,
     view: "positive",
-    tone: record.tone as PreviewRequest["tone"],
-    calibrationProfileId: record.calibrationProfileId as string | undefined,
-    processing: record.processing as ProcessingRecipe | undefined,
-    dmaxOverride: record.dmaxOverride as number | undefined,
+    tone: record.tone,
+    calibrationProfileId: record.calibrationProfileId,
+    processing: record.processing,
+    dmaxOverride: record.dmaxOverride,
   };
   if (
     !isPreviewRequest(previewRequest)
@@ -796,11 +879,7 @@ function parseGpuMasterTiffBeginRequest(value: unknown): GpuMasterTiffBeginReque
     || !Number.isInteger(width)
     || !Number.isInteger(height)
     || !Number.isInteger(rowsPerStrip)
-    || (width as number) <= 0
-    || (height as number) <= 0
-    || (rowsPerStrip as number) < 32
-    || (rowsPerStrip as number) > 4096
-    || (width as number) * (height as number) > 80_000_000
+    || !gpuMasterDimensionsAreWithinLimits(width, height, rowsPerStrip)
     || !isMasterExportFormat(record.format)
     || !isSimpleMetadata(record.processingMetadata)
   ) {
@@ -809,16 +888,16 @@ function parseGpuMasterTiffBeginRequest(value: unknown): GpuMasterTiffBeginReque
   return {
     assetId: previewRequest.assetId,
     suggestedFileName: record.suggestedFileName,
-    format: record.format as MasterExportFormat | undefined,
+    format: record.format,
     mode: previewRequest.mode,
     tone: previewRequest.tone,
     calibrationProfileId: previewRequest.calibrationProfileId,
     processing: previewRequest.processing,
     dmaxOverride: previewRequest.dmaxOverride,
-    width: width as number,
-    height: height as number,
-    rowsPerStrip: rowsPerStrip as number,
-    processingMetadata: record.processingMetadata as GpuMasterTiffBeginRequest["processingMetadata"],
+    width,
+    height,
+    rowsPerStrip,
+    processingMetadata: record.processingMetadata,
   };
 }
 
@@ -828,27 +907,25 @@ function parseGpuMasterTiffStripRequest(value: unknown): GpuMasterTiffStripReque
   }
   const record = value as Record<string, unknown>;
   const sessionId = parseGpuTiffSessionId(record.sessionId);
-  const width = record.width;
-  const height = record.height;
-  const outputY = record.outputY;
+  const width = record.width as number;
+  const height = record.height as number;
+  const outputY = record.outputY as number;
   const data = record.rgb16;
   if (
     !Number.isInteger(width)
     || !Number.isInteger(height)
     || !Number.isInteger(outputY)
-    || (width as number) <= 0
-    || (height as number) <= 0
-    || (outputY as number) < 0
+    || outputY < 0
     || !(data instanceof Uint16Array)
-    || data.length !== (width as number) * (height as number) * 3
+    || !gpuStripPayloadIsWithinLimits(width, height, data)
   ) {
     throw new Error("GPU TIFF strip pixels are invalid.");
   }
   return {
     sessionId,
-    outputY: outputY as number,
-    width: width as number,
-    height: height as number,
+    outputY,
+    width,
+    height,
     rgb16: data,
   };
 }
@@ -860,12 +937,13 @@ function parseGpuTiffSessionId(value: unknown): string {
   return value;
 }
 
-function isSimpleMetadata(value: unknown): boolean {
-  return value === undefined || (
-    typeof value === "object"
-    && value !== null
-    && Object.values(value).every((item) => ["string", "number", "boolean"].includes(typeof item))
-  );
+function isSimpleMetadata(
+  value: unknown,
+): value is Readonly<Record<string, string | number | boolean>> | undefined {
+  return value === undefined
+    || (typeof value === "object"
+      && value !== null
+      && Object.values(value).every((item) => ["string", "number", "boolean"].includes(typeof item)));
 }
 
 function parseBatchExportRequest(value: unknown): BatchExportRequest {
@@ -875,7 +953,7 @@ function parseBatchExportRequest(value: unknown): BatchExportRequest {
   if (!Array.isArray(record.items) || record.items.length === 0 || record.items.length > 1_000) {
     throw new Error("批处理源文件列表无效。");
   }
-  const items = record.items.map((value) => {
+  const items = record.items.map((value: unknown): BatchExportItem => {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw new Error("批处理设置无效。");
     }
@@ -917,36 +995,62 @@ function parseCalibrationProfileId(value: unknown): string {
   return value;
 }
 
-function parseColorCardCalibrationRequest(value: unknown): { readonly assetId: string; readonly processing?: ProcessingRecipe } {
+function parseColorCardCalibrationRequest(value: unknown): {
+  readonly assetId: string;
+  readonly processing?: ProcessingRecipe;
+  readonly capture?: ColorCardCaptureContext;
+} {
   if (typeof value !== "object" || value === null) throw new Error("色卡标定请求无效。");
   const record = value as Record<string, unknown>;
   if (typeof record.assetId !== "string" || !/^[A-Za-z0-9-]{1,128}$/.test(record.assetId) || !isProcessingRecipe(record.processing)) {
     throw new Error("色卡标定请求无效。");
   }
-  return { assetId: record.assetId, processing: record.processing as ProcessingRecipe | undefined };
+  const capture = parseColorCardCaptureContext(record.capture);
+  return { assetId: record.assetId, processing: record.processing, capture };
 }
 
-function parseRelinkAssets(value: unknown): readonly SourceAsset[] {
+function parseColorCardCaptureContext(value: unknown): ColorCardCaptureContext | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null) throw new Error("色卡拍摄上下文无效。");
+  const record = value as Record<string, unknown>;
+  const fields = ["lens", "filmStock", "process", "illuminationId"] as const;
+  const context: Partial<Record<(typeof fields)[number], string>> = {};
+  for (const field of fields) {
+    const item = record[field];
+    if (item !== undefined && (typeof item !== "string" || item.trim().length === 0 || item.length > 256)) {
+      throw new Error("色卡拍摄上下文无效。");
+    }
+    if (typeof item === "string") context[field] = item.trim();
+  }
+  return context;
+}
+
+function parseRelinkAssets(value: unknown): SourceAsset[] {
   if (!Array.isArray(value) || value.length > 1_000) throw new Error("待重新连接的源文件列表无效。");
   return value.map((item) => {
     if (typeof item !== "object" || item === null) throw new Error("待重新连接的源文件无效。");
     const record = item as Record<string, unknown>;
     if (
-      typeof record.id !== "string" || !/^[a-zA-Z0-9-]{1,128}$/.test(record.id)
-      || typeof record.name !== "string" || record.name.length === 0 || record.name.length > 255 || /[\\/\u0000-\u001F\u007F]/.test(record.name)
-      || typeof record.extension !== "string" || !/^[A-Za-z0-9]{1,16}$/.test(record.extension)
+      typeof record.id !== "string"
+      || !/^[a-zA-Z0-9-]{1,128}$/.test(record.id)
+      || typeof record.name !== "string"
+      || record.name.length === 0
+      || record.name.length > 255
+      || /[-\\/\u0000-\u001F\u007F]/.test(record.name)
+      || typeof record.extension !== "string"
+      || !/^[A-Za-z0-9]{1,16}$/.test(record.extension)
     ) throw new Error("待重新连接的源文件无效。");
     const identity = parseRelinkIdentity(record.identity);
     return {
       id: record.id,
       name: record.name,
       extension: record.extension.toUpperCase(),
-      ...(identity === undefined ? {} : { identity }),
+      ...identity === undefined ? {} : { identity },
     };
   });
 }
 
-function parseRelinkIdentity(value: unknown): SourceAsset["identity"] {
+function parseRelinkIdentity(value: unknown): SourceIdentity | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("待重新连接的源文件身份无效。");
@@ -958,10 +1062,14 @@ function parseRelinkIdentity(value: unknown): SourceAsset["identity"] {
   }
   const fingerprintRecord = fingerprint as Record<string, unknown>;
   if (
-    typeof record.size !== "number" || !Number.isSafeInteger(record.size) || record.size < 0
-    || typeof record.lastModifiedAt !== "string" || Number.isNaN(Date.parse(record.lastModifiedAt))
+    typeof record.size !== "number"
+    || !Number.isSafeInteger(record.size)
+    || record.size < 0
+    || typeof record.lastModifiedAt !== "string"
+    || Number.isNaN(Date.parse(record.lastModifiedAt))
     || fingerprintRecord.algorithm !== "sha256-full-v1"
-    || typeof fingerprintRecord.value !== "string" || !/^[a-f0-9]{64}$/.test(fingerprintRecord.value)
+    || typeof fingerprintRecord.value !== "string"
+    || !/^[a-f0-9]{64}$/.test(fingerprintRecord.value)
   ) throw new Error("待重新连接的源文件身份无效。");
   return {
     size: record.size,
@@ -978,11 +1086,7 @@ function isProcessingRecipe(value: unknown): value is ProcessingRecipe | undefin
   if (!isFilmBaseOverride(record.filmBase)) return false;
   const geometry = record.geometry as Record<string, unknown>;
   if (![0, 90, 180, 270].includes(geometry.rotation as number) || (geometry.crop !== undefined && !isRoi(geometry.crop))) return false;
-  if (geometry.straighten !== undefined && (
-    typeof geometry.straighten !== "number"
-    || !Number.isFinite(geometry.straighten)
-    || Math.abs(geometry.straighten) > 15
-  )) return false;
+  if (geometry.straighten !== undefined && (typeof geometry.straighten !== "number" || !Number.isFinite(geometry.straighten) || Math.abs(geometry.straighten) > 15)) return false;
   if (geometry.perspective !== undefined) {
     if (typeof geometry.perspective !== "object" || geometry.perspective === null) return false;
     const perspective = geometry.perspective as Record<string, unknown>;
@@ -1001,12 +1105,11 @@ function isProcessingRecipe(value: unknown): value is ProcessingRecipe | undefin
   return true;
 }
 
-function isDmaxOverride(value: unknown): value is number | undefined {
-  return value === undefined
-    || (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 16);
+function isDmaxOverride(value: unknown): boolean {
+  return value === undefined || (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 16);
 }
 
-function isFilmBaseOverride(value: unknown): boolean {
+function isFilmBaseOverride(value: unknown): value is FilmBaseOverride | undefined {
   if (value === undefined) return true;
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
@@ -1020,48 +1123,52 @@ function isFilmBaseOverride(value: unknown): boolean {
     && Number.isFinite(record.confidence)
     && record.confidence >= 0
     && record.confidence <= 1
-    && (record.sourceFrameId === undefined || (typeof record.sourceFrameId === "string" && /^[A-Za-z0-9-]{1,128}$/.test(record.sourceFrameId)));
+    && (record.sourceFrameId === undefined
+      || (typeof record.sourceFrameId === "string" && /^[A-Za-z0-9-]{1,128}$/.test(record.sourceFrameId)));
 }
 
-function isRestoration(value: unknown): boolean {
+function isRestoration(value: unknown): value is RestorationControls {
   if (typeof value !== "object" || value === null) return false;
   const restoration = value as Record<string, unknown>;
   return typeof restoration.dust === "boolean"
     && typeof restoration.scratches === "boolean"
-    && typeof restoration.denoise === "number" && Number.isFinite(restoration.denoise) && restoration.denoise >= 0 && restoration.denoise <= 1
-    && typeof restoration.sharpen === "number" && Number.isFinite(restoration.sharpen) && restoration.sharpen >= 0 && restoration.sharpen <= 2;
+    && typeof restoration.denoise === "number"
+    && Number.isFinite(restoration.denoise)
+    && restoration.denoise >= 0
+    && restoration.denoise <= 1
+    && typeof restoration.sharpen === "number"
+    && Number.isFinite(restoration.sharpen)
+    && restoration.sharpen >= 0
+    && restoration.sharpen <= 2;
 }
 
-function isRoi(value: unknown): boolean {
+function isRoi(value: unknown): value is NormalizedRoi {
   if (typeof value !== "object" || value === null) return false;
   const roi = value as Record<string, unknown>;
   return [roi.x, roi.y, roi.width, roi.height].every((item) => typeof item === "number" && Number.isFinite(item))
-    && (roi.x as number) >= 0 && (roi.y as number) >= 0 && (roi.width as number) > 0 && (roi.height as number) > 0
-    && (roi.x as number) + (roi.width as number) <= 1 && (roi.y as number) + (roi.height as number) <= 1;
+    && (roi.x as number) >= 0
+    && (roi.y as number) >= 0
+    && (roi.width as number) > 0
+    && (roi.height as number) > 0
+    && (roi.x as number) + (roi.width as number) <= 1
+    && (roi.y as number) + (roi.height as number) <= 1;
 }
 
-function isPoint(value: unknown): boolean {
+function isPoint(value: unknown): value is PerspectivePoint {
   if (typeof value !== "object" || value === null) return false;
   const point = value as Record<string, unknown>;
-  return [point.x, point.y].every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= 1);
+  return [point.x, point.y].every((item) => typeof item === "number" && Number.isFinite(item))
+    && (point.x as number) >= 0
+    && (point.x as number) <= 1
+    && (point.y as number) >= 0
+    && (point.y as number) <= 1;
 }
-
-const IDENTITY_CURVES: CurveSet = [
-  [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-  [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-  [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-];
 
 function isMasterExportFormat(value: unknown): value is MasterExportFormat | undefined {
   return value === undefined || value === "tiff" || value === "jpeg" || value === "heif" || value === "dng";
 }
 
-function getMasterExportSpec(format: MasterExportFormat): {
-  readonly label: string;
-  readonly shortLabel: string;
-  readonly extensions: string[];
-  readonly defaultExtension: string;
-} {
+function getMasterExportSpec(format: MasterExportFormat): MasterExportSpec {
   switch (format) {
     case "jpeg":
       return { label: "高质量 JPEG", shortLabel: "JPG", extensions: ["jpg", "jpeg"], defaultExtension: "jpg" };
