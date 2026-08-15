@@ -127,7 +127,7 @@ export class WebGlFilmPipeline {
   private readonly targetInternalFormat: number;
   private readonly targetPixelType: number;
   private readonly hardwareLutInterpolation: boolean;
-  private boundFilm: FilmMode | undefined;
+  private boundFilmSignature: string | undefined;
   private lastRenderRegionKey = "";
   private readonly timerExtension: { readonly TIME_ELAPSED_EXT: number; readonly GPU_DISJOINT_EXT: number } | null;
   private readonly pendingTimerQueries: WebGLQuery[] = [];
@@ -715,10 +715,15 @@ export class WebGlFilmPipeline {
   }
 
   private bindFilm(film: FilmMode): void {
-    if (this.boundFilm === film) return;
     const gl = this.gl;
     const program = this.displayProgram;
     const prepared = prepareFilm(film);
+    // Cache by value, not by object identity: a caller that reuses a film
+    // object and mutates its fields in place must trigger a rebind instead
+    // of leaving stale uniforms.
+    const signature = filmBindingSignature(prepared);
+    if (this.boundFilmSignature === signature) return;
+    this.boundFilmSignature = signature;
     gl.uniform1i(requireUniform(gl, program, "u_filmKind"), prepared.kind);
     gl.uniform3f(
       requireUniform(gl, program, "u_densityGain"),
@@ -758,7 +763,6 @@ export class WebGlFilmPipeline {
     bindCurve(gl, program, "G", prepared.curves[1]);
     bindCurve(gl, program, "B", prepared.curves[2]);
     this.bindLut(prepared.lut);
-    this.boundFilm = film;
   }
 
   private bindLut(lut: Lut3d | undefined): void {
@@ -1197,6 +1201,24 @@ function prepareFilm(film: FilmMode): PreparedFilm {
   };
 }
 
+/**
+ * Value-based binding identity so a film object that is mutated in place
+ * still rebinds uniforms. The LUT participates by buffer identity: its
+ * texture upload already compares `lut.data` references, and LUT payloads
+ * are never mutated after construction.
+ */
+function filmBindingSignature(prepared: PreparedFilm): string {
+  return JSON.stringify([
+    prepared.kind,
+    prepared.densityGain,
+    prepared.whiteBalance,
+    prepared.preSaturation,
+    prepared.matrix,
+    prepared.curves,
+  ]) + "|lut:"
+    + (prepared.lut === undefined ? "none" : prepared.lut.size + ":" + prepared.lut.data.byteLength);
+}
+
 function bindCurve(
   gl: WebGL2RenderingContext,
   program: WebGLProgram,
@@ -1367,10 +1389,14 @@ async function waitForGpuFence(
   gl: WebGL2RenderingContext,
   fence: WebGLSync,
 ): Promise<void> {
+  // A hung fence otherwise blocks a master readback forever (e.g. after a
+  // driver reset). Bound the wait so the caller's CPU fallback can run.
+  const deadline = Date.now() + 30_000;
   while (true) {
     const status = gl.clientWaitSync(fence, 0, 0);
     if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return;
     if (status === gl.WAIT_FAILED) throw new Error("GPU readback synchronization failed.");
+    if (Date.now() >= deadline) throw new Error("GPU readback synchronization timed out.");
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
 }
@@ -1743,49 +1769,54 @@ const displayFragmentShader = `#version 300 es
 
   // Continues a curve past its last point with the terminal segment's log
   // slope (exponential in linear space), mirroring the CPU core. A hard
-  // clamp flattens highlights and rotates the hue of coloured ones.
+  // clamp flattens highlights and rotates the hue of coloured ones. Output
+  // caps at the same 1e8 ceiling as the CPU so a hostile imported curve
+  // cannot overflow into Infinity.
   float extrapolateCurveEnd(vec2 previous, vec2 last, float inputValue) {
     if (previous.y > 0.0 && last.y > 0.0) {
       float slope = (log2(last.y) - log2(previous.y)) / (last.x - previous.x);
-      return last.y * exp2(slope * (inputValue - last.x));
+      return min(last.y * exp2(slope * (inputValue - last.x)), 1e8);
     }
     return last.y;
   }
 
   float curveR(float inputValue) {
+    if (u_curveRCount < 2) return inputValue;
     if (inputValue <= u_curveR[0].x) return u_curveR[0].y;
     for (int index = 1; index < ${maximumGpuCurvePoints}; index++) {
       if (index >= u_curveRCount) break;
       if (inputValue <= u_curveR[index].x) {
         vec2 left = u_curveR[index - 1];
         vec2 right = u_curveR[index];
-        return mix(left.y, right.y, (inputValue - left.x) / (right.x - left.x));
+        return mix(left.y, right.y, (inputValue - left.x) / max(right.x - left.x, 1e-9));
       }
     }
     return extrapolateCurveEnd(u_curveR[u_curveRCount - 2], u_curveR[u_curveRCount - 1], inputValue);
   }
 
   float curveG(float inputValue) {
+    if (u_curveGCount < 2) return inputValue;
     if (inputValue <= u_curveG[0].x) return u_curveG[0].y;
     for (int index = 1; index < ${maximumGpuCurvePoints}; index++) {
       if (index >= u_curveGCount) break;
       if (inputValue <= u_curveG[index].x) {
         vec2 left = u_curveG[index - 1];
         vec2 right = u_curveG[index];
-        return mix(left.y, right.y, (inputValue - left.x) / (right.x - left.x));
+        return mix(left.y, right.y, (inputValue - left.x) / max(right.x - left.x, 1e-9));
       }
     }
     return extrapolateCurveEnd(u_curveG[u_curveGCount - 2], u_curveG[u_curveGCount - 1], inputValue);
   }
 
   float curveB(float inputValue) {
+    if (u_curveBCount < 2) return inputValue;
     if (inputValue <= u_curveB[0].x) return u_curveB[0].y;
     for (int index = 1; index < ${maximumGpuCurvePoints}; index++) {
       if (index >= u_curveBCount) break;
       if (inputValue <= u_curveB[index].x) {
         vec2 left = u_curveB[index - 1];
         vec2 right = u_curveB[index];
-        return mix(left.y, right.y, (inputValue - left.x) / (right.x - left.x));
+        return mix(left.y, right.y, (inputValue - left.x) / max(right.x - left.x, 1e-9));
       }
     }
     return extrapolateCurveEnd(u_curveB[u_curveBCount - 2], u_curveB[u_curveBCount - 1], inputValue);
@@ -1878,6 +1909,9 @@ const displayFragmentShader = `#version 300 es
 
   vec3 toneMap(vec3 scene) {
     vec3 normalized = scene * exp2(u_exposureStops) / max(u_whitePoint, EPSILON);
+    // Match the CPU tone stage: non-finite values saturate to white instead
+    // of propagating NaN through luminance scaling.
+    normalized = mix(clamp(normalized, vec3(0.0), vec3(1e6)), vec3(0.0), bvec3(isnan(normalized)));
     float sourceLuma = max(0.0, dot(normalized, LUMA));
     float mappedLuma = mapLuminance(sourceLuma);
     vec3 mapped = normalized * (sourceLuma > EPSILON ? mappedLuma / sourceLuma : 0.0);

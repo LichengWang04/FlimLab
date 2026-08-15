@@ -109,6 +109,8 @@ interface GpuTiffSession {
   readonly dmaxOverride: number | undefined;
   readonly dmaxChannelRange: import("../core/types.ts").Rgb | undefined;
   readonly colorTrust: ColorTrust;
+  /** Rows already appended, for strip-order validation. */
+  writtenRows: number;
   timeout?: NodeJS.Timeout;
 }
 
@@ -138,7 +140,11 @@ export function registerIpcHandlers(
   backgroundProcessingService: ProcessingService,
   calibrationProfiles: CalibrationProfileService,
 ): () => Promise<void> {
-  const batchService = new BatchService(processingService);
+  // Batch export runs on the background worker: a long full-resolution run
+  // must not stall interactive previews on the foreground worker. The
+  // background worker also serves best-effort precompute, so both share one
+  // serialized queue at lower OS priority.
+  const batchService = new BatchService(backgroundProcessingService);
   const gpuTiffSessions = new Map<string, GpuTiffSession>();
   let pendingGpuTiffSessions = 0;
 
@@ -438,6 +444,7 @@ export function registerIpcHandlers(
         dmaxOverride: request.dmaxOverride,
         dmaxChannelRange: request.dmaxChannelRange,
         colorTrust,
+        writtenRows: 0,
       });
       refreshGpuTiffSessionTimeout(sessionId, gpuTiffSessions);
       return { saved: true, sessionId, colorTrust };
@@ -454,7 +461,13 @@ export function registerIpcHandlers(
     if (request.width !== session.width || request.height > session.rowsPerStrip || request.outputY + request.height > session.height) {
       throw new Error("GPU TIFF strip dimensions do not match the streaming session.");
     }
+    // Strips must arrive in order; a gap or overlap means the renderer
+    // dropped or duplicated a tile and the container would be corrupt.
+    if (request.outputY !== session.writtenRows) {
+      throw new Error("GPU TIFF strip rows are out of order.");
+    }
     await session.writer.appendStrip(request.outputY, request.height, request.rgb16);
+    session.writtenRows += request.height;
     refreshGpuTiffSessionTimeout(request.sessionId, gpuTiffSessions);
   });
 
@@ -787,12 +800,15 @@ function isPreviewRequest(value: unknown): value is PreviewRequest {
       || (Array.isArray(gpuBase)
         && gpuBase.length === 3
         && gpuBase.every((item) => typeof item === "number" && Number.isFinite(item) && item > 0)));
-  const toneIsValid = [
-    tone.exposureStops,
-    tone.contrast,
-    tone.highlightCompression,
-    tone.saturation,
-  ].every((item) => typeof item === "number" && Number.isFinite(item));
+  const toneIsValid = (
+    typeof tone.exposureStops === "number" && Number.isFinite(tone.exposureStops) && tone.exposureStops >= -8 && tone.exposureStops <= 8
+  ) && (
+    typeof tone.contrast === "number" && Number.isFinite(tone.contrast) && tone.contrast >= 0.1 && tone.contrast <= 5
+  ) && (
+    typeof tone.highlightCompression === "number" && Number.isFinite(tone.highlightCompression) && tone.highlightCompression >= 0 && tone.highlightCompression <= 10
+  ) && (
+    typeof tone.saturation === "number" && Number.isFinite(tone.saturation) && tone.saturation >= 0 && tone.saturation <= 5
+  );
   return toneIsValid
     && gpuFieldsAreValid
     && isDmaxOverride(request.dmaxOverride)
@@ -950,10 +966,18 @@ function parseGpuTiffSessionId(value: unknown): string {
 function isSimpleMetadata(
   value: unknown,
 ): value is Readonly<Record<string, string | number | boolean>> | undefined {
-  return value === undefined
-    || (typeof value === "object"
-      && value !== null
-      && Object.values(value).every((item) => ["string", "number", "boolean"].includes(typeof item)));
+  if (value === undefined) return true;
+  if (typeof value !== "object" || value === null) return false;
+  const entries = Object.entries(value as Record<string, unknown>);
+  return entries.length <= 32
+    && entries.every(([key, item]) =>
+      key.length > 0
+      && key.length <= 64
+      && (
+        (typeof item === "string" && item.length <= 256)
+        || typeof item === "number"
+        || typeof item === "boolean"
+      ));
 }
 
 function parseBatchExportRequest(value: unknown): BatchExportRequest {
@@ -1048,7 +1072,7 @@ function parseRelinkAssets(value: unknown): SourceAsset[] {
       || typeof record.name !== "string"
       || record.name.length === 0
       || record.name.length > 255
-      || /[-\\/\u0000-\u001F\u007F]/.test(record.name)
+      || /[\\/\u0000-\u001F\u007F]/.test(record.name)
       || typeof record.extension !== "string"
       || !/^[A-Za-z0-9]{1,16}$/.test(record.extension)
     ) throw new Error("待重新连接的源文件无效。");

@@ -126,6 +126,11 @@ export function fitColorChartCurves(patches: readonly ColorChartPatch[]): CurveS
   if (accepted.length < 3) {
     throw new Error("At least three included color-chart patches are required for curve fitting.");
   }
+  // A NaN/Infinity sample would poison maximumDensity and every ordinate
+  // through Math.max; reject it explicitly instead of failing downstream.
+  if (accepted.some((patch) => [...patch.source, ...patch.target].some((value) => !Number.isFinite(value)))) {
+    throw new Error("Color-chart samples must be finite density and target values.");
+  }
   const maximumDensity = Math.max(0.05, ...accepted.flatMap((patch) => patch.source));
   const fitChannel = (channel: 0 | 1 | 2): CurvePoint[] => {
     const samples = accepted.flatMap((patch) => {
@@ -642,7 +647,11 @@ function solveLinear3(matrix: readonly (readonly number[])[], rightHand: readonl
         pivot = candidate;
       }
     }
-    if (Math.abs(augmented[pivot][column]) < 1e-14) {
+    // Threshold relative to the matrix magnitude: legitimate chart systems
+    // can have very small entries (log-domain slopes), and an absolute
+    // 1e-14 cutoff would misreport well-conditioned small matrices.
+    const magnitude = Math.max(1, ...augmented.flatMap((row) => row.slice(0, 3).map(Math.abs)));
+    if (Math.abs(augmented[pivot][column]) < 1e-12 * magnitude) {
       throw new Error("Color-chart matrix is singular; add more varied patches or increase ridgeLambda.");
     }
     if (pivot !== column) {

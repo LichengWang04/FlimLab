@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+
+import { renameWithRetry } from "./atomic-output.ts";
 
 import {
   defaultProcessingRecipe,
@@ -73,7 +75,7 @@ export class ProjectService {
     const temporaryPath = join(this.bundleDirectory, "." + randomUUID() + ".tmp");
     try {
       await writeFile(temporaryPath, JSON.stringify(project, null, 2), "utf8");
-      await rename(temporaryPath, this.filePath);
+      await renameWithRetry(temporaryPath, this.filePath);
     } catch (error: unknown) {
       await unlink(temporaryPath).catch(() => undefined);
       throw error;

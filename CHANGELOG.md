@@ -18,6 +18,18 @@ FilmLab follows [Semantic Versioning](https://semver.org/). This file records us
 - Non-finite decoded pixels (corrupt float TIFFs, ICC overflow) map to the film base instead of failing the whole calibrated-mode frame.
 - Demo-negative previews clamp their edge length in the main process and reject full-resolution source payloads, removing a multi-gigabyte allocation vector.
 - Standard-mode inversion caps per-channel normalization at 4× the sampled Dmax anchor, so a badly sampled low-density ROI can no longer amplify highlights to 10^20.
+- The tone stage (CPU and both WebGL paths) sanitizes non-finite scene values: positive infinity saturates to white and NaN floors instead of producing NaN black pixels; calibrated curve extrapolation caps its output so a hostile imported curve cannot overflow.
+- Restoration sliders record one undo snapshot per drag instead of one per input tick; geometry/base-estimation previews verify their revision before applying results.
+- The renderer now has an error boundary, and the Canvas2D fallback surfaces an unavailable 2D context instead of silently going black.
+- Source filenames containing hyphens can be relinked again (validation now matches project storage).
+- Preview IPC validation bounds tone fields and caps XMP metadata size; GPU TIFF strips must arrive in row order.
+- Decoded frames are evicted least-recently-used beyond 16 assets, a release racing an in-flight decode can no longer resurrect the raster, and hung utility/sidecar requests time out instead of hanging forever.
+- The RAW sidecar now performs a runtime protocol handshake (version, cache format, CFA capability) before the first decode.
+- Update state persists through unique temporary names and a serialized queue; cached installers are validated to live in the installer directory and pruned to the newest three.
+- Project saves retry transient Windows rename failures; TIFF/PNG publication flushes the file and its directory; the source-location index serializes concurrent updates.
+- Projects written by a newer FilmLab version are refused instead of being silently downgraded by a migration confirmation; a corrupt calibration snapshot no longer aborts the whole project open.
+- Batch export runs on the background worker so long runs no longer stall interactive previews, and concurrent batch jobs reserve distinct output names.
+- WebGPU restoration no longer reads unwritten scratch buffers when only denoise or sharpen is enabled.
 
 ### Added
 

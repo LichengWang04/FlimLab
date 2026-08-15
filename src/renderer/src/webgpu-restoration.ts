@@ -28,6 +28,32 @@ export interface WebGpuRestorationResult {
   readonly gpuBackend: "webgpu-compute";
 }
 
+export interface RestorationPassPlanStep {
+  readonly pass: number;
+  readonly output: 0 | 1;
+}
+
+/**
+ * Builds the enabled pass sequence. Every pass reads the output of the
+ * previous one (the scratch buffers alternate), so enabling only denoise or
+ * only sharpen can never read an unwritten buffer.
+ */
+export function restorationPassPlan(controls: RestorationControls): readonly RestorationPassPlanStep[] {
+  const steps: RestorationPassPlanStep[] = [];
+  let nextBuffer = 0 as 0 | 1;
+  const push = (pass: number): void => {
+    steps.push({ pass, output: nextBuffer });
+    nextBuffer = nextBuffer === 0 ? 1 : 0;
+  };
+  if (controls.dust || controls.scratches) push(0);
+  if (controls.denoise > 0) {
+    push(1);
+    push(2);
+  }
+  if (controls.sharpen > 0) push(3);
+  return steps;
+}
+
 /**
  * Buffer-based WebGPU restoration engine. It is intentionally independent
  * from the WebGL2 renderer so availability can be benchmarked safely before
@@ -96,16 +122,11 @@ export class WebGpuRestorationCompute {
       usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST,
     });
     this.device.queue.writeBuffer(input, 0, source);
-    const passes = [
-      { pass: 0, enabled: controls.dust || controls.scratches, input, output: ping },
-      { pass: 1, enabled: controls.denoise > 0, input: ping, output: pong },
-      { pass: 2, enabled: controls.denoise > 0, input: pong, output: ping },
-      { pass: 3, enabled: controls.sharpen > 0, input: ping, output: pong },
-    ];
+    const scratch = [ping, pong] as const;
+    const passes = restorationPassPlan(controls);
     let latest = input;
     const encoder = this.device.createCommandEncoder();
     for (const step of passes) {
-      if (!step.enabled) continue;
       const passParameters = new ArrayBuffer(32);
       const u32 = new Uint32Array(passParameters);
       const f32 = new Float32Array(passParameters);
@@ -128,13 +149,13 @@ export class WebGpuRestorationCompute {
         layout: this.pipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: latest } },
-          { binding: 1, resource: { buffer: step.output } },
+          { binding: 1, resource: { buffer: scratch[step.output] } },
           { binding: 2, resource: { buffer: parameters } },
         ],
       }));
       compute.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
       compute.end();
-      latest = step.output;
+      latest = scratch[step.output];
     }
     if (latest === input) {
       input.destroy();

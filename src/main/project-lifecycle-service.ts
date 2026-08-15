@@ -32,6 +32,7 @@ import {
   parseProjectDraft,
   parseStoredProject,
 } from "./project-service.ts";
+import { renameWithRetry } from "./atomic-output.ts";
 
 const projectFileName = "project.json";
 const calibrationDirectoryName = "calibration-profiles";
@@ -238,9 +239,16 @@ export class ProjectLifecycleService {
       try {
         const raw = JSON.parse(contents) as { readonly schemaVersion?: unknown };
         sourceVersion = typeof raw.schemaVersion === "number" ? raw.schemaVersion : projectSchemaVersion;
+        // A project written by a newer app version must not be silently
+        // rewritten by this one: a "migration" confirmation would drop the
+        // unknown fields. Refuse up front so the user upgrades first.
+        if (sourceVersion > projectSchemaVersion) {
+          throw new NewerProjectSchemaError(sourceVersion);
+        }
         project = parseStoredProject(raw);
         if (sourceVersion !== projectSchemaVersion) pendingAction = "migration";
       } catch (error: unknown) {
+        if (error instanceof NewerProjectSchemaError) throw error;
         const recovered = await this.readLatestValidBackup(normalized);
         if (recovered === undefined) {
           const message = error instanceof Error ? error.message : "格式错误";
@@ -396,8 +404,14 @@ export class ProjectLifecycleService {
     const restored: string[] = [];
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const summary = await this.calibrations.importSerialized(await readFile(join(directory, entry.name), "utf8"));
-      restored.push(summary.id);
+      try {
+        const summary = await this.calibrations.importSerialized(await readFile(join(directory, entry.name), "utf8"));
+        restored.push(summary.id);
+      } catch (error: unknown) {
+        // One corrupt snapshot must not abort the whole project open; the
+        // main file was already validated and the user can re-import later.
+        console.warn("Skipped unreadable calibration snapshot", entry.name, error);
+      }
     }
     return restored.sort();
   }
@@ -547,21 +561,13 @@ async function pruneBackups(bundlePath: string, kind: "automatic" | "manual", ma
   for (const name of entries.slice(maximum)) await rm(join(root, name), { recursive: true, force: true });
 }
 
-async function renameWithRetry(source: string, destination: string): Promise<void> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    try {
-      await rename(source, destination);
-      return;
-    } catch (error: unknown) {
-      if (!hasCode(error, "EPERM") && !hasCode(error, "EACCES") && !hasCode(error, "EBUSY")) {
-        throw error;
-      }
-      lastError = error;
-      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 20 * 2 ** attempt));
-    }
+/** Raised when a project bundle was written by a newer FilmLab version and
+ * must not be rewritten (or silently downgraded) by this one. */
+class NewerProjectSchemaError extends Error {
+  public constructor(schemaVersion: number) {
+    super("项目由更新版本的 FilmLab 创建（schema v" + schemaVersion + "），请先升级应用后再打开。");
+    this.name = "NewerProjectSchemaError";
   }
-  throw lastError;
 }
 
 function hasCode(error: unknown, code: string): boolean {

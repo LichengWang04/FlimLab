@@ -37,27 +37,38 @@ interface Candidate {
 export class SourceRegistry {
   private readonly paths = new Map<string, string>();
   private readonly locationIndexPath: string | undefined;
+  private locationWriteTail: Promise<unknown> = Promise.resolve();
 
   public constructor(locationIndexPath?: string) {
     this.locationIndexPath = locationIndexPath;
   }
 
+  /** Serializes read-modify-write cycles on the location index so concurrent
+   * register/relink/restore calls cannot overwrite each other's updates. */
+  private withLocationWriteLock<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.locationWriteTail.then(work, work);
+    this.locationWriteTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   public async register(filePaths: readonly string[]): Promise<readonly SourceAsset[]> {
     const assets: SourceAsset[] = [];
-    const locations = await this.readLocations();
-    for (const filePath of filePaths) {
-      const identity = await describeSource(filePath);
-      const asset: SourceAsset = {
-        id: randomUUID(),
-        name: basename(filePath),
-        extension: sourceExtension(filePath),
-        identity,
-      };
-      this.paths.set(asset.id, filePath);
-      assets.push(asset);
-      upsertLocation(locations, filePath, identity);
-    }
-    await this.writeLocations(locations);
+    await this.withLocationWriteLock(async () => {
+      const locations = await this.readLocations();
+      for (const filePath of filePaths) {
+        const identity = await describeSource(filePath);
+        const asset: SourceAsset = {
+          id: randomUUID(),
+          name: basename(filePath),
+          extension: sourceExtension(filePath),
+          identity,
+        };
+        this.paths.set(asset.id, filePath);
+        assets.push(asset);
+        upsertLocation(locations, filePath, identity);
+      }
+      await this.writeLocations(locations);
+    });
     return assets;
   }
 
@@ -75,38 +86,40 @@ export class SourceRegistry {
 
   /** Validates previously seen machine-local paths against project identities. */
   public async restore(assets: readonly SourceAsset[]): Promise<ProjectRelinkResult> {
-    const locations = await this.readLocations();
     const relinkedAssetIds: string[] = [];
     const relinkedAssets: SourceAsset[] = [];
     const missingAssets: SourceAsset[] = [];
-    let changed = false;
+    await this.withLocationWriteLock(async () => {
+      const locations = await this.readLocations();
+      let changed = false;
 
-    for (const asset of assets) {
-      if (asset.identity === undefined) {
-        missingAssets.push(asset);
-        continue;
-      }
-      const matches = locations
-        .filter((entry) => entry.fingerprint === asset.identity?.fingerprint.value)
-        .sort((left, right) => Number(right.name === asset.name) - Number(left.name === asset.name));
-      let restoredPath: string | undefined;
-      for (const entry of matches) {
-        if (await pathMatchesIdentity(entry.path, asset.identity)) {
-          restoredPath = entry.path;
-          upsertLocation(locations, entry.path, asset.identity);
-          changed = true;
-          break;
+      for (const asset of assets) {
+        if (asset.identity === undefined) {
+          missingAssets.push(asset);
+          continue;
         }
+        const matches = locations
+          .filter((entry) => entry.fingerprint === asset.identity?.fingerprint.value)
+          .sort((left, right) => Number(right.name === asset.name) - Number(left.name === asset.name));
+        let restoredPath: string | undefined;
+        for (const entry of matches) {
+          if (await pathMatchesIdentity(entry.path, asset.identity)) {
+            restoredPath = entry.path;
+            upsertLocation(locations, entry.path, asset.identity);
+            changed = true;
+            break;
+          }
+        }
+        if (restoredPath === undefined) {
+          missingAssets.push(asset);
+          continue;
+        }
+        this.paths.set(asset.id, restoredPath);
+        relinkedAssetIds.push(asset.id);
+        relinkedAssets.push(asset);
       }
-      if (restoredPath === undefined) {
-        missingAssets.push(asset);
-        continue;
-      }
-      this.paths.set(asset.id, restoredPath);
-      relinkedAssetIds.push(asset.id);
-      relinkedAssets.push(asset);
-    }
-    if (changed) await this.writeLocations(locations);
+      if (changed) await this.writeLocations(locations);
+    });
     return { relinkedAssetIds, relinkedAssets, missingAssets };
   }
 
@@ -130,44 +143,46 @@ export class SourceRegistry {
     const candidates = (await Promise.all(filePaths.map(createCandidate)))
       .filter((candidate): candidate is Candidate => candidate !== undefined);
     const fingerprintCache = new Map<string, Promise<SourceIdentity>>();
-    const usedPaths = new Set<string>();
-    const locations = await this.readLocations();
     const relinkedAssetIds: string[] = [];
     const relinkedAssets: SourceAsset[] = [];
     const missingAssets: SourceAsset[] = [];
+    await this.withLocationWriteLock(async () => {
+      const usedPaths = new Set<string>();
+      const locations = await this.readLocations();
 
-    for (const asset of assets) {
-      const possible = asset.identity === undefined
-        ? candidates.filter((candidate) => candidate.name.toLocaleLowerCase() === asset.name.toLocaleLowerCase())
-        : candidates
-          .filter((candidate) => candidate.size === asset.identity?.size)
-          .sort((left, right) => Number(right.name === asset.name) - Number(left.name === asset.name));
-      let match: { readonly candidate: Candidate; readonly identity: SourceIdentity } | undefined;
-      for (const candidate of possible) {
-        if (usedPaths.has(candidate.path)) continue;
-        const identityPromise = fingerprintCache.get(candidate.path) ?? describeSource(candidate.path);
-        fingerprintCache.set(candidate.path, identityPromise);
-        const identity = await identityPromise;
-        if (
-          asset.identity === undefined
-          || identity.fingerprint.value === asset.identity.fingerprint.value
-        ) {
-          match = { candidate, identity };
-          break;
+      for (const asset of assets) {
+        const possible = asset.identity === undefined
+          ? candidates.filter((candidate) => candidate.name.toLocaleLowerCase() === asset.name.toLocaleLowerCase())
+          : candidates
+            .filter((candidate) => candidate.size === asset.identity?.size)
+            .sort((left, right) => Number(right.name === asset.name) - Number(left.name === asset.name));
+        let match: { readonly candidate: Candidate; readonly identity: SourceIdentity } | undefined;
+        for (const candidate of possible) {
+          if (usedPaths.has(candidate.path)) continue;
+          const identityPromise = fingerprintCache.get(candidate.path) ?? describeSource(candidate.path);
+          fingerprintCache.set(candidate.path, identityPromise);
+          const identity = await identityPromise;
+          if (
+            asset.identity === undefined
+            || identity.fingerprint.value === asset.identity.fingerprint.value
+          ) {
+            match = { candidate, identity };
+            break;
+          }
         }
+        if (match === undefined) {
+          missingAssets.push(asset);
+          continue;
+        }
+        const relinkedAsset: SourceAsset = { ...asset, identity: match.identity };
+        usedPaths.add(match.candidate.path);
+        this.paths.set(asset.id, match.candidate.path);
+        upsertLocation(locations, match.candidate.path, match.identity);
+        relinkedAssetIds.push(asset.id);
+        relinkedAssets.push(relinkedAsset);
       }
-      if (match === undefined) {
-        missingAssets.push(asset);
-        continue;
-      }
-      const relinkedAsset: SourceAsset = { ...asset, identity: match.identity };
-      usedPaths.add(match.candidate.path);
-      this.paths.set(asset.id, match.candidate.path);
-      upsertLocation(locations, match.candidate.path, match.identity);
-      relinkedAssetIds.push(asset.id);
-      relinkedAssets.push(relinkedAsset);
-    }
-    await this.writeLocations(locations);
+      await this.writeLocations(locations);
+    });
     return { relinkedAssetIds, relinkedAssets, missingAssets };
   }
 

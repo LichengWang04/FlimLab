@@ -81,10 +81,20 @@ interface GpuBayerSource {
 }
 
 const assets = new Map<string, CachedAsset>();
+/** Asset ids released while a decode was still in flight; storeDecodedAsset
+ * consumes the marker so a late load cannot resurrect the raster. */
+const releasedAssetIds = new Set<string>();
 let assetGeneration = 0;
 const previewStageCache = new Map<string, PipelineSceneResult>();
 const maximumPreviewStageCacheEntries = 2;
 let rawSidecarSession: RawSidecarSession | undefined;
+/** Must track FILMLAB_RAW_WORKER_PROTOCOL_VERSION in the native sidecar;
+ * bump both together in the release workflow. */
+const rawSidecarProtocolVersion = 1;
+const sidecarHandshakeTimeoutMs = 15_000;
+/** A full-resolution demosaic can legitimately take minutes; beyond this the
+ * sidecar is considered wedged and its session is torn down. */
+const sidecarRequestTimeoutMs = 10 * 60_000;
 let observedPeakRssBytes = 0;
 const parentPort = process.parentPort;
 
@@ -133,6 +143,7 @@ async function handleMessage(value: unknown): Promise<void> {
     }
     if (value.kind === "release") {
       assets.delete(value.assetId);
+      releasedAssetIds.add(value.assetId);
       previewStageCache.clear();
       postSuccess(value.requestId, { kind: "release" });
       return;
@@ -308,6 +319,12 @@ async function loadAsset(
 
 function storeDecodedAsset(assetId: string, decoded: DecodedAsset): DecodedSourceSummary {
   const summary: DecodedSourceSummary = { assetId, ...decoded.summary };
+  // A release may have arrived while this decode was in flight; consuming
+  // the marker keeps the raster out of the cache instead of resurrecting an
+  // asset the caller deliberately dropped.
+  if (releasedAssetIds.delete(assetId)) {
+    return summary;
+  }
   assetGeneration += 1;
   assets.set(assetId, {
     source: decoded.source,
@@ -944,6 +961,11 @@ async function decodeRawSource(
     if (!response.ok) {
       throw new ImageWorkerError(response.error.code, response.error.message);
     }
+    // A decode request must always be answered by a decode result; the
+    // startup-ping response shape would indicate a protocol desync.
+    if (!("cachePath" in response.result)) {
+      throw new ImageWorkerError("RAW_SIDECAR_PROTOCOL", "RAW 解码器返回了意外的握手响应。");
+    }
     const result = response.result;
     if (
       result.cacheFormat !== (gpuBayer ? "filmlab-bayer16le-v1" : "filmlab-rgb16le-v1")
@@ -1351,6 +1373,7 @@ class RawSidecarSession {
   private stdout = "";
   private stderr = "";
   private closed = false;
+  private readonly ready: Promise<void>;
 
   private readonly executable: string;
 
@@ -1379,29 +1402,79 @@ class RawSidecarSession {
         + (this.stderr.length > 0 ? " " + this.stderr.trim() : ""),
     )));
     process.once("exit", () => this.close());
+    // Runtime protocol handshake: reject decode requests up front when the
+    // sidecar version or capability does not match, instead of relying on
+    // confusing per-decode failures from a mixed old/new install.
+    this.ready = this.verifyProtocol();
   }
 
   public matches(executable: string): boolean {
     return !this.closed && executable === this.executable;
   }
 
-  public send(request: RawSidecarRequest): Promise<RawSidecarResponse> {
+  public async send(request: RawSidecarOutbound): Promise<RawSidecarResponse> {
     if (this.closed) {
       return Promise.reject(new ImageWorkerError("RAW_SIDECAR_EXITED", "RAW 解码器会话已关闭。"));
     }
+    await this.ready;
+    return this.rawSend(request, sidecarRequestTimeoutMs);
+  }
+
+  private rawSend(request: RawSidecarOutbound, timeoutMs: number): Promise<RawSidecarResponse> {
     return new Promise((resolve, reject) => {
-      this.pending.set(request.id, { resolve, reject });
+      const timeout = setTimeout(() => {
+        this.pending.delete(request.id);
+        this.fail(new ImageWorkerError("RAW_SIDECAR_TIMEOUT", "RAW 解码器响应超时。"));
+        reject(new ImageWorkerError("RAW_SIDECAR_TIMEOUT", "RAW 解码器响应超时。"));
+      }, timeoutMs);
+      this.pending.set(request.id, {
+        resolve: (response) => {
+          clearTimeout(timeout);
+          resolve(response);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      });
       this.child.stdin.write(JSON.stringify(request) + "\n", "utf8", (error) => {
         if (error === null || error === undefined) return;
         const pending = this.pending.get(request.id);
         if (pending === undefined) return;
         this.pending.delete(request.id);
+        clearTimeout(timeout);
         pending.reject(new ImageWorkerError(
           "RAW_SIDECAR_WRITE_FAILED",
           errorMessage(error, "无法向 RAW 解码器发送请求。"),
         ));
       });
     });
+  }
+
+  private async verifyProtocol(): Promise<void> {
+    try {
+      const response = await this.rawSend(
+        { id: "ping-" + randomUUID(), type: "ping" },
+        sidecarHandshakeTimeoutMs,
+      );
+      if (!response.ok || !("protocolVersion" in response.result)) {
+        throw new ImageWorkerError("RAW_SIDECAR_PROTOCOL", "RAW 解码器协议握手失败。");
+      }
+      const result = response.result;
+      if (
+        result.protocolVersion !== rawSidecarProtocolVersion
+        || result.cacheFormat !== "filmlab-rgb16le-v1"
+        || !result.supportedCfa.includes("bayer-2x2")
+      ) {
+        throw new ImageWorkerError(
+          "RAW_SIDECAR_PROTOCOL",
+          "RAW 解码器协议版本或能力不匹配；请重新安装当前版本的 FilmLab。",
+        );
+      }
+    } catch (error: unknown) {
+      this.close();
+      throw error;
+    }
   }
 
   public close(): void {
@@ -1467,6 +1540,18 @@ function parseRawSidecarResponse(value: unknown): RawSidecarResponse {
   const result = response.result as Record<string, unknown> | undefined;
   if (result === undefined) {
     throw new Error("RAW success response misses result.");
+  }
+  // The startup ping answers with protocol metadata instead of a decode.
+  if (typeof result.protocolVersion === "number") {
+    return {
+      id: response.id,
+      ok: true,
+      result: {
+        protocolVersion: result.protocolVersion,
+        cacheFormat: requireString(result.cacheFormat, "cacheFormat"),
+        supportedCfa: Array.isArray(result.supportedCfa) ? result.supportedCfa : [],
+      },
+    };
   }
   const camera = parseRawCamera(result.metadata);
   return {
@@ -1643,6 +1728,13 @@ interface RawSidecarRequest {
   };
 }
 
+interface RawSidecarPingRequest {
+  readonly id: string;
+  readonly type: "ping";
+}
+
+type RawSidecarOutbound = RawSidecarRequest | RawSidecarPingRequest;
+
 interface DecodedAsset {
   readonly source: Raster;
   readonly gpuBayer?: GpuBayerSource;
@@ -1689,6 +1781,15 @@ type RawSidecarResponse =
         readonly bayerPattern?: unknown;
         readonly camera?: SourceCameraIdentity;
         readonly photonTransfer?: PhotonTransferModel;
+      };
+    }
+  | {
+      readonly id: string;
+      readonly ok: true;
+      readonly result: {
+        readonly protocolVersion: number;
+        readonly cacheFormat: string;
+        readonly supportedCfa: readonly unknown[];
       };
     }
   | { readonly id: string; readonly ok: false; readonly error: { readonly code: string; readonly message: string } };

@@ -1,11 +1,12 @@
-import { createHash } from "node:crypto";
-import { copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { spawn } from "node:child_process";
 
 import { app, ipcMain, type BrowserWindow } from "electron";
 import { autoUpdater, type ProgressInfo, type UpdateDownloadedEvent, type UpdateInfo } from "electron-updater";
 
+import { renameWithRetry } from "./atomic-output.ts";
 import type { UpdateStatus } from "../shared/contracts.ts";
 
 const statusChannel = "update:status";
@@ -13,6 +14,7 @@ const checkChannel = "update:check";
 const installChannel = "update:install";
 const rollbackChannel = "update:rollback";
 const changedChannel = "update:status-changed";
+const maximumCachedInstallers = 3;
 
 interface UpdateStateDocument {
   readonly schemaVersion: 1;
@@ -45,6 +47,7 @@ export class UpdateService {
   private status: UpdateStatus;
   private downloadedVersion: string | undefined;
   private checking = false;
+  private stateWriteTail: Promise<void> = Promise.resolve();
 
   public constructor(
     private readonly getMainWindow: () => BrowserWindow | null,
@@ -99,6 +102,7 @@ export class UpdateService {
         pendingVersion: undefined,
         failedLaunches: 0,
       };
+      await this.pruneCachedInstallers();
       await this.persistState();
       this.publish({ ...this.status, rollbackVersion: this.rollbackTarget()?.version });
     }
@@ -216,6 +220,7 @@ export class UpdateService {
       ...this.state,
       cachedInstallers: { ...this.state.cachedInstallers, [event.version]: destination },
     };
+    await this.pruneCachedInstallers();
     await this.persistState();
   }
 
@@ -223,7 +228,38 @@ export class UpdateService {
     const version = this.state.previousVersion ?? this.state.lastKnownGoodVersion;
     if (version === undefined || version === app.getVersion()) return undefined;
     const installer = this.state.cachedInstallers[version];
-    return installer === undefined ? undefined : { version, installer };
+    if (installer === undefined) return undefined;
+    // The state file lives in user-writable storage; only accept paths that
+    // still resolve inside our installer cache directory.
+    if (join(this.cacheDirectory, basename(installer)) !== installer) return undefined;
+    return { version, installer };
+  }
+
+  /** Drops entries whose files are gone and deletes installers beyond the
+   * most recent few so the cache directory cannot grow without bound. */
+  private async pruneCachedInstallers(): Promise<void> {
+    const existing: { readonly version: string; readonly path: string; readonly mtimeMs: number }[] = [];
+    for (const [version, path] of Object.entries(this.state.cachedInstallers)) {
+      if (join(this.cacheDirectory, basename(path)) !== path) continue;
+      try {
+        const details = await stat(path);
+        if (details.isFile() && details.size > 0) {
+          existing.push({ version, path, mtimeMs: details.mtimeMs });
+        }
+      } catch {
+        // Missing file: drop the entry below.
+      }
+    }
+    existing.sort((left, right) => right.mtimeMs - left.mtimeMs);
+    const kept: Record<string, string> = {};
+    for (const entry of existing) {
+      if (Object.keys(kept).length < maximumCachedInstallers) {
+        kept[entry.version] = entry.path;
+      } else {
+        await rm(entry.path, { force: true }).catch(() => undefined);
+      }
+    }
+    this.state = { ...this.state, cachedInstallers: kept };
   }
 
   private async startRollback(automatic: boolean): Promise<void> {
@@ -290,10 +326,23 @@ export class UpdateService {
     }
   }
 
-  private async persistState(): Promise<void> {
-    await mkdir(this.root, { recursive: true });
-    const temporary = this.statePath + ".tmp";
-    await writeFile(temporary, JSON.stringify(this.state, null, 2) + "\n", "utf8");
-    await rename(temporary, this.statePath);
+  private persistState(): Promise<void> {
+    // Serialize through a tail promise and use a unique temporary name:
+    // initialize/markHealthy/cacheDownloadedInstaller can overlap, and a
+    // fixed .tmp suffix would let one writer rename away another's file.
+    const snapshot = JSON.stringify(this.state, null, 2) + "\n";
+    const pending = this.stateWriteTail.then(async () => {
+      await mkdir(this.root, { recursive: true });
+      const temporary = this.statePath + "." + randomUUID() + ".tmp";
+      try {
+        await writeFile(temporary, snapshot, "utf8");
+        await renameWithRetry(temporary, this.statePath);
+      } catch (error: unknown) {
+        await rm(temporary, { force: true }).catch(() => undefined);
+        throw error;
+      }
+    });
+    this.stateWriteTail = pending.catch(() => undefined);
+    return pending;
   }
 }

@@ -81,13 +81,17 @@ function interpolate(left: CurvePoint, right: CurvePoint, input: number): number
  * Continues a curve past its last point with the terminal segment's log10
  * slope, i.e. as an exponential in linear space. Falls back to the endpoint
  * value when either terminal ordinate is non-positive (log slope undefined).
+ * Output is capped so a hostile imported curve with an extreme terminal
+ * slope cannot overflow the tone stage into Infinity.
  */
+const MAX_EXTRAPOLATED_CURVE_OUTPUT = 1e8;
+
 function extrapolateCurveEnd(points: readonly CurvePoint[], input: number): number {
   const last = points[points.length - 1];
   const previous = points[points.length - 2];
   if (last.y > 0 && previous.y > 0) {
     const slope = (Math.log10(last.y) - Math.log10(previous.y)) / (last.x - previous.x);
-    return last.y * Math.pow(10, slope * (input - last.x));
+    return Math.min(MAX_EXTRAPOLATED_CURVE_OUTPUT, last.y * Math.pow(10, slope * (input - last.x)));
   }
   return last.y;
 }

@@ -1746,7 +1746,11 @@ export function App(): ReactNode {
         throw new Error("图像进程没有返回自动片基估算结果。");
       }
       const currentOwner = activeSelectionRef.current;
-      if (currentOwner.rollId !== owner.rollId || currentOwner.assetId !== owner.assetId) return;
+      if (
+        currentOwner.rollId !== owner.rollId
+        || currentOwner.assetId !== owner.assetId
+        || result.revision !== estimateRevision
+      ) return;
       recordRecipeChange();
       setProcessing((current) => ({
         ...current,
@@ -1786,7 +1790,7 @@ export function App(): ReactNode {
     }
     const nextRevision = revision.current + 1;
     revision.current = nextRevision;
-    return api.renderPreview({
+    const result = await api.renderPreview({
       revision: nextRevision,
       assetId: activeAssetId,
       maxEdge: previewPerformanceProfile.analysisMaxEdge,
@@ -1799,6 +1803,13 @@ export function App(): ReactNode {
         geometry: { ...recipe.geometry, crop: undefined },
       },
     });
+    // The owner/generation guard runs in the caller; here we additionally
+    // reject a stale echo so crop/straighten flows never apply analysis
+    // computed for an older request revision.
+    if (result.revision !== nextRevision) {
+      throw new Error("几何分析预览已过期，请重试。");
+    }
+    return result;
   };
 
   const autoCrop = async (): Promise<void> => {
@@ -3334,7 +3345,7 @@ export function App(): ReactNode {
               {masterExportChoices.map((choice) => <option key={choice.format} value={choice.format}>{choice.label}</option>)}
             </select>
           </label>
-          <RestorationInspector processing={processing} onChange={updateProcessing} />
+          <RestorationInspector processing={processing} onBegin={recordRecipeChange} onUpdate={setProcessing} />
           {batchJob === undefined ? null : (
             <div className="batch-status" aria-live="polite">
               <div className="batch-status-heading">
@@ -4473,14 +4484,18 @@ function Slider({
 
 function RestorationInspector({
   processing,
-  onChange,
+  onBegin,
+  onUpdate,
 }: {
   readonly processing: ProcessingRecipe;
-  readonly onChange: (update: (current: ProcessingRecipe) => ProcessingRecipe) => void;
+  /** Records one undo snapshot per drag interaction, not per input tick. */
+  readonly onBegin: () => void;
+  readonly onUpdate: (update: (current: ProcessingRecipe) => ProcessingRecipe) => void;
 }): ReactNode {
   const restoration = processing.restoration;
   const setToggle = (key: "dust" | "scratches", enabled: boolean): void => {
-    onChange((current) => ({
+    onBegin();
+    onUpdate((current) => ({
       ...current,
       restoration: { ...current.restoration, [key]: enabled },
     }));
@@ -4489,8 +4504,8 @@ function RestorationInspector({
     <div className="mode-stack">
       <label className="pending-row"><span>自动除尘</span><input type="checkbox" checked={restoration.dust} onChange={(event) => setToggle("dust", event.currentTarget.checked)} /></label>
       <label className="pending-row"><span>划痕修复</span><input type="checkbox" checked={restoration.scratches} onChange={(event) => setToggle("scratches", event.currentTarget.checked)} /></label>
-      <Slider label="保边降噪" value={restoration.denoise} min={0} max={1} step={0.05} display={restoration.denoise.toFixed(2)} onChange={(value) => onChange((current) => ({ ...current, restoration: { ...current.restoration, denoise: value } }))} />
-      <Slider label="锐化" value={restoration.sharpen} min={0} max={2} step={0.05} display={restoration.sharpen.toFixed(2)} onChange={(value) => onChange((current) => ({ ...current, restoration: { ...current.restoration, sharpen: value } }))} />
+      <InteractiveSlider label="保边降噪" value={restoration.denoise} min={0} max={1} step={0.05} display={(value) => value.toFixed(2)} onBegin={onBegin} onPreview={(value) => onUpdate((current) => ({ ...current, restoration: { ...current.restoration, denoise: value } }))} onCommit={(value) => onUpdate((current) => ({ ...current, restoration: { ...current.restoration, denoise: value } }))} onCancel={(value) => onUpdate((current) => ({ ...current, restoration: { ...current.restoration, denoise: value } }))} />
+      <InteractiveSlider label="锐化" value={restoration.sharpen} min={0} max={2} step={0.05} display={(value) => value.toFixed(2)} onBegin={onBegin} onPreview={(value) => onUpdate((current) => ({ ...current, restoration: { ...current.restoration, sharpen: value } }))} onCommit={(value) => onUpdate((current) => ({ ...current, restoration: { ...current.restoration, sharpen: value } }))} onCancel={(value) => onUpdate((current) => ({ ...current, restoration: { ...current.restoration, sharpen: value } }))} />
     </div>
   );
 }

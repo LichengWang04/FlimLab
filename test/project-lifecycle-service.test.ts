@@ -110,6 +110,22 @@ test("project lifecycle opens an old schema as a read-only migration preview", a
   assert.equal(reopened.project.rolls[0]?.title, "迁移后");
 });
 
+test("project lifecycle refuses projects from a newer schema instead of downgrading", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "filmlab-lifecycle-newer-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
+
+  const bundlePath = join(root, "projects", "future.filmlab");
+  await mkdir(bundlePath, { recursive: true });
+  await writeFile(join(bundlePath, "project.json"), JSON.stringify({
+    schemaVersion: projectSchemaVersion + 1,
+    rolls: [],
+    updatedAt: new Date().toISOString(),
+  }), "utf8");
+
+  const service = createService(root);
+  await assert.rejects(service.open(bundlePath, false), /更新版本/);
+});
+
 test("project lifecycle recovers a corrupted main file from the latest valid backup", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "filmlab-lifecycle-recovery-"));
   context.after(async () => rm(root, { recursive: true, force: true }));

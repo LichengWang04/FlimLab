@@ -33,11 +33,15 @@ export function rotateRightAngles(
   source: Raster,
   rotation: 0 | 90 | 180 | 270,
 ): Raster {
-  if (rotation === 0) {
+  // Normalize defensively so a value that bypasses TypeScript (foreign JSON)
+  // snaps to a deterministic right angle instead of silently hitting the
+  // final else branch as "270" here and "0" in the WebGL path.
+  const normalizedRotation = (((Math.round(rotation / 90) % 4) + 4) % 4) * 90 as 0 | 90 | 180 | 270;
+  if (normalizedRotation === 0) {
     return source;
   }
 
-  const swapsAxes = rotation === 90 || rotation === 270;
+  const swapsAxes = normalizedRotation === 90 || normalizedRotation === 270;
   const target = new Raster(
     swapsAxes ? source.height : source.width,
     swapsAxes ? source.width : source.height,
@@ -49,10 +53,10 @@ export function rotateRightAngles(
       const from = (y * source.width + x) * 3;
       let targetX: number;
       let targetY: number;
-      if (rotation === 90) {
+      if (normalizedRotation === 90) {
         targetX = source.height - 1 - y;
         targetY = x;
-      } else if (rotation === 180) {
+      } else if (normalizedRotation === 180) {
         targetX = source.width - 1 - x;
         targetY = source.height - 1 - y;
       } else {

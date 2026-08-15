@@ -706,7 +706,9 @@ function normalizeUnsharp(settings: UnsharpSettings): Required<UnsharpSettings> 
     radius,
     sigma: positiveFinite(settings.sigma ?? Math.max(radius / 1.5, 0.5), "sigma", false),
     amount: positiveFinite(settings.amount ?? 0.75, "amount", true),
-    threshold: positiveFinite(settings.threshold ?? 0.005, "threshold", true),
+    // Matches the worker's explicit sharpen threshold and the WebGL shader
+    // constant so direct core callers and the production path agree.
+    threshold: positiveFinite(settings.threshold ?? 0.004, "threshold", true),
   };
 }
 

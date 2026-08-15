@@ -33,9 +33,9 @@ export function toneMap(
   const target = new Raster(scene.width, scene.height, "display-linear-rgb");
 
   for (let offset = 0; offset < scene.data.length; offset += 3) {
-    const normalizedRed = (scene.data[offset] * exposure - settings.blackPoint) / range;
-    const normalizedGreen = (scene.data[offset + 1] * exposure - settings.blackPoint) / range;
-    const normalizedBlue = (scene.data[offset + 2] * exposure - settings.blackPoint) / range;
+    const normalizedRed = sanitizeNormalized((scene.data[offset] * exposure - settings.blackPoint) / range);
+    const normalizedGreen = sanitizeNormalized((scene.data[offset + 1] * exposure - settings.blackPoint) / range);
+    const normalizedBlue = sanitizeNormalized((scene.data[offset + 2] * exposure - settings.blackPoint) / range);
     const sourceLuma = Math.max(0, luminance(normalizedRed, normalizedGreen, normalizedBlue));
     const mappedLuma = mapLuminance(sourceLuma, settings);
     const scale = sourceLuma > EPSILON ? mappedLuma / sourceLuma : 0;
@@ -77,9 +77,9 @@ export function toneMapToSrgbRgba(
   const range = settings.whitePoint - settings.blackPoint;
   const output = new Uint8Array(scene.width * scene.height * 4);
   for (let inputOffset = 0, outputOffset = 0; inputOffset < scene.data.length; inputOffset += 3, outputOffset += 4) {
-    const normalizedRed = (scene.data[inputOffset] * exposure - settings.blackPoint) / range;
-    const normalizedGreen = (scene.data[inputOffset + 1] * exposure - settings.blackPoint) / range;
-    const normalizedBlue = (scene.data[inputOffset + 2] * exposure - settings.blackPoint) / range;
+    const normalizedRed = sanitizeNormalized((scene.data[inputOffset] * exposure - settings.blackPoint) / range);
+    const normalizedGreen = sanitizeNormalized((scene.data[inputOffset + 1] * exposure - settings.blackPoint) / range);
+    const normalizedBlue = sanitizeNormalized((scene.data[inputOffset + 2] * exposure - settings.blackPoint) / range);
     const sourceLuma = Math.max(0, luminance(normalizedRed, normalizedGreen, normalizedBlue));
     const mappedLuma = mapLuminance(sourceLuma, settings);
     const scale = sourceLuma > EPSILON ? mappedLuma / sourceLuma : 0;
@@ -142,6 +142,19 @@ function displayGamutScale(red: number, green: number, blue: number): number {
 
 function luminance(red: number, green: number, blue: number): number {
   return red * LUMA[0] + green * LUMA[1] + blue * LUMA[2];
+}
+
+const SANITIZED_SCENE_CEILING = 1e6;
+
+/**
+ * Maps non-finite normalized scene values to finite display values so a
+ * corrupted or hostile upstream value (e.g. Infinity from extreme curve
+ * extrapolation) cannot turn into NaN through `Infinity * 0` luminance
+ * scaling. Positive infinity saturates to white; NaN floors to black.
+ */
+function sanitizeNormalized(value: number): number {
+  if (Number.isFinite(value)) return value;
+  return value > 0 ? SANITIZED_SCENE_CEILING : 0;
 }
 
 function validateToneSettings(settings: ToneSettings): void {

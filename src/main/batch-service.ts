@@ -46,9 +46,25 @@ interface BatchJob {
 export class BatchService {
   private readonly jobs = new Map<string, BatchJob>();
   private readonly processing: ProcessingService;
+  /** Output names currently claimed by a running export, so two concurrent
+   * jobs into the same directory cannot both pick the same free name. */
+  private readonly reservedOutputPaths = new Set<string>();
+  /** Serializes name selection: the disk check and the claim must be one
+   * atomic step, or two jobs can both pass the check before either claims. */
+  private selectionTail: Promise<void> = Promise.resolve();
 
   public constructor(processing: ProcessingService) {
     this.processing = processing;
+  }
+
+  private reserveOutputPath(directory: string, preferredName: string): Promise<string> {
+    const run = this.selectionTail.then(async () => {
+      const outputPath = await findAvailableOutputPath(directory, preferredName, this.reservedOutputPaths);
+      this.reservedOutputPaths.add(outputPath);
+      return outputPath;
+    });
+    this.selectionTail = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   public start(
@@ -110,7 +126,7 @@ export class BatchService {
           return;
         }
         const source = job.sources[index];
-        const outputPath = await findAvailableOutputPath(
+        const outputPath = await this.reserveOutputPath(
           job.outputDirectory,
           makeOutputName(source.sourceName, index, job.format),
         );
@@ -137,6 +153,9 @@ export class BatchService {
           });
           continue;
         } finally {
+          // The claim was only needed while picking the name; after the
+          // attempt the on-disk file (or its absence) decides availability.
+          this.reservedOutputPaths.delete(outputPath);
           await this.processing.release(source.item.assetId).catch(() => undefined);
         }
         job = this.requireJob(id);
@@ -215,12 +234,19 @@ function makeOutputName(sourceName: string, index: number, format: MasterExportF
   return String(index + 1).padStart(3, "0") + "-" + stem + "-positive" + outputExtension;
 }
 
-async function findAvailableOutputPath(directory: string, preferredName: string): Promise<string> {
+async function findAvailableOutputPath(
+  directory: string,
+  preferredName: string,
+  reserved: ReadonlySet<string>,
+): Promise<string> {
   const extension = extname(preferredName);
   const stem = preferredName.slice(0, -extension.length);
   for (let suffix = 1; suffix <= 10000; suffix += 1) {
     const candidateName = suffix === 1 ? preferredName : stem + "-" + suffix + extension;
     const candidate = join(directory, candidateName);
+    // The in-process reservation closes the two-concurrent-jobs race; the
+    // access() check below remains best-effort against other processes.
+    if (reserved.has(candidate)) continue;
     try {
       await access(candidate);
     } catch (error) {

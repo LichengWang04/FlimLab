@@ -18,6 +18,12 @@ import {
 import imageWorkerModulePath from "./image-worker?modulePath";
 
 const workerStartTimeoutMs = 15_000;
+/** Full-resolution decode + CPU repair + encode can legitimately take
+ * minutes; anything beyond this means the utility process is wedged. */
+const workerRequestTimeoutMs = 15 * 60_000;
+/** Upper bound on cached decoded frames; beyond this the least recently
+ * used asset is released in the worker to keep long sessions bounded. */
+const maximumLoadedAssets = 16;
 
 /**
  * Owns the long-lived Electron utility process.  It keeps decoded, linear
@@ -119,6 +125,38 @@ export class ProcessingService {
     if (response.kind !== "release") throw new Error("图像处理进程返回了意外的释放响应。");
   }
 
+  /**
+   * Keeps the decoded-frame cache bounded for long browsing/export sessions.
+   * Full-resolution rasters are large; without eviction a large roll would
+   * grow the utility-process heap without limit. Entries with an in-flight
+   * decode are skipped so their task bookkeeping stays consistent.
+   */
+  private evictLeastRecentlyUsed(exceptAssetId: string): void {
+    while (this.loadedPaths.size > maximumLoadedAssets) {
+      let oldestAssetId: string | undefined;
+      let oldestUsedAt = Number.POSITIVE_INFINITY;
+      for (const [assetId, loaded] of this.loadedPaths) {
+        if (assetId === exceptAssetId) continue;
+        if (this.hasInFlightLoad(assetId)) continue;
+        if (loaded.lastUsedAt < oldestUsedAt) {
+          oldestUsedAt = loaded.lastUsedAt;
+          oldestAssetId = assetId;
+        }
+      }
+      if (oldestAssetId === undefined) return;
+      this.loadedPaths.delete(oldestAssetId);
+      void this.release(oldestAssetId).catch(() => undefined);
+    }
+  }
+
+  private hasInFlightLoad(assetId: string): boolean {
+    const prefix = assetId + "\u0000";
+    for (const key of this.loadTasks.keys()) {
+      if (key.startsWith(prefix)) return true;
+    }
+    return false;
+  }
+
   public async simulateCrashForAcceptance(): Promise<void> {
     if (process.env.FILMLAB_A7RV_ACCEPTANCE_SPEC === undefined) {
       throw new Error("Utility crash injection is available only to the A7R V acceptance runner.");
@@ -213,6 +251,7 @@ export class ProcessingService {
       // metadata, colour-trust evaluation) still expect the real source
       // summary. A synthetic placeholder would silently misreport the
       // decoder/domain/fingerprint and could wrongly reject DNG exports.
+      loaded.lastUsedAt = Date.now();
       return { ...loaded.summary };
     }
 
@@ -240,13 +279,20 @@ export class ProcessingService {
         if (response.kind !== "load") {
           throw new Error("图像处理进程返回了意外的解码响应。");
         }
-        this.loadedPaths.set(assetId, {
-          sourcePath,
-          previewMaxEdge,
-          gpuBayer: response.result.sourceDomain === "camera-linear-bayer",
-          gpuBayerAttempted: preferGpuBayer,
-          summary: response.result,
-        });
+        // release() may have run while this decode was in flight; it deletes
+        // the task entry, so re-registering here would resurrect an asset
+        // the caller deliberately dropped.
+        if (this.loadTasks.has(taskKey)) {
+          this.loadedPaths.set(assetId, {
+            sourcePath,
+            previewMaxEdge,
+            gpuBayer: response.result.sourceDomain === "camera-linear-bayer",
+            gpuBayerAttempted: preferGpuBayer,
+            summary: response.result,
+            lastUsedAt: Date.now(),
+          });
+          this.evictLeastRecentlyUsed(assetId);
+        }
         return response.result;
       })
       .finally(() => this.loadTasks.delete(taskKey));
@@ -259,14 +305,44 @@ export class ProcessingService {
     const requestId = randomUUID();
     const payload = { ...message, requestId };
     return new Promise((resolve, reject) => {
-      this.pending.set(requestId, { resolve, reject });
+      // A hung utility process (frozen sidecar, stuck codec) must not leave
+      // the preview/export promise pending forever. Kill the worker so the
+      // next command forks a clean one.
+      const timeout = setTimeout(() => {
+        this.pending.delete(requestId);
+        this.abandonWorker(new Error("图像处理进程响应超时。"));
+        reject(new Error("图像处理进程响应超时。"));
+      }, workerRequestTimeoutMs);
+      this.pending.set(requestId, {
+        resolve: (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        reject: (error: unknown) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      });
       try {
         worker.postMessage(payload);
       } catch (error: unknown) {
+        clearTimeout(timeout);
         this.pending.delete(requestId);
         reject(error);
       }
     });
+  }
+
+  private abandonWorker(reason: Error): void {
+    if (this.worker === null) return;
+    try {
+      this.worker.kill();
+    } catch {
+      // Best effort; the process may already be gone.
+    }
+    this.worker = null;
+    this.workerPromise = null;
+    this.rejectPending(reason);
   }
 
   /**
@@ -405,6 +481,8 @@ interface LoadedPath {
   readonly gpuBayerAttempted: boolean;
   /** The real decode summary returned by the first load of this path. */
   readonly summary: DecodedSourceSummary;
+  /** Touched on every cache hit for least-recently-used eviction. */
+  lastUsedAt: number;
 }
 
 interface PendingRequest {

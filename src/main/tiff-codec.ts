@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { deflate } from "node:zlib";
 
 import sharp from "sharp";
-import { assertWithinTestWriteLimit, atomicTemporaryPath, removeStaleOutputArtifacts } from "./atomic-output.ts";
+import { assertWithinTestWriteLimit, atomicTemporaryPath, removeStaleOutputArtifacts, syncDirectory, syncFile } from "./atomic-output.ts";
 
 /**
  * RGB samples produced by FilmLab's tone stage. Values are linear-light,
@@ -167,7 +167,9 @@ export async function writeDisplayLinearTiff(
   try {
     assertWithinTestWriteLimit(options.testWriteLimitBytes, encoded.byteLength);
     await writeFile(temporaryPath, encoded, { flag: "wx" });
+    await syncFile(temporaryPath);
     await rename(temporaryPath, options.outputPath);
+    await syncDirectory(outputDirectory);
   } finally {
     await rm(temporaryPath, { force: true });
   }
@@ -195,7 +197,9 @@ export async function writeSrgb16Tiff(
   try {
     assertWithinTestWriteLimit(options.testWriteLimitBytes, encoded.byteLength);
     await writeFile(temporaryPath, encoded, { flag: "wx" });
+    await syncFile(temporaryPath);
     await rename(temporaryPath, options.outputPath);
+    await syncDirectory(outputDirectory);
   } finally {
     await rm(temporaryPath, { force: true });
   }
@@ -429,6 +433,7 @@ export class StreamingSrgb16TiffWriter {
       await this.handle.close();
       this.closed = true;
       await rename(this.temporaryPath, this.options.outputPath);
+      await syncDirectory(dirname(this.options.outputPath));
       return {
         outputPath: this.options.outputPath,
         byteLength: this.position,

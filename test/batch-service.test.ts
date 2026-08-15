@@ -23,6 +23,7 @@ class RecordingProcessingService {
   public maximumActive = 0;
   public readonly releasedAssetIds: string[] = [];
   public onExportStarted?: (assetId: string) => void;
+  public exportGateMs = 5;
   private active = 0;
 
   public async exportTiff(
@@ -34,7 +35,7 @@ class RecordingProcessingService {
     this.maximumActive = Math.max(this.maximumActive, this.active);
     try {
       this.onExportStarted?.(assetId);
-      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      await new Promise<void>((resolve) => setTimeout(resolve, this.exportGateMs));
       this.calls.push({ assetId, sourcePath, request });
     } finally {
       this.active -= 1;
@@ -219,6 +220,37 @@ test("batch cancellation finishes at most the active file and starts no later so
   assert.equal(completed.state, "cancelled");
   assert.ok(processing.calls.length <= 1);
   assert.equal(processing.calls.some((call) => call.assetId === "frame-b"), false);
+});
+
+test("concurrent batch jobs into one directory reserve distinct output names", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "filmlab-batch-reserve-"));
+  context.after(async () => rm(directory, { recursive: true, force: true }));
+
+  const processing = new RecordingProcessingService();
+  // Hold the first export open so the second job picks its name while the
+  // first claim is still live — the pre-fix code selected the same name.
+  processing.exportGateMs = 100;
+  const service = new BatchService(processing as unknown as ProcessingService);
+  const source = (assetId: string): BatchSource => ({
+    item: {
+      assetId,
+      mode: "generic",
+      tone: { exposureStops: 0, contrast: 1, highlightCompression: 0, saturation: 1 },
+      processing: defaultProcessingRecipe,
+    },
+    sourcePath: "C:\\sources\\" + assetId + ".arw",
+    sourceName: "scan.tif",
+  });
+
+  const first = service.start([source("frame-a")], directory);
+  const second = service.start([source("frame-b")], directory);
+  const completedFirst = await waitForTerminalJob(service, first.id);
+  const completedSecond = await waitForTerminalJob(service, second.id);
+
+  assert.equal(completedFirst.state, "completed");
+  assert.equal(completedSecond.state, "completed");
+  const names = processing.calls.map((call) => basename(call.request.outputPath ?? ""));
+  assert.equal(new Set(names).size, 2);
 });
 
 async function waitForTerminalJob(

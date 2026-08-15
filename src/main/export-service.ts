@@ -1,6 +1,8 @@
-import { writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { BrowserWindow, dialog } from "electron";
+
+import { atomicTemporaryPath, renameWithRetry, syncDirectory, syncFile } from "./atomic-output.ts";
 
 import type {
   PreviewPngExportRequest,
@@ -33,7 +35,16 @@ export async function exportPreviewPng(
   }
 
   const outputPath = forcePngExtension(selection.filePath);
-  await writeFile(outputPath, request.png);
+  const temporaryPath = atomicTemporaryPath(outputPath);
+  await mkdir(dirname(outputPath), { recursive: true });
+  try {
+    await writeFile(temporaryPath, request.png, { flag: "wx" });
+    await syncFile(temporaryPath);
+    await renameWithRetry(temporaryPath, outputPath);
+    await syncDirectory(dirname(outputPath));
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
   return {
     saved: true,
     fileName: basename(outputPath),

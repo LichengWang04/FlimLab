@@ -6,6 +6,7 @@ import {
   applyGeometry,
   estimateFilmBase,
   estimateDisplayWhitePoint,
+  fitColorChartCurves,
   measureDensityAnchors,
   processFilm,
   processFilmToScene,
@@ -18,7 +19,7 @@ import {
   toneMap,
   toneMapToSrgbRgba,
 } from "../src/core/index.ts";
-import type { CalibrationProfile, CurveSet, Lut3d, Matrix3 } from "../src/core/index.ts";
+import type { CalibrationProfile, ColorChartPatch, CurveSet, Lut3d, Matrix3 } from "../src/core/index.ts";
 import { estimateAlignmentFromRgba } from "../src/renderer/src/alignment.ts";
 import { estimateFilmFrameCropFromRgba } from "../src/renderer/src/film-frame.ts";
 
@@ -219,7 +220,9 @@ test("generic mode uses a neutral Dmax anchor to align channel response", () => 
   const density = raster("relative-density", 1, 1, [0.4, 0.5, 0.6]);
   const result = applyFilmTransform(
     density,
-    { kind: "generic" },
+    // The default pre-saturation separates chroma before the per-channel
+    // anchor normalization; pin it to 1 so this test isolates alignment.
+    { kind: "generic", preSaturation: 1 },
     undefined,
     [0.4, 0.5, 0.6],
   );
@@ -271,6 +274,64 @@ test("generic mode caps amplification beyond a small channel anchor", () => {
   near(result.data[0], Math.pow(10, 4) - 1);
   near(result.data[1], Math.pow(10, 4) - 1);
   near(result.data[2], Math.pow(10, 4) - 1);
+});
+
+test("tone mapping sanitizes non-finite scene values instead of propagating NaN", () => {
+  const scene = raster("scene-linear-rgb", 2, 1, [
+    Number.POSITIVE_INFINITY, 0.5, 0.5,
+    Number.NaN, 0.5, 0.5,
+  ]);
+  const mapped = toneMap(scene);
+
+  for (let index = 0; index < mapped.data.length; index += 1) {
+    assert.ok(Number.isFinite(mapped.data[index]), "tone output must stay finite");
+  }
+  // Positive infinity saturates to the display ceiling; NaN floors to black.
+  near(mapped.data[0], 1 - 1 / 65_536);
+  assert.equal(mapped.data[3], 0);
+});
+
+test("curve extrapolation caps hostile terminal slopes", () => {
+  const result = sampleMonotonicCurve([
+    { x: 0, y: 1 },
+    { x: 0.001, y: 1e6 },
+  ], 0.002);
+
+  // 1e6 * 10^(6 / 0.001 * 0.001) would reach 1e12 without the cap.
+  assert.ok(Number.isFinite(result));
+  near(result, 1e8);
+});
+
+test("film-base sampling reports rejected outliers when fewer than three joint inliers survive", () => {
+  const values: number[] = [];
+  for (let pixel = 0; pixel < 32; pixel += 1) {
+    if (pixel < 10) values.push(0.7, 0.25, 0.125);
+    else if (pixel < 20) values.push(0.5, 0.45, 0.125);
+    else if (pixel < 30) values.push(0.5, 0.25, 0.325);
+    else values.push(0.5, 0.25, 0.125);
+  }
+  const sample = sampleFilmBase(
+    raster("transmission-linear-rgb", 32, 1, values),
+    { x: 0, y: 0, width: 1, height: 1 },
+  );
+
+  assert.equal(sample.sampleCount, 32);
+  assert.equal(sample.rejectedCount, 30);
+  near(sample.confidence, 2 / 32);
+});
+
+test("color-chart curve fitting rejects non-finite samples explicitly", () => {
+  const valid: ColorChartPatch[] = [
+    { source: [0.1, 0.2, 0.3], target: [0.2, 0.3, 0.4] },
+    { source: [0.4, 0.5, 0.6], target: [0.5, 0.6, 0.7] },
+    { source: [0.7, 0.8, 0.9], target: [0.8, 0.9, 1.0] },
+  ];
+  const poisoned: ColorChartPatch[] = [
+    ...valid,
+    { source: [Number.NaN, 0.2, 0.3], target: [0.2, 0.3, 0.4] },
+  ];
+  assert.throws(() => fitColorChartCurves(poisoned), /finite/);
+  assert.ok(fitColorChartCurves(valid).length === 3);
 });
 
 test("calibrated mode applies its curves then its colour matrix", () => {

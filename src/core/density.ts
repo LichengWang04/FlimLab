@@ -70,12 +70,20 @@ export function sampleFilmBase(linearCapture: Raster, roi: NormalizedRoi): BaseS
     throw new Error("Film-base ROI contains no usable positive transmission samples.");
   }
 
+  // When fewer than three inliers survive, the unfiltered median stands in,
+  // but the outlier share must still be reported so callers can warn about a
+  // non-uniform ROI instead of seeing a misleading perfect confidence.
+  const inlierConfidence = filteredCount / samples.count;
   return {
     rgb: base,
     sampleCount: usableCount,
-    rejectedCount: samples.count - usableCount,
+    rejectedCount: useFiltered
+      ? samples.count - usableCount
+      : filteredCount > 0
+        ? samples.count - filteredCount
+        : samples.count,
     method: "roi",
-    confidence: usableCount / samples.count,
+    confidence: useFiltered ? inlierConfidence : filteredCount > 0 ? inlierConfidence : 0,
   };
 }
 

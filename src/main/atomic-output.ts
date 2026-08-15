@@ -1,8 +1,59 @@
 import { randomUUID } from "node:crypto";
-import { readdir, rm, stat } from "node:fs/promises";
+import { open, readdir, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 const legacyStaleAgeMs = 24 * 60 * 60 * 1_000;
+
+/** Flushes a just-written file so a following rename cannot publish an empty
+ * or partially written artifact after a power loss. */
+export async function syncFile(path: string): Promise<void> {
+  let handle;
+  try {
+    handle = await open(path, "r+");
+    await handle.sync();
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+/** Flushes a directory entry so a completed rename survives a power loss.
+ * Some platforms/filesystems reject directory fsync; treat that as
+ * best-effort rather than failing the export. */
+export async function syncDirectory(directory: string): Promise<void> {
+  let handle;
+  try {
+    handle = await open(directory, "r");
+    await handle.sync();
+  } catch (error: unknown) {
+    if (!hasCode(error, "EINVAL") && !hasCode(error, "EPERM") && !hasCode(error, "EACCES") && !hasCode(error, "ENOTSUP") && !hasCode(error, "EBADF")) {
+      throw error;
+    }
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Windows rename can transiently fail with EPERM/EACCES/EBUSY while an
+ * antivirus scan or indexer holds the destination; retry briefly instead of
+ * failing a user-visible save.
+ */
+export async function renameWithRetry(source: string, destination: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      await rename(source, destination);
+      return;
+    } catch (error: unknown) {
+      if (!hasCode(error, "EPERM") && !hasCode(error, "EACCES") && !hasCode(error, "EBUSY")) {
+        throw error;
+      }
+      lastError = error;
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 20 * 2 ** attempt));
+    }
+  }
+  throw lastError;
+}
 
 /** A PID-bearing same-directory name lets a retry remove files left by a dead process. */
 export function atomicTemporaryPath(outputPath: string): string {

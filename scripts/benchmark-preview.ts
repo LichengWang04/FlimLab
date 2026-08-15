@@ -99,7 +99,7 @@ const demoRequest: PreviewRequest = {
   revision: 1,
   assetId: "demo-negative",
   maxEdge: previewPerformanceProfile.quickMaxEdge,
-  mode: "preset",
+  mode: "generic",
   view: "positive",
   tone: settings.tone,
   processing: defaultProcessingRecipe,

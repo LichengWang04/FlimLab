@@ -155,6 +155,9 @@ class WebGlPreviewRenderer implements PreviewCanvasRenderer {
 
         float exposure = exp2(u_exposureStops);
         vec3 normalized = source * exposure / max(u_whitePoint, EPSILON);
+        // Match the CPU tone stage: non-finite values saturate to white
+        // instead of propagating NaN through luminance scaling.
+        normalized = mix(clamp(normalized, vec3(0.0), vec3(1e6)), vec3(0.0), bvec3(isnan(normalized)));
         float sourceLuma = max(0.0, dot(normalized, LUMA));
         float mappedLuma = mapLuminance(sourceLuma);
         float scale = sourceLuma > EPSILON ? mappedLuma / sourceLuma : 0.0;
@@ -306,7 +309,10 @@ class WebGlPreviewRenderer implements PreviewCanvasRenderer {
       // 2D context here succeeds on standard browsers.
       this.canvas2d = this.canvas.getContext("2d", { alpha: false, desynchronized: true });
       if (this.canvas2d === null) {
-        return "2d";
+        // Claiming success without drawing would leave a silently black
+        // preview. Surface the failure instead: the app-level error
+        // boundary presents it and the next frame retries the fallback.
+        throw new Error("Canvas2D fallback unavailable after WebGL context loss.");
       }
     }
     if (this.canvas.width !== frame.width) this.canvas.width = frame.width;

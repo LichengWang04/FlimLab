@@ -11,6 +11,10 @@ import type {
 
 const ONE: Rgb = [1, 1, 1];
 
+/** Shared with the WebGL prepareFilm default so a film mode that omits the
+ * control behaves identically on the CPU and GPU paths. */
+export const DEFAULT_PRE_SATURATION = 1.08;
+
 /**
  * Applies the selected inversion mode. `densityRange` is the measured
  * Dmax−Dmin of the delivered frame; preset curves are resampled onto it so
@@ -46,7 +50,7 @@ export function applyGenericTransform(
   whiteBalance: Rgb = ONE,
   densityChannelRange?: Rgb,
   densityMatrix?: Matrix3,
-  preSaturation = 1,
+  preSaturation = DEFAULT_PRE_SATURATION,
 ): Raster {
   density.assertDomain("relative-density");
   validateRgb(densityGain, "densityGain");
