@@ -289,23 +289,30 @@ export function App() {
             </Section>
 
             <Section title="片基">
+              <RadioGroup
+                value={recipe.baseMode}
+                onChange={(baseMode) => {
+                  update({ baseMode });
+                  // Enter draw mode right away when there is no region yet.
+                  if (baseMode === "roi" && recipe.baseRoi === undefined) setMode("base-roi");
+                }}
+                options={[
+                  { value: "auto", label: "默认" },
+                  { value: "roi", label: "手动选取" },
+                ]}
+              />
               <button className="btn" onClick={() => setMode("base-roi")}>框选片基区域</button>
               {recipe.baseMode === "roi" && recipe.baseRoi !== undefined && (
                 <button
                   className="btn ghost"
                   onClick={() => update({ baseRoi: undefined, baseMode: "auto" })}
                 >
-                  清除选区(回到自动)
+                  清除选区(回到默认)
                 </button>
               )}
               <p className="field-note">
                 片基:{baseLabel} · {baseDetail}
               </p>
-              {recipe.baseMode === "auto" && (
-                <p className="field-note warn">
-                  自动估算是透射上包络近似,置信度上限 0.65,无法替代实测片基;建议保留一段未曝光边缘并框选。
-                </p>
-              )}
             </Section>
 
             <Section title="反转">
