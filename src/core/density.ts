@@ -177,7 +177,7 @@ function fitNeutralResponse(triples: readonly Rgb[]): ChannelFit | undefined {
   for (const triple of triples) {
     const mean = (triple[0] + triple[1] + triple[2]) / 3;
     const chroma = Math.max(triple[0], triple[1], triple[2]) - Math.min(triple[0], triple[1], triple[2]);
-    if (chroma <= Math.max(0.05, mean * 0.16)) {
+    if (chroma <= Math.max(0.08, mean * 0.25)) {
       candidates.push(triple);
       candidateMeans.push(mean);
     }

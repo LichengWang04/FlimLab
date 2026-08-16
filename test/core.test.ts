@@ -853,6 +853,58 @@ describe("End-to-end negative inversion", () => {
     const density = new Raster(4, 4, "relative-density");
     assert.throws(() => processNegative(density, baseRecipe()));
   });
+
+  it("keeps roi and automatic base results consistent on a realistic masked negative", () => {
+    // Realistic scan: noisy border with the orange mask, scene content with
+    // a per-channel film response and some saturated colours. A drawn base
+    // ROI must not diverge from the automatic envelope estimate.
+    const base: Rgb = [0.85, 0.62, 0.4];
+    const slope: Rgb = [1.0, 0.95, 1.08];
+    const offset: Rgb = [0.02, 0, 0.05];
+    let seed = 42;
+    const noise = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return (seed / 2147483648 - 0.5) * 0.02;
+    };
+    const frame = build(100, 60, "transmission-linear", (x, y) => {
+      if (x < 10) {
+        const gradient = x / 10 * 0.03;
+        return [
+          Math.max(0.01, base[0] * (1 - gradient + noise())),
+          Math.max(0.01, base[1] * (1 - gradient + noise())),
+          Math.max(0.01, base[2] * (1 - gradient + noise())),
+        ];
+      }
+      const s = (x - 10) / 90;
+      const coloured = (x * 7 + y * 13) % 5 === 0;
+      return ([0, 1, 2] as const).map((channel) => {
+        const scene = coloured ? (channel === (x + y) % 3 ? 1.0 : 0.15) : s;
+        const density = slope[channel] * -Math.log10(Math.max(0.05, scene)) + offset[channel];
+        return Math.min(0.999, base[channel] * Math.pow(10, -density) * (1 + noise()));
+      }) as Rgb;
+    });
+
+    const auto = processNegative(frame, baseRecipe());
+    const roi = processNegative(frame, baseRecipe({
+      baseMode: "roi",
+      baseRoi: { x: 0, y: 0, width: 0.08, height: 1 },
+    }));
+
+    // Both paths must fire the channel fit and agree on its parameters.
+    assert.ok(auto.anchors.channelFit, "automatic base should produce a channel fit");
+    assert.ok(roi.anchors.channelFit, "roi base should produce the same channel fit");
+    for (let channel = 0; channel < 3; channel += 1) {
+      approx(roi.anchors.channelFit!.slope[channel]!, auto.anchors.channelFit!.slope[channel]!, 0.03);
+      approx(roi.anchors.channelFit!.offset[channel]!, auto.anchors.channelFit!.offset[channel]!, 0.03);
+    }
+    // And the delivered colours must stay close on scene pixels.
+    for (const sampleX of [20, 40, 60, 80]) {
+      const sample = Raster.offsetOf(sampleX, 30, 100);
+      for (let channel = 0; channel < 3; channel += 1) {
+        approx(roi.display.data[sample + channel]!, auto.display.data[sample + channel]!, 0.03);
+      }
+    }
+  });
 });
 
 describe("Default recipe", () => {
