@@ -15,6 +15,9 @@ type DrawMode = "view" | "base-roi" | "neutral-roi" | "crop";
 
 interface PreviewResult {
   rgba: Uint8ClampedArray<ArrayBuffer>;
+  /** Delivered composition size (after rotation and crop). */
+  width: number;
+  height: number;
   base: BaseSample;
   anchors: DensityAnchors;
   whitePoint: number;
@@ -55,10 +58,15 @@ function FrameThumb({ frame, recipe }: { frame: FrameEntry; recipe: Recipe | und
     if (context === null) return;
 
     let bytes: Uint8Array;
+    let outWidth = thumb.width;
+    let outHeight = thumb.height;
     try {
       if (recipe === undefined) throw new Error("配方尚未就绪。");
       const raster = new Raster(thumb.width, thumb.height, "transmission-linear", thumb.raster);
-      bytes = encode8(processNegative(raster, recipe).display);
+      const { display } = processNegative(raster, recipe);
+      bytes = encode8(display);
+      outWidth = display.width;
+      outHeight = display.height;
     } catch {
       // Fallback: show the raw negative scan (linear → sRGB).
       bytes = new Uint8Array(thumb.raster.length);
@@ -66,6 +74,8 @@ function FrameThumb({ frame, recipe }: { frame: FrameEntry; recipe: Recipe | und
         bytes[index] = Math.round(srgbOetf(thumb.raster[index]!) * 255);
       }
     }
+    canvas.width = outWidth;
+    canvas.height = outHeight;
     const rgba = new Uint8ClampedArray(bytes.length / 3 * 4);
     for (let i = 0, j = 0; i < bytes.length; i += 3, j += 4) {
       rgba[j] = bytes[i]!;
@@ -73,7 +83,7 @@ function FrameThumb({ frame, recipe }: { frame: FrameEntry; recipe: Recipe | und
       rgba[j + 2] = bytes[i + 2]!;
       rgba[j + 3] = 255;
     }
-    context.putImageData(new ImageData(rgba, thumb.width, thumb.height), 0, 0);
+    context.putImageData(new ImageData(rgba, outWidth, outHeight), 0, 0);
   }, [frame.thumbnail, recipe]);
 
   return <canvas ref={canvasRef} className="frame-thumb" />;
@@ -143,7 +153,16 @@ export function App() {
           rgba[j + 2] = bytes[i + 2]!;
           rgba[j + 3] = 255;
         }
-        setResult({ rgba, base, anchors, whitePoint, autoGains, ms: performance.now() - started });
+        setResult({
+          rgba,
+          width: display.width,
+          height: display.height,
+          base,
+          anchors,
+          whitePoint,
+          autoGains,
+          ms: performance.now() - started,
+        });
         setError(null);
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : String(caught);
@@ -163,36 +182,38 @@ export function App() {
     return () => window.clearTimeout(debounceRef.current);
   }, [preview, recipe]);
 
-  // Draw the processed preview.
+  // Draw the processed preview at the delivered (post-geometry) size.
   useEffect(() => {
     const canvas = imageCanvasRef.current;
-    if (canvas === null || preview === null || result === null) return;
-    canvas.width = preview.width;
-    canvas.height = preview.height;
+    if (canvas === null || result === null) return;
+    canvas.width = result.width;
+    canvas.height = result.height;
     const context = canvas.getContext("2d");
     if (context === null) return;
-    context.putImageData(new ImageData(result.rgba, preview.width, preview.height), 0, 0);
-  }, [preview, result]);
+    context.putImageData(new ImageData(result.rgba, result.width, result.height), 0, 0);
+  }, [result]);
 
-  // Draw region overlays on a separate layer so drags stay cheap.
+  // Draw region overlays in delivered-space coordinates (base and neutral
+  // ROIs are already relative to the delivered frame), on a layer matching
+  // the delivered canvas so drags stay cheap.
   useEffect(() => {
     const canvas = overlayCanvasRef.current;
-    if (canvas === null || preview === null || recipe === null) return;
-    canvas.width = preview.width;
-    canvas.height = preview.height;
+    if (canvas === null || result === null || recipe === null) return;
+    canvas.width = result.width;
+    canvas.height = result.height;
     const context = canvas.getContext("2d");
     if (context === null) return;
     context.clearRect(0, 0, canvas.width, canvas.height);
 
     const stroke = (rect: Rect, color: string) => {
       context.strokeStyle = color;
-      context.lineWidth = Math.max(2, Math.round(preview.width / 500));
-      context.setLineDash([Math.round(preview.width / 90), Math.round(preview.width / 180)]);
+      context.lineWidth = Math.max(2, Math.round(canvas.width / 500));
+      context.setLineDash([Math.round(canvas.width / 90), Math.round(canvas.width / 180)]);
       context.strokeRect(
-        rect.x * preview.width,
-        rect.y * preview.height,
-        rect.width * preview.width,
-        rect.height * preview.height,
+        rect.x * canvas.width,
+        rect.y * canvas.height,
+        rect.width * canvas.width,
+        rect.height * canvas.height,
       );
       context.setLineDash([]);
     };
@@ -202,13 +223,17 @@ export function App() {
     if (recipe.neutralRoi !== undefined && mode !== "neutral-roi") {
       stroke(recipe.neutralRoi, "#60a5fa");
     }
-    if (recipe.crop !== undefined && mode !== "crop") {
-      stroke(recipe.crop, "#f8fafc");
+    if (recipe.crop !== undefined) {
+      // A crop defines the delivered frame boundary; mark it with an inset
+      // outline rather than a region that no longer exists on the canvas.
+      context.strokeStyle = "#f8fafc";
+      context.lineWidth = 1;
+      context.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
     }
     if (draft !== null) {
       stroke(draft, "#facc15");
     }
-  }, [preview, recipe, mode, draft]);
+  }, [result, recipe, mode, draft]);
 
   const selectFrame = useCallback(async (id: string) => {
     setActiveId(id);
@@ -386,16 +411,18 @@ export function App() {
   }, [mode, toImagePoint]);
 
   const handlePointerMove = useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (dragStartRef.current === null || preview === null) return;
+    if (dragStartRef.current === null) return;
+    const canvas = overlayCanvasRef.current;
+    if (canvas === null) return;
     const point = toImagePoint(event);
     const start = dragStartRef.current;
     setDraft({
-      x: Math.min(start.x, point.x) / preview.width,
-      y: Math.min(start.y, point.y) / preview.height,
-      width: Math.abs(point.x - start.x) / preview.width,
-      height: Math.abs(point.y - start.y) / preview.height,
+      x: Math.min(start.x, point.x) / canvas.width,
+      y: Math.min(start.y, point.y) / canvas.height,
+      width: Math.abs(point.x - start.x) / canvas.width,
+      height: Math.abs(point.y - start.y) / canvas.height,
     });
-  }, [preview, toImagePoint]);
+  }, [toImagePoint]);
 
   const handlePointerUp = useCallback(() => {
     dragStartRef.current = null;
