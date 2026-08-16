@@ -1,50 +1,54 @@
 import { basename } from "node:path";
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { join } from "node:path";
-import type { Recipe } from "../core/index.ts";
 import { IPC_CHANNELS } from "../shared/ipc.ts";
-import type { ExportRequest, OpenedSource } from "../shared/ipc.ts";
-import { decodeSource } from "./decode.ts";
-import { exportPositive } from "./export.ts";
+import type { RollExportRequest, RollFrameInfo, RollOpenMode, SingleExportRequest } from "../shared/ipc.ts";
+import { renderPositive } from "./export.ts";
+import {
+  decodeRollPreview,
+  decodeRollThumbnail,
+  exportRoll,
+  framePath,
+  registerFrames,
+  scanFolder,
+} from "./roll-service.ts";
 
-const PREVIEW_MAX_SIDE = 1600;
 const smokeMode = process.argv.includes("--smoke") || process.env["FILMLAB_SMOKE"] === "1";
 
 let mainWindow: BrowserWindow | null = null;
-let currentSourcePath: string | null = null;
+const exportCancelFlags = new Map<number, boolean>();
 
-async function openNegative(): Promise<OpenedSource | null> {
+const IMAGE_FILTERS = [
+  { name: "支持的图像", extensions: ["tif", "tiff", "jpg", "jpeg", "png"] },
+  { name: "所有文件", extensions: ["*"] },
+];
+
+async function openRoll(mode: RollOpenMode): Promise<RollFrameInfo[] | null> {
+  if (mode === "folder") {
+    const selection = await dialog.showOpenDialog(mainWindow!, {
+      title: "选择整卷胶片所在的文件夹",
+      properties: ["openDirectory"],
+    });
+    if (selection.canceled || selection.filePaths.length === 0) return null;
+    return registerFrames(await scanFolder(selection.filePaths[0]!));
+  }
   const selection = await dialog.showOpenDialog(mainWindow!, {
-    title: "打开负片扫描/翻拍图像",
-    properties: ["openFile"],
-    filters: [
-      { name: "支持的图像", extensions: ["tif", "tiff", "jpg", "jpeg", "png"] },
-      { name: "所有文件", extensions: ["*"] },
-    ],
+    title: mode === "single" ? "打开负片扫描/翻拍图像" : "选择整卷胶片图像",
+    properties: mode === "single" ? ["openFile"] : ["openFile", "multiSelections"],
+    filters: IMAGE_FILTERS,
   });
   if (selection.canceled || selection.filePaths.length === 0) return null;
-  const path = selection.filePaths[0]!;
-  const { raster, meta } = await decodeSource(path, PREVIEW_MAX_SIDE);
-  currentSourcePath = path;
-  return {
-    fileName: basename(path),
-    width: raster.width,
-    height: raster.height,
-    depth: meta.depth,
-    hasIcc: meta.hasIcc,
-    raster: raster.data,
-  };
+  return registerFrames(selection.filePaths);
 }
 
-async function handleExport(request: ExportRequest) {
-  if (currentSourcePath === null) {
-    return { ok: false, message: "还没有打开负片图像。" };
-  }
+async function handleSingleExport(request: SingleExportRequest) {
+  const path = framePath(request.id);
+  if (path === null) return { ok: false, message: "帧不存在,请重新导入。" };
   if (request.format !== "tiff" && request.format !== "jpeg") {
     return { ok: false, message: `不支持的导出格式:${request.format}` };
   }
   const extension = request.format === "tiff" ? "tiff" : "jpg";
-  const stem = basename(currentSourcePath).replace(/\.[^.]+$/, "");
+  const stem = basename(path).replace(/\.[^.]+$/, "");
   const selection = await dialog.showSaveDialog(mainWindow!, {
     title: "导出正像",
     defaultPath: `${stem}-positive.${extension}`,
@@ -55,15 +59,37 @@ async function handleExport(request: ExportRequest) {
   if (selection.canceled || selection.filePath === undefined) {
     return { ok: false, message: "已取消导出。" };
   }
-  return exportPositive(currentSourcePath, request.recipe as Recipe, request.format, selection.filePath);
+  return renderPositive(path, request.recipe, request.format, selection.filePath);
+}
+
+async function handleRollExport(event: Electron.IpcMainInvokeEvent, request: RollExportRequest) {
+  if (request.frames.length === 0) {
+    return { ok: false, succeeded: [], failed: [], cancelled: false, message: "没有可导出的帧。" };
+  }
+  const selection = await dialog.showOpenDialog(mainWindow!, {
+    title: "选择整卷导出文件夹",
+    properties: ["openDirectory", "createDirectory"],
+  });
+  if (selection.canceled || selection.filePaths.length === 0) {
+    return { ok: false, succeeded: [], failed: [], cancelled: true, message: "已取消导出。" };
+  }
+  const sender = event.sender;
+  exportCancelFlags.set(sender.id, false);
+  return exportRoll(
+    { frames: request.frames, format: request.format, outDir: selection.filePaths[0]! },
+    (progress) => {
+      if (!sender.isDestroyed()) sender.send(IPC_CHANNELS.rollExportProgress, progress);
+    },
+    () => exportCancelFlags.get(sender.id) === true,
+  );
 }
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 1320,
-    height: 860,
-    minWidth: 1020,
-    minHeight: 680,
+    width: 1500,
+    height: 900,
+    minWidth: 1100,
+    minHeight: 700,
     title: "FilmLab",
     backgroundColor: "#14151a",
     show: false,
@@ -114,8 +140,14 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  ipcMain.handle(IPC_CHANNELS.openNegative, () => openNegative());
-  ipcMain.handle(IPC_CHANNELS.exportPositive, (_event, request: ExportRequest) => handleExport(request));
+  ipcMain.handle(IPC_CHANNELS.rollOpen, (_event, mode: RollOpenMode) => openRoll(mode));
+  ipcMain.handle(IPC_CHANNELS.rollPreview, (_event, id: string) => decodeRollPreview(id));
+  ipcMain.handle(IPC_CHANNELS.rollThumbnail, (_event, id: string) => decodeRollThumbnail(id));
+  ipcMain.handle(IPC_CHANNELS.rollExportSingle, (_event, request: SingleExportRequest) => handleSingleExport(request));
+  ipcMain.handle(IPC_CHANNELS.rollExport, (event, request: RollExportRequest) => handleRollExport(event, request));
+  ipcMain.handle(IPC_CHANNELS.rollExportCancel, (event) => {
+    exportCancelFlags.set(event.sender.id, true);
+  });
   createWindow();
 
   app.on("activate", () => {

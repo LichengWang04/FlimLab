@@ -1,11 +1,26 @@
 /// <reference types="vite/client" />
-import type { ExportRequest, ExportResult, OpenedSource } from "../../shared/ipc.ts";
+import type {
+  RollExportProgress,
+  RollExportRequest,
+  RollExportResult,
+  RollFrameInfo,
+  RollOpenMode,
+  RollPreview,
+  RollThumbnail,
+  SingleExportRequest,
+  SingleExportResult,
+} from "../../shared/ipc.ts";
 
 declare global {
   interface Window {
     filmlab: {
-      openNegative: () => Promise<OpenedSource | null>;
-      exportPositive: (request: ExportRequest) => Promise<ExportResult>;
+      openRoll: (mode: RollOpenMode) => Promise<RollFrameInfo[] | null>;
+      previewFrame: (id: string) => Promise<RollPreview>;
+      thumbnailFrame: (id: string) => Promise<RollThumbnail>;
+      exportFrame: (request: SingleExportRequest) => Promise<SingleExportResult>;
+      exportRoll: (request: RollExportRequest) => Promise<RollExportResult>;
+      cancelRollExport: () => Promise<void>;
+      onExportProgress: (callback: (progress: RollExportProgress) => void) => () => void;
     };
   }
 }

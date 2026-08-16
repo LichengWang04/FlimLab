@@ -12,7 +12,7 @@ import {
   srgbToLinear,
 } from "../src/core/index.ts";
 import { decodeSource } from "../src/main/decode.ts";
-import { exportPositive } from "../src/main/export.ts";
+import { renderPositive } from "../src/main/export.ts";
 import { readTiff } from "../src/main/tiff-decode.ts";
 import { writeTiff16 } from "../src/main/tiff-write.ts";
 
@@ -261,7 +261,7 @@ describe("Positive export", () => {
     const { raster } = await decodeSource(tiff);
     const expected = processNegative(raster, DEFAULT_RECIPE);
 
-    const outcome = await exportPositive(tiff, DEFAULT_RECIPE, "tiff", out);
+    const outcome = await renderPositive(tiff, DEFAULT_RECIPE, "tiff", out);
     assert.equal(outcome.ok, true);
 
     const image = await readTiff(out);
@@ -286,7 +286,7 @@ describe("Positive export", () => {
     const out = join(tempDir, "positive.tiff");
     await writeNegativeTiff(tiff);
 
-    const outcome = await exportPositive(tiff, DEFAULT_RECIPE, "tiff", out);
+    const outcome = await renderPositive(tiff, DEFAULT_RECIPE, "tiff", out);
     assert.equal(outcome.ok, true);
     const image = await readTiff(out);
     const words = image.pixels as Uint16Array;
@@ -306,7 +306,7 @@ describe("Positive export", () => {
     await writeNegativeTiff(tiff);
 
     const recipe = { ...DEFAULT_RECIPE, rotate: 90 as const, crop: { x: 0, y: 0, width: 0.5, height: 1 } };
-    const outcome = await exportPositive(tiff, recipe, "jpeg", out);
+    const outcome = await renderPositive(tiff, recipe, "jpeg", out);
     assert.equal(outcome.ok, true);
     const meta = await sharp(out).metadata();
     assert.equal(meta.format, "jpeg");
@@ -318,7 +318,7 @@ describe("Positive export", () => {
     tempDir = await fs.mkdtemp(join(tmpdir(), "filmlab-"));
     const broken = join(tempDir, "broken.tiff");
     await fs.writeFile(broken, "this is not a tiff");
-    const outcome = await exportPositive(broken, DEFAULT_RECIPE, "tiff", join(tempDir, "out.tiff"));
+    const outcome = await renderPositive(broken, DEFAULT_RECIPE, "tiff", join(tempDir, "out.tiff"));
     assert.equal(outcome.ok, false);
     assert.ok(outcome.message !== undefined && outcome.message.length > 0);
   });
