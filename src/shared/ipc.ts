@@ -7,7 +7,7 @@ export interface RollFrameInfo {
   fileName: string;
 }
 
-export type RollOpenMode = "single" | "files" | "folder";
+export type RollOpenMode = "files" | "folder";
 
 /** Preview resolution decode of one frame (<= 1600 px longest side). */
 export interface RollPreview {
@@ -62,6 +62,23 @@ export interface SingleExportRequest {
   format: "tiff" | "jpeg";
 }
 
+export interface SessionSaveRequest {
+  frames: { id: string; recipe: Recipe; skipped: boolean }[];
+  activeId?: string;
+}
+
+export interface RestoredSession {
+  frames: { info: RollFrameInfo; recipe: Recipe; skipped: boolean }[];
+  activeId?: string;
+}
+
+export interface AppInfo {
+  version: string;
+  platform: string;
+  arch: string;
+  electron: string;
+}
+
 export const IPC_CHANNELS = {
   rollOpen: "roll:open",
   rollPreview: "roll:preview",
@@ -70,4 +87,8 @@ export const IPC_CHANNELS = {
   rollExportSingle: "roll:export-single",
   rollExportCancel: "roll:export:cancel",
   rollExportProgress: "roll:export-progress",
+  rollRelease: "roll:release",
+  sessionSave: "session:save",
+  sessionRestore: "session:restore",
+  appInfo: "app:info",
 } as const;

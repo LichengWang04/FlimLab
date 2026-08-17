@@ -23,9 +23,7 @@ export function encode8(display: Raster): Uint8Array {
   display.assertDomain(["display-linear"]);
   const source = display.data;
   const target = new Uint8Array(source.length);
-  for (let offset = 0; offset < source.length; offset += 1) {
-    target[offset] = Math.round(srgbOetf(source[offset]!) * 255);
-  }
+  encode8Range(source, target, 0, source.length);
   return target;
 }
 
@@ -34,8 +32,18 @@ export function encode16(display: Raster): Uint16Array {
   display.assertDomain(["display-linear"]);
   const source = display.data;
   const target = new Uint16Array(source.length);
-  for (let offset = 0; offset < source.length; offset += 1) {
+  encode16Range(source, target, 0, source.length);
+  return target;
+}
+
+export function encode8Range(source: Float32Array, target: Uint8Array, start: number, end: number): void {
+  for (let offset = start; offset < end; offset += 1) {
+    target[offset] = Math.round(srgbOetf(source[offset]!) * 255);
+  }
+}
+
+export function encode16Range(source: Float32Array, target: Uint16Array, start: number, end: number): void {
+  for (let offset = start; offset < end; offset += 1) {
     target[offset] = Math.round(srgbOetf(source[offset]!) * 65535);
   }
-  return target;
 }

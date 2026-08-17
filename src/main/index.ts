@@ -3,20 +3,36 @@ import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { join } from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc.ts";
 import type { RollExportRequest, RollFrameInfo, RollOpenMode, SingleExportRequest } from "../shared/ipc.ts";
-import { renderPositive } from "./export.ts";
+import { ProcessingService } from "./processing-service.ts";
 import {
+  parseFrameId,
+  parseOpenMode,
+  parseRollExportRequest,
+  parseSessionSaveRequest,
+  parseSingleExportRequest,
+} from "./ipc-validation.ts";
+import {
+  clearFrames,
   decodeRollPreview,
   decodeRollThumbnail,
   exportRoll,
   framePath,
   registerFrames,
+  releaseFrame,
   scanFolder,
 } from "./roll-service.ts";
+import { SessionStore } from "./session-store.ts";
+import { runReleaseExportSmoke } from "./release-export-smoke.ts";
 
 const smokeMode = process.argv.includes("--smoke") || process.env["FILMLAB_SMOKE"] === "1";
+const exportSmokeRoot = process.argv
+  .find((argument) => argument.startsWith("--release-export-smoke="))
+  ?.slice("--release-export-smoke=".length);
 
 let mainWindow: BrowserWindow | null = null;
 const exportCancelFlags = new Map<number, boolean>();
+const processingService = new ProcessingService();
+const sessionStore = new SessionStore(() => join(app.getPath("userData"), "session-v1.json"));
 
 const IMAGE_FILTERS = [
   { name: "支持的图像", extensions: ["tif", "tiff", "jpg", "jpeg", "png"] },
@@ -33,8 +49,8 @@ async function openRoll(mode: RollOpenMode): Promise<RollFrameInfo[] | null> {
     return registerFrames(await scanFolder(selection.filePaths[0]!));
   }
   const selection = await dialog.showOpenDialog(mainWindow!, {
-    title: mode === "single" ? "打开负片扫描/翻拍图像" : "选择整卷胶片图像",
-    properties: mode === "single" ? ["openFile"] : ["openFile", "multiSelections"],
+    title: "导入底片扫描/翻拍图像",
+    properties: ["openFile", "multiSelections"],
     filters: IMAGE_FILTERS,
   });
   if (selection.canceled || selection.filePaths.length === 0) return null;
@@ -59,7 +75,7 @@ async function handleSingleExport(request: SingleExportRequest) {
   if (selection.canceled || selection.filePath === undefined) {
     return { ok: false, message: "已取消导出。" };
   }
-  return renderPositive(path, request.recipe, request.format, selection.filePath);
+  return processingService.renderPositive(path, request.recipe, request.format, selection.filePath);
 }
 
 async function handleRollExport(event: Electron.IpcMainInvokeEvent, request: RollExportRequest) {
@@ -75,13 +91,18 @@ async function handleRollExport(event: Electron.IpcMainInvokeEvent, request: Rol
   }
   const sender = event.sender;
   exportCancelFlags.set(sender.id, false);
-  return exportRoll(
-    { frames: request.frames, format: request.format, outDir: selection.filePaths[0]! },
-    (progress) => {
-      if (!sender.isDestroyed()) sender.send(IPC_CHANNELS.rollExportProgress, progress);
-    },
-    () => exportCancelFlags.get(sender.id) === true,
-  );
+  try {
+    return await exportRoll(
+      { frames: request.frames, format: request.format, outDir: selection.filePaths[0]! },
+      (progress) => {
+        if (!sender.isDestroyed()) sender.send(IPC_CHANNELS.rollExportProgress, progress);
+      },
+      () => exportCancelFlags.get(sender.id) === true,
+      (path, recipe, format, outPath) => processingService.renderPositive(path, recipe, format, outPath),
+    );
+  } finally {
+    exportCancelFlags.delete(sender.id);
+  }
 }
 
 function createWindow(): void {
@@ -91,7 +112,8 @@ function createWindow(): void {
     minWidth: 1100,
     minHeight: 700,
     title: "FilmLab",
-    backgroundColor: "#14151a",
+    icon: app.isPackaged ? undefined : join(app.getAppPath(), "build/icon.png"),
+    backgroundColor: "#11110f",
     show: false,
     webPreferences: {
       preload: join(import.meta.dirname, "../preload/index.cjs"),
@@ -104,8 +126,11 @@ function createWindow(): void {
     if (!smokeMode) mainWindow?.show();
   });
   mainWindow.on("closed", () => {
+    clearFrames();
     mainWindow = null;
   });
+  const webContentsId = mainWindow.webContents.id;
+  mainWindow.webContents.once("destroyed", () => exportCancelFlags.delete(webContentsId));
 
   if (smokeMode) {
     // Headless verification: report renderer console output and exit once
@@ -139,15 +164,41 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
-  ipcMain.handle(IPC_CHANNELS.rollOpen, (_event, mode: RollOpenMode) => openRoll(mode));
-  ipcMain.handle(IPC_CHANNELS.rollPreview, (_event, id: string) => decodeRollPreview(id));
-  ipcMain.handle(IPC_CHANNELS.rollThumbnail, (_event, id: string) => decodeRollThumbnail(id));
-  ipcMain.handle(IPC_CHANNELS.rollExportSingle, (_event, request: SingleExportRequest) => handleSingleExport(request));
-  ipcMain.handle(IPC_CHANNELS.rollExport, (event, request: RollExportRequest) => handleRollExport(event, request));
+app.whenReady().then(async () => {
+  if (exportSmokeRoot !== undefined) {
+    try {
+      const output = await runReleaseExportSmoke(exportSmokeRoot, processingService);
+      console.log(`[release-smoke] exports-complete ${output}`);
+      app.exit(0);
+    } catch (error) {
+      console.error("[release-smoke] export failed:", error);
+      app.exit(1);
+    }
+    return;
+  }
+  ipcMain.handle(IPC_CHANNELS.rollOpen, (_event, mode: unknown) => openRoll(parseOpenMode(mode)));
+  ipcMain.handle(IPC_CHANNELS.rollPreview, (_event, id: unknown) => decodeRollPreview(parseFrameId(id)));
+  ipcMain.handle(IPC_CHANNELS.rollThumbnail, (_event, id: unknown) => decodeRollThumbnail(parseFrameId(id)));
+  ipcMain.handle(IPC_CHANNELS.rollRelease, (_event, id: unknown) => releaseFrame(parseFrameId(id)));
+  ipcMain.handle(IPC_CHANNELS.rollExportSingle, (_event, request: unknown) => (
+    handleSingleExport(parseSingleExportRequest(request))
+  ));
+  ipcMain.handle(IPC_CHANNELS.rollExport, (event, request: unknown) => (
+    handleRollExport(event, parseRollExportRequest(request))
+  ));
   ipcMain.handle(IPC_CHANNELS.rollExportCancel, (event) => {
     exportCancelFlags.set(event.sender.id, true);
   });
+  ipcMain.handle(IPC_CHANNELS.sessionSave, (_event, request: unknown) => (
+    sessionStore.save(parseSessionSaveRequest(request))
+  ));
+  ipcMain.handle(IPC_CHANNELS.sessionRestore, () => sessionStore.restore());
+  ipcMain.handle(IPC_CHANNELS.appInfo, () => ({
+    version: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    electron: process.versions.electron,
+  }));
   createWindow();
 
   app.on("activate", () => {
@@ -158,3 +209,5 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+
+app.once("before-quit", () => processingService.close());

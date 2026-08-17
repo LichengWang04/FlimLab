@@ -82,19 +82,47 @@ export function quickSelect(values: Float32Array, target: number, length: number
   return values[target]!;
 }
 
-/**
- * Percentile of a number array (0..1 fraction), linearly interpolated.
- * Sorts a copy; callers keep sample counts bounded.
- */
+/** Percentile of a number array (0..1 fraction), linearly interpolated. */
 export function percentile(values: readonly number[], fraction: number): number {
   if (values.length === 0) throw new Error("Cannot take a percentile of an empty set.");
-  const sorted = [...values].sort((a, b) => a - b);
-  const position = (sorted.length - 1) * fraction;
+  const selected = [...values];
+  const position = (selected.length - 1) * fraction;
   const lower = Math.floor(position);
   const upper = Math.ceil(position);
-  if (lower === upper) return sorted[lower]!;
+  const lowerValue = selectNumberInPlace(selected, lower);
+  if (lower === upper) return lowerValue;
+  const upperValue = selectNumberInPlace(selected, upper);
   const weight = position - lower;
-  return sorted[lower]! * (1 - weight) + sorted[upper]! * weight;
+  return lowerValue * (1 - weight) + upperValue * weight;
+}
+
+/** Numeric quickselect used by percentile without quantizing to Float32. */
+export function selectNumberInPlace(values: number[], target: number): number {
+  if (!Number.isInteger(target) || target < 0 || target >= values.length) {
+    throw new Error("Selection index is outside the input array.");
+  }
+  let left = 0;
+  let right = values.length - 1;
+  while (left < right) {
+    const pivot = values[(left + right) >>> 1]!;
+    let low = left;
+    let high = right;
+    while (low <= high) {
+      while (values[low]! < pivot) low += 1;
+      while (values[high]! > pivot) high -= 1;
+      if (low <= high) {
+        const value = values[low]!;
+        values[low] = values[high]!;
+        values[high] = value;
+        low += 1;
+        high -= 1;
+      }
+    }
+    if (target <= high) right = high;
+    else if (target >= low) left = low;
+    else return values[target]!;
+  }
+  return values[target]!;
 }
 
 export function clamp01(value: number): number {

@@ -314,6 +314,24 @@ describe("Positive export", () => {
     assert.equal(meta.height, WIDTH);
   });
 
+  it("matches core dimensions for arbitrary-angle auto-cropped export", async () => {
+    tempDir = await fs.mkdtemp(join(tmpdir(), "filmlab-"));
+    const tiff = join(tempDir, "negative.tiff");
+    const out = join(tempDir, "straightened.tiff");
+    await writeNegativeTiff(tiff);
+
+    const recipe = { ...DEFAULT_RECIPE, rotate: 7.5 };
+    const decoded = await decodeSource(tiff);
+    const expected = processNegative(decoded.raster, recipe).display;
+    const outcome = await renderPositive(tiff, recipe, "tiff", out);
+    assert.equal(outcome.ok, true);
+    const exported = await readTiff(out);
+    assert.equal(exported.width, expected.width);
+    assert.equal(exported.height, expected.height);
+    assert.ok(exported.width < WIDTH);
+    assert.ok(exported.height < HEIGHT);
+  });
+
   it("reports a clean failure for corrupt source files", async () => {
     tempDir = await fs.mkdtemp(join(tmpdir(), "filmlab-"));
     const broken = join(tempDir, "broken.tiff");

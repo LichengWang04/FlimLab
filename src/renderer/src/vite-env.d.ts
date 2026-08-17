@@ -1,5 +1,7 @@
 /// <reference types="vite/client" />
 import type {
+  AppInfo,
+  RestoredSession,
   RollExportProgress,
   RollExportRequest,
   RollExportResult,
@@ -9,6 +11,7 @@ import type {
   RollThumbnail,
   SingleExportRequest,
   SingleExportResult,
+  SessionSaveRequest,
 } from "../../shared/ipc.ts";
 
 declare global {
@@ -20,6 +23,10 @@ declare global {
       exportFrame: (request: SingleExportRequest) => Promise<SingleExportResult>;
       exportRoll: (request: RollExportRequest) => Promise<RollExportResult>;
       cancelRollExport: () => Promise<void>;
+      releaseFrame: (id: string) => Promise<boolean>;
+      saveSession: (request: SessionSaveRequest) => Promise<void>;
+      restoreSession: () => Promise<RestoredSession | null>;
+      appInfo: () => Promise<AppInfo>;
       onExportProgress: (callback: (progress: RollExportProgress) => void) => () => void;
     };
   }

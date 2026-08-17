@@ -1,6 +1,6 @@
 {
   "name": "filmlab",
-  "version": "1.0.0",
+  "version": "1.0.0-beta.1",
   "private": true,
   "author": {
     "name": "Licheng Wang"
@@ -9,6 +9,13 @@
   "type": "module",
   "main": "./out/main/index.js",
   "description": "负片翻拍/扫描工作台:导入负像,一键还原正像。",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LichengWang04/FlimLab.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LichengWang04/FlimLab/issues"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
@@ -16,9 +23,12 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test",
     "check": "npm run typecheck && npm run test",
+    "benchmark": "node scripts/benchmark.mjs",
     "smoke": "npm run build && node scripts/smoke.mjs",
+    "smoke:export": "npm run build && node scripts/export-smoke.mjs",
     "dist": "npm run build && electron-builder",
-    "dist:win": "npm run build && electron-builder --win",
+    "dist:win": "node scripts/require-signing.mjs && npm run build && electron-builder --win --x64",
+    "dist:win:unsigned": "npm run build && electron-builder --win --x64",
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:linux": "npm run build && electron-builder --linux"
   },

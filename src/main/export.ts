@@ -3,7 +3,9 @@ import { encode16, encode8, processNegative } from "../core/index.ts";
 import type { Recipe } from "../core/index.ts";
 import type { SingleExportResult } from "../shared/ipc.ts";
 import { decodeSource } from "./decode.ts";
+import { writeFileAtomic } from "./atomic-write.ts";
 import { writeTiff16 } from "./tiff-write.ts";
+import { assertExportCapacity, friendlyProcessingError } from "./resource-limits.ts";
 
 /**
  * Decodes the source at full resolution, runs the shared core pipeline with
@@ -21,18 +23,20 @@ export async function renderPositive(
   try {
     const { raster } = await decodeSource(sourcePath);
     const { display } = processNegative(raster, recipe);
+    await assertExportCapacity(outPath, display.width, display.height, format);
     if (format === "tiff") {
       await writeTiff16(outPath, display.width, display.height, encode16(display));
     } else {
       const pixels = encode8(display);
-      await sharp(Buffer.from(pixels.buffer, pixels.byteOffset, pixels.byteLength), {
+      const encoded = await sharp(Buffer.from(pixels.buffer, pixels.byteOffset, pixels.byteLength), {
         raw: { width: display.width, height: display.height, channels: 3 },
       })
         .jpeg({ quality: 95, chromaSubsampling: "4:4:4" })
-        .toFile(outPath);
+        .toBuffer();
+      await writeFileAtomic(outPath, encoded);
     }
     return { ok: true, path: outPath };
   } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    return { ok: false, message: friendlyProcessingError(error) };
   }
 }

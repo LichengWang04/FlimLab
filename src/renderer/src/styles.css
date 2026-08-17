@@ -1,13 +1,16 @@
 :root {
   color-scheme: dark;
-  --bg: #14151a;
-  --bg-panel: #1b1d24;
-  --bg-raised: #23262f;
-  --border: #2e323d;
-  --text: #e6e8ee;
-  --text-dim: #9aa1af;
-  --accent: #4f8cff;
-  --accent-strong: #3b76e8;
+  --bg: #11110f;
+  --bg-panel: #1a1917;
+  --bg-raised: #25231f;
+  --bg-soft: #201e1b;
+  --border: #37332d;
+  --border-strong: #514a40;
+  --text: #f0ece4;
+  --text-dim: #aaa399;
+  --accent: #f0a447;
+  --accent-strong: #c97725;
+  --accent-soft: rgba(240, 164, 71, 0.13);
   --danger: #f87171;
   --ok: #4ade80;
 }
@@ -42,16 +45,53 @@ body {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
+  gap: 10px;
+  min-height: 54px;
+  padding: 8px 12px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 12px rgba(0, 0, 0, 0.22);
+  z-index: 5;
 }
 
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-weight: 600;
-  font-size: 14px;
-  letter-spacing: 0.02em;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  padding-right: 4px;
+}
+
+.brand-icon {
+  width: 29px;
+  height: 29px;
+  flex: none;
+}
+
+.film-icon-shell { fill: #34302a; stroke: #786f63; stroke-width: 1.5; }
+.film-icon-cap { fill: #81786c; }
+.film-icon-label { fill: var(--accent-strong); }
+.film-icon-spool { fill: #171614; stroke: #f5c37d; stroke-width: 1.8; }
+.film-icon-film { fill: var(--accent); }
+.film-icon-highlight { fill: none; stroke: #aaa094; stroke-width: 1.6; stroke-linecap: round; }
+
+.toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.toolbar-label {
+  padding: 0 4px 0 3px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  white-space: nowrap;
 }
 
 .topbar-sep {
@@ -61,15 +101,28 @@ body {
 .btn {
   padding: 6px 12px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 7px;
   background: var(--bg-raised);
   color: var(--text);
   font-size: 12.5px;
   cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease, transform 120ms ease;
 }
 
 .btn:hover:not(:disabled) {
   border-color: var(--accent);
+  color: #fff8ed;
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn:focus-visible,
+input:focus-visible,
+.radio:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .btn:disabled {
@@ -80,6 +133,7 @@ body {
 .btn.primary {
   background: var(--accent-strong);
   border-color: var(--accent-strong);
+  color: #fffaf2;
 }
 
 .btn.primary:hover:not(:disabled) {
@@ -88,6 +142,12 @@ body {
 
 .btn.ghost {
   background: transparent;
+}
+
+.btn.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: #ffd79f;
 }
 
 .btn.large {
@@ -108,26 +168,27 @@ body {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  background: #101114;
+  background: #0e0e0d;
 }
 
 /* ---- filmstrip ---- */
 
 .filmstrip {
-  width: 148px;
+  width: 156px;
   flex-shrink: 0;
   overflow-y: auto;
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
-  padding: 8px 8px 0;
+  padding: 10px 10px 0;
+  box-shadow: inset -1px 0 rgba(255, 255, 255, 0.02);
 }
 
 .frame-card {
   position: relative;
   margin-bottom: 8px;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 5px;
+  border-radius: 5px;
+  padding: 7px 6px;
   background: var(--bg-raised);
   cursor: pointer;
 }
@@ -139,6 +200,7 @@ body {
 .frame-card.active {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
+  background: var(--accent-soft);
 }
 
 .frame-card.skipped {
@@ -274,6 +336,28 @@ body {
   border: 1px solid var(--border);
 }
 
+.about-card {
+  max-width: 620px;
+}
+
+.diagnostics {
+  max-height: 180px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0d0d0c;
+  color: var(--muted);
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .summary-card h2 {
   margin: 0 0 8px;
   font-size: 15px;
@@ -301,24 +385,27 @@ body {
 }
 
 .panel {
-  width: 300px;
+  width: 316px;
   flex-shrink: 0;
   overflow-y: auto;
   background: var(--bg-panel);
   border-left: 1px solid var(--border);
-  padding: 4px 0 16px;
+  padding: 8px 8px 18px;
 }
 
 .section {
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+  padding: 13px 13px 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-soft);
 }
 
 .section h2 {
   margin: 0 0 10px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-dim);
+  color: #c9bda9;
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -338,7 +425,8 @@ body {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  padding: 16px;
+  padding: 20px;
+  background: radial-gradient(circle at 50% 44%, #191816 0, #0e0e0d 68%);
 }
 
 .image-canvas {
@@ -348,7 +436,8 @@ body {
   object-fit: contain;
   image-rendering: auto;
   background: repeating-conic-gradient(#1c1e24 0% 25%, #16181d 0% 50%) 0 0 / 24px 24px;
-  outline: 1px solid #000;
+  outline: 1px solid #030303;
+  box-shadow: 0 12px 38px rgba(0, 0, 0, 0.46);
 }
 
 .overlay-canvas {
@@ -369,8 +458,8 @@ body {
 .modebar {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 8px 14px;
+  gap: 16px;
+  padding: 9px 14px;
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
 }
@@ -401,6 +490,7 @@ body {
 .radio.active {
   border-color: var(--accent);
   color: var(--text);
+  background: var(--accent-soft);
 }
 
 .radio input {
@@ -411,7 +501,7 @@ body {
 
 .slider-row {
   display: grid;
-  grid-template-columns: 72px 1fr 56px;
+  grid-template-columns: 76px minmax(90px, 1fr) 66px;
   align-items: center;
   gap: 8px;
   margin: 8px 0;
@@ -425,6 +515,10 @@ body {
 .slider-row input[type="range"] {
   width: 100%;
   accent-color: var(--accent);
+}
+
+.slider-row.disabled {
+  opacity: 0.48;
 }
 
 .slider-value {
@@ -464,6 +558,13 @@ body {
   max-width: 460px;
   text-align: center;
   padding: 24px;
+}
+
+.empty-icon {
+  width: 88px;
+  height: 88px;
+  margin-bottom: 8px;
+  filter: drop-shadow(0 12px 18px rgba(0, 0, 0, 0.35));
 }
 
 .empty h1 {
@@ -563,4 +664,26 @@ body {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow-x: auto;
+}
+
+@media (max-width: 1260px) {
+  .topbar {
+    gap: 7px;
+  }
+
+  .toolbar-label {
+    display: none;
+  }
+
+  .toolbar-group {
+    gap: 3px;
+  }
+
+  .topbar .btn {
+    padding-inline: 9px;
+  }
+
+  .panel {
+    width: 292px;
+  }
 }

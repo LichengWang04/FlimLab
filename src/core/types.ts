@@ -53,6 +53,22 @@ export interface ChannelFit {
   slope: Rgb;
 }
 
+/** Monotone density mapping applied after the affine channel fit. */
+export interface DensityCurve {
+  input: number[];
+  output: number[];
+}
+
+export type NeutralizationMethod = "curve" | "neutral-axis" | "pca" | "anchor" | "none";
+
+export interface NeutralizationDiagnostics {
+  method: NeutralizationMethod;
+  /** Relative held-out residual reduction, 0..1. */
+  improvement: number;
+  sampleCount: number;
+  densitySpan: number;
+}
+
 export interface DensityAnchors {
   /** Mean optical density of the sampled film base relative to scan white. */
   dmin: number;
@@ -62,11 +78,15 @@ export interface DensityAnchors {
   range: number;
   /** Optional per-channel affine fit from a neutral area / neutral tail. */
   channelFit?: ChannelFit;
+  /** Optional tone-dependent correction, evaluated after `channelFit`. */
+  channelCurves?: [DensityCurve, DensityCurve, DensityCurve];
+  /** Read-only diagnostics for the automatic neutralisation decision. */
+  neutralization?: NeutralizationDiagnostics;
 }
 
 export interface Recipe {
-  /** Quarter turns applied before anything else. */
-  rotate: QuarterTurn;
+  /** Clockwise rotation in degrees, applied before anything else. */
+  rotate: number;
   /** Optional crop applied after rotation, in normalized coordinates. */
   crop?: Rect;
   /** How the film base is determined: automatic envelope estimate by
@@ -87,8 +107,8 @@ export interface Recipe {
   autoNeutralize: boolean;
   /** Optional neutral high-density area; overrides the heuristic. */
   neutralRoi?: Rect;
-  /** Channel gains applied after inversion (green stays 1). */
-  whiteBalance: Rgb;
+  /** Manual colour temperature in Kelvin; 5500 K is the neutral point. */
+  temperatureKelvin: number;
   /**
    * When enabled, robust gray-world gains (per-channel medians equalized)
    * are estimated from the scene-linear positive and multiplied with the
@@ -113,7 +133,7 @@ export const DEFAULT_RECIPE: Recipe = {
   dmaxMode: "auto",
   manualDmax: 1.2,
   autoNeutralize: true,
-  whiteBalance: [1, 1, 1],
+  temperatureKelvin: 5500,
   autoWhiteBalance: true,
   preSaturation: 1.08,
   exposure: 0,

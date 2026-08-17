@@ -2,6 +2,7 @@ import { extname } from "node:path";
 import sharp from "sharp";
 import { Raster, downscaleRaster, srgbToLinear } from "../core/index.ts";
 import { readTiff } from "./tiff-decode.ts";
+import { assertImageDimensions, assertSourceFile } from "./resource-limits.ts";
 
 export interface SourceMeta {
   width: number;
@@ -34,6 +35,10 @@ export interface DecodedFrame {
  * conversions cannot poison the density logarithm.
  */
 export async function decodeSource(path: string, maxSide?: number): Promise<DecodedFrame> {
+  await assertSourceFile(path);
+  if (maxSide !== undefined && (!Number.isFinite(maxSide) || maxSide < 1 || maxSide > 4096)) {
+    throw new Error("预览尺寸请求无效。");
+  }
   const extension = extname(path).toLowerCase();
   if (extension === ".tiff" || extension === ".tif") {
     return decodeTiff(path, maxSide);
@@ -86,6 +91,7 @@ async function decodeRasterFile(path: string, maxSide?: number): Promise<Decoded
   if (meta.width === undefined || meta.height === undefined || meta.width < 1 || meta.height < 1) {
     throw new Error("无法读取图像尺寸,文件可能已损坏或格式不受支持。");
   }
+  assertImageDimensions(meta.width, meta.height);
   const format = meta.format ?? "";
   const is16 = meta.depth === "ushort";
   const hasIcc = meta.icc !== undefined;

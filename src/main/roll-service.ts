@@ -11,6 +11,9 @@ import type {
 } from "../shared/ipc.ts";
 import { decodeSource } from "./decode.ts";
 import { renderPositive } from "./export.ts";
+import { MAX_ROLL_FRAMES } from "./resource-limits.ts";
+
+export type PositiveRenderer = typeof renderPositive;
 
 const PREVIEW_MAX_SIDE = 1600;
 const THUMBNAIL_MAX_SIDE = 256;
@@ -27,6 +30,7 @@ const SUPPORTED_EXTENSIONS = new Set([".tif", ".tiff", ".jpg", ".jpeg", ".png"])
 const frames = new Map<string, string>();
 
 export function registerFrames(paths: string[]): RollFrameInfo[] {
+  if (paths.length > MAX_ROLL_FRAMES) throw new Error(`整卷最多导入 ${MAX_ROLL_FRAMES} 帧。`);
   frames.clear();
   const infos: RollFrameInfo[] = [];
   for (const path of paths) {
@@ -35,6 +39,14 @@ export function registerFrames(paths: string[]): RollFrameInfo[] {
     infos.push({ id, fileName: basename(path) });
   }
   return infos;
+}
+
+export function releaseFrame(id: string): boolean {
+  return frames.delete(id);
+}
+
+export function clearFrames(): void {
+  frames.clear();
 }
 
 export function framePath(id: string): string | null {
@@ -96,7 +108,17 @@ export async function exportRoll(
   job: { frames: { id: string; recipe: Recipe }[]; format: "tiff" | "jpeg"; outDir: string },
   onProgress: (progress: RollExportProgress) => void,
   isCancelled: () => boolean,
+  render: PositiveRenderer = renderPositive,
 ): Promise<RollExportResult> {
+  if (job.frames.length > MAX_ROLL_FRAMES) {
+    return {
+      ok: false,
+      succeeded: [],
+      failed: [],
+      cancelled: false,
+      message: `整卷最多导出 ${MAX_ROLL_FRAMES} 帧。`,
+    };
+  }
   const succeeded: RollExportResult["succeeded"] = [];
   const failed: RollExportResult["failed"] = [];
   const extension = job.format === "tiff" ? "tiff" : "jpg";
@@ -119,7 +141,7 @@ export async function exportRoll(
       outPath = join(job.outDir, `${stem}-positive-${counter}.${extension}`);
       counter += 1;
     }
-    const result = await renderPositive(path, recipe, job.format, outPath);
+    const result = await render(path, recipe, job.format, outPath);
     if (result.ok) {
       succeeded.push({ id, path: outPath });
     } else {

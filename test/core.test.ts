@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   applyGains,
+  applyDensityCurve,
   cropRaster,
+  createGeometryPlan,
   DEFAULT_RECIPE,
   downscaleRaster,
   encode16,
@@ -12,17 +14,25 @@ import {
   estimateWhitePoint,
   invertDensity,
   measureDensityAnchors,
+  NegativeSession,
+  normalizeRotation,
+  percentile,
   processNegative,
   Raster,
   rotateRaster,
   sampleFilmBase,
   srgbOetf,
   srgbToLinear,
+  straightenAngle,
+  temperatureToGains,
   toRelativeDensity,
   toneMap,
+  toneMapEncodeRgba8,
   validateRect,
 } from "../src/core/index.ts";
-import type { ChannelFit, RasterDomain, Recipe, Rect, Rgb } from "../src/core/index.ts";
+import type { ChannelFit, DensityCurve, RasterDomain, Recipe, Rect, Rgb } from "../src/core/index.ts";
+import { executeKernelTask } from "../src/main/parallel-kernel.ts";
+import type { KernelAction, KernelTask } from "../src/main/parallel-kernel.ts";
 
 type PixelFn = (x: number, y: number) => Rgb;
 
@@ -82,7 +92,7 @@ describe("Raster", () => {
 });
 
 describe("Geometry", () => {
-  it("rotates 90 degrees counterclockwise", () => {
+  it("rotates 90 degrees clockwise without interpolation", () => {
     const source = build(2, 1, "transmission-linear", (x) => (x === 0 ? [1, 2, 3] : [4, 5, 6]));
     const rotated = rotateRaster(source, 90);
     assert.equal(rotated.width, 1);
@@ -105,6 +115,33 @@ describe("Geometry", () => {
   it("treats zero rotation as identity", () => {
     const source = build(2, 2);
     assert.equal(rotateRaster(source, 0), source);
+  });
+
+  it("bilinearly rotates into the largest rectangle without empty corners", () => {
+    const source = build(100, 60, "transmission-linear", () => [0.25, 0.5, 0.75]);
+    const rotated = rotateRaster(source, 30);
+    assert.ok(rotated.width < source.width);
+    assert.ok(rotated.height < source.height);
+    for (let offset = 0; offset < rotated.data.length; offset += 3) {
+      approx(rotated.data[offset], 0.25, 1e-6);
+      approx(rotated.data[offset + 1], 0.5, 1e-6);
+      approx(rotated.data[offset + 2], 0.75, 1e-6);
+    }
+  });
+
+  it("derives the same straighten correction in either line direction", () => {
+    const forward = straightenAngle({ x: 10, y: 10 }, { x: 110, y: 30 });
+    const reverse = straightenAngle({ x: 110, y: 30 }, { x: 10, y: 10 });
+    approx(forward, reverse, 1e-12);
+    approx(forward, -Math.atan2(20, 100) * 180 / Math.PI, 1e-12);
+    approx(normalizeRotation(370), 10, 1e-12);
+    approx(normalizeRotation(-190), 170, 1e-12);
+  });
+
+  it("rejects invalid rotation and straighten inputs", () => {
+    const source = build(2, 2);
+    assert.throws(() => rotateRaster(source, Number.NaN));
+    assert.throws(() => straightenAngle({ x: 1, y: 1 }, { x: 1, y: 1 }));
   });
 
   it("crops with clamped pixel rounding", () => {
@@ -354,6 +391,7 @@ describe("Density anchors", () => {
     const density = toRelativeDensity(frame, base);
     const anchors = measureDensityAnchors(base, density, 0.995, { autoNeutralize: true });
     assert.ok(anchors.channelFit, "affine fit should fire for a low-chroma scene");
+    assert.equal(anchors.channelCurves, undefined, "a truly affine response must not grow a curve");
     approx(anchors.channelFit!.slope[0], 1, 0.02);
     approx(anchors.channelFit!.slope[1], 0.95, 0.02);
     approx(anchors.channelFit!.slope[2], 1.05, 0.02);
@@ -373,6 +411,116 @@ describe("Density anchors", () => {
       approx(scene.data[offsetIndex + 1]!, scene.data[offsetIndex]!, expected * 0.02, `green at s=${s}`);
       approx(scene.data[offsetIndex + 2]!, scene.data[offsetIndex]!, expected * 0.02, `blue at s=${s}`);
     }
+  });
+
+  it("fits a neutral axis across 0.2-2.5 D with 30% colourful outliers", () => {
+    const base: Rgb = [1, 1, 1];
+    const slope: Rgb = [1.12, 0.92, 0.96];
+    const channelOffset: Rgb = [0.04, -0.03, -0.01];
+    const frame = build(100, 60, "transmission-linear", (x, y) => {
+      const neutral = 0.2 + 2.3 * ((x * 37 + y * 19) % 97) / 96;
+      const density = slope.map((value, channel) => value * neutral + channelOffset[channel]!) as Rgb;
+      if ((x * 7 + y * 13) % 10 < 3) {
+        const dominant = (x + y) % 3;
+        density[dominant] = density[dominant]! + 0.9;
+        const secondary = (dominant + 1) % 3;
+        density[secondary] = density[secondary]! + 0.15;
+      }
+      return density.map((value) => Math.pow(10, -Math.max(0, value))) as Rgb;
+    });
+    const density = toRelativeDensity(frame, base);
+    const anchors = measureDensityAnchors(base, density, 0.995, { autoNeutralize: true });
+    assert.ok(anchors.channelFit, "the stratified neutral axis should survive colourful outliers");
+
+    const scene = invertDensity(density, anchors, { preSaturation: 1 });
+    for (const [x, y] of [[2, 1], [23, 17], [47, 29], [81, 43]] as const) {
+      if ((x * 7 + y * 13) % 10 < 3) continue;
+      const at = Raster.offsetOf(x, y, 100);
+      const recovered = [0, 1, 2].map((channel) => Math.log10(scene.data[at + channel]! + 1));
+      const spread = Math.max(...recovered) - Math.min(...recovered);
+      assert.ok(spread <= 0.02, `neutral residual ${spread} D at ${x},${y}`);
+    }
+  });
+
+  it("uses monotone curves for toe/shoulder casts with 30% colourful outliers", () => {
+    const width = 120;
+    const height = 80;
+    const base: Rgb = [1, 1, 1];
+    const frame = build(width, height, "transmission-linear", (x, y) => {
+      if ((x * 17 + y * 23) % 257 === 0) return [0, 1, 0]; // clipped dust/scratch pixel
+      const neutral = 0.2 + 2.3 * ((x * 37 + y * 19) % 127) / 126;
+      const bend = neutral * (neutral - 1.35);
+      const density: Rgb = [
+        neutral + 0.08 * bend,
+        neutral - 0.01 * bend,
+        neutral - 0.07 * bend,
+      ];
+      if ((x * 7 + y * 13) % 10 < 3) {
+        const dominant = (x + y) % 3;
+        density[dominant] = density[dominant]! + 0.9;
+        density[(dominant + 1) % 3] = density[(dominant + 1) % 3]! + 0.15;
+      }
+      return density.map((value) => Math.pow(10, -Math.max(0, value))) as Rgb;
+    });
+    const density = toRelativeDensity(frame, base);
+    const anchors = measureDensityAnchors(base, density, 0.995, { autoNeutralize: true });
+    assert.equal(anchors.neutralization?.method, "curve");
+    assert.ok(anchors.neutralization!.improvement >= 0.1);
+    assert.ok(anchors.channelCurves);
+    for (const curve of anchors.channelCurves!) {
+      assert.ok(curve.input.length >= 9);
+      for (let index = 1; index < curve.input.length; index += 1) {
+        assert.ok(curve.input[index]! > curve.input[index - 1]!);
+        assert.ok(curve.output[index]! >= curve.output[index - 1]!);
+      }
+    }
+
+    const scene = invertDensity(density, anchors, { preSaturation: 1 });
+    let maximumResidual = 0;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        if ((x * 17 + y * 23) % 257 === 0 || (x * 7 + y * 13) % 10 < 3) continue;
+        const at = Raster.offsetOf(x, y, width);
+        const recovered = [0, 1, 2].map((channel) => Math.log10(scene.data[at + channel]! + 1));
+        maximumResidual = Math.max(maximumResidual, Math.max(...recovered) - Math.min(...recovered));
+      }
+    }
+    assert.ok(maximumResidual <= 0.02, `curve residual ${maximumResidual} D`);
+  });
+
+  it("selects robust PCA when a sparse tonal ramp cannot support binned regression", () => {
+    const base: Rgb = [1, 1, 1];
+    const frame = build(12, 12, "transmission-linear", (x, y) => {
+      const neutral = 0.2 + 2.1 * ((x * 7 + y * 3) % 15) / 14;
+      const density: Rgb = [1.15 * neutral + 0.03, 0.92 * neutral - 0.02, 0.93 * neutral - 0.01];
+      return density.map((value) => Math.pow(10, -Math.max(0, value))) as Rgb;
+    });
+    const anchors = measureDensityAnchors(base, toRelativeDensity(frame, base), 0.995, { autoNeutralize: true });
+    assert.equal(anchors.neutralization?.method, "pca");
+    assert.ok(anchors.channelFit);
+    assert.equal(anchors.channelCurves, undefined);
+  });
+
+  it("rejects a curve that only improves the spatial training split", () => {
+    const width = 120;
+    const height = 80;
+    const base: Rgb = [1, 1, 1];
+    const hash = (x: number, y: number): number => {
+      let value = Math.imul(x + 1, 0x1f123bb5) ^ Math.imul(y + 1, 0x5f356495);
+      value ^= value >>> 16;
+      value = Math.imul(value, 0x45d9f3b);
+      value ^= value >>> 16;
+      return value >>> 0;
+    };
+    const frame = build(width, height, "transmission-linear", (x, y) => {
+      const neutral = 0.2 + 2.3 * ((x * 37 + y * 19) % 127) / 126;
+      const bend = hash(x, y) % 5 === 0 ? 0 : neutral * (neutral - 1.35);
+      const density: Rgb = [neutral + 0.08 * bend, neutral - 0.01 * bend, neutral - 0.07 * bend];
+      return density.map((value) => Math.pow(10, -Math.max(0, value))) as Rgb;
+    });
+    const anchors = measureDensityAnchors(base, toRelativeDensity(frame, base), 0.995, { autoNeutralize: true });
+    assert.notEqual(anchors.neutralization?.method, "curve");
+    assert.equal(anchors.channelCurves, undefined);
   });
 });
 
@@ -462,9 +610,55 @@ describe("Inversion", () => {
     const recovered = [0, 1, 2].map((index) => Math.log10(scene.data[index]! + 1));
     approx((recovered[0]! + recovered[1]! + recovered[2]!) / 3, mean, 1e-6);
   });
+
+  it("applies pre-saturation after channel normalization", () => {
+    const fit: ChannelFit = { offset: [0.08, -0.03, -0.05], slope: [1.15, 0.9, 0.95] };
+    const neutral = 1.2;
+    const density: Rgb = [
+      fit.offset[0] + fit.slope[0] * neutral,
+      fit.offset[1] + fit.slope[1] * neutral,
+      fit.offset[2] + fit.slope[2] * neutral,
+    ];
+    const scene = invert([density], { channelFit: fit, preSaturation: 1.7 });
+    approx(scene.data[0], scene.data[1]!, 1e-5);
+    approx(scene.data[1], scene.data[2]!, 1e-5);
+  });
+
+  it("interpolates curves continuously and bounds endpoint extrapolation", () => {
+    const curve: DensityCurve = { input: [0, 1, 2], output: [0, 0.5, 2] };
+    approx(applyDensityCurve(1 - 1e-7, curve), applyDensityCurve(1 + 1e-7, curve), 1e-6);
+    const shallow: DensityCurve = { input: [0, 1], output: [0, 0.1] };
+    approx(applyDensityCurve(-0.1, shallow), -0.025, 1e-9);
+    assert.ok(Math.abs(applyDensityCurve(3, shallow) - 3) <= 0.35 + 1e-9);
+  });
+
+  it("rejects non-monotone density curves", () => {
+    const densityCurve: DensityCurve = { input: [0, 1, 0.5], output: [0, 1, 2] };
+    const density = new Raster(1, 1, "relative-density");
+    density.data.set([1, 1, 1]);
+    assert.throws(() => invertDensity(density, {
+      ...anchors,
+      channelFit: { offset: [0, 0, 0], slope: [1, 1, 1] },
+      channelCurves: [densityCurve, densityCurve, densityCurve],
+    }, { preSaturation: 1 }));
+  });
 });
 
 describe("White balance", () => {
+  it("maps manual colour temperature around a neutral 5500 K point", () => {
+    assert.deepEqual(temperatureToGains(5500), [1, 1, 1]);
+    const cool = temperatureToGains(2500);
+    const warm = temperatureToGains(10_000);
+    assert.ok(cool[2] > cool[0], `2500 K gains ${cool.join("/")} should cool the image`);
+    assert.ok(warm[0] > warm[2], `10000 K gains ${warm.join("/")} should warm the image`);
+    for (const gains of [cool, warm]) {
+      assert.equal(gains[1], 1);
+      assert.ok(gains.every((value) => Number.isFinite(value) && value >= 0.25 && value <= 4));
+    }
+    assert.throws(() => temperatureToGains(2499));
+    assert.throws(() => temperatureToGains(10_001));
+  });
+
   it("estimates gray-world gains from per-channel medians", () => {
     const scene = new Raster(32, 16, "scene-linear-rgb");
     for (let i = 0; i < scene.data.length; i += 3) {
@@ -560,6 +754,22 @@ describe("White balance", () => {
     const castBlue = median(withoutWb.display, 2);
     assert.ok(castRed / castGreen > 1.3, `red/green ${castRed / castGreen} should keep the cast`);
     assert.ok(castBlue / castGreen < 0.8, `blue/green ${castBlue / castGreen} should keep the cast`);
+  });
+
+  it("uses temperature only when automatic white balance is disabled", () => {
+    const frame = build(40, 40, "transmission-linear", (x) => {
+      const density = 0.2 + x / 30;
+      return [0.8, 0.5, 0.3].map((base) => base * Math.pow(10, -density)) as Rgb;
+    });
+    const automaticCool = processNegative(frame, baseRecipe({ autoWhiteBalance: true, temperatureKelvin: 2500 }));
+    const automaticWarm = processNegative(frame, baseRecipe({ autoWhiteBalance: true, temperatureKelvin: 10_000 }));
+    assert.deepEqual([...automaticCool.display.data], [...automaticWarm.display.data]);
+
+    const manualNeutral = processNegative(frame, baseRecipe({ autoWhiteBalance: false, temperatureKelvin: 5500 }));
+    const manualWarm = processNegative(frame, baseRecipe({ autoWhiteBalance: false, temperatureKelvin: 10_000 }));
+    const sample = Raster.offsetOf(20, 20, 40);
+    assert.ok(manualWarm.display.data[sample]! > manualNeutral.display.data[sample]!);
+    assert.ok(manualWarm.display.data[sample + 2]! < manualNeutral.display.data[sample + 2]!);
   });
 });
 
@@ -915,7 +1125,7 @@ describe("Default recipe", () => {
     assert.equal(DEFAULT_RECIPE.baseRoi, undefined);
     assert.equal(DEFAULT_RECIPE.dmaxMode, "auto");
     assert.equal(DEFAULT_RECIPE.autoNeutralize, true);
-    assert.deepEqual(DEFAULT_RECIPE.whiteBalance, [1, 1, 1]);
+    assert.equal(DEFAULT_RECIPE.temperatureKelvin, 5500);
     assert.equal(DEFAULT_RECIPE.autoWhiteBalance, true);
     assert.equal(DEFAULT_RECIPE.preSaturation, 1.08);
     assert.equal(DEFAULT_RECIPE.exposure, 0);
@@ -947,3 +1157,236 @@ describe("Recipe application order", () => {
     assert.equal(result.base.method, "automatic");
   });
 });
+
+describe("CPU pipeline acceleration", () => {
+  function performanceNegative(): Raster {
+    const base: Rgb = [0.84, 0.61, 0.39];
+    return build(128, 88, "transmission-linear", (x, y) => {
+      if (x < 10 || y < 5 || x >= 123 || y >= 83) return base;
+      const level = 0.05 + 0.9 * ((x - 10) / 113 * 0.7 + (y - 5) / 78 * 0.3);
+      const accent = (x * 17 + y * 31) % 11 === 0;
+      const scene: Rgb = accent ? [level, level * 0.55, level * 0.25] : [level, level, level];
+      return [
+        base[0] * Math.pow(10, -(0.03 + -Math.log10(scene[0]) * 0.96)),
+        base[1] * Math.pow(10, -(0.00 + -Math.log10(scene[1]) * 1.02)),
+        base[2] * Math.pow(10, -(0.05 + -Math.log10(scene[2]) * 1.08)),
+      ];
+    });
+  }
+
+  it("invalidates only the cache layers affected by each recipe field", () => {
+    const session = new NegativeSession(performanceNegative());
+    const initial = baseRecipe({ autoNeutralize: false });
+    session.process(initial);
+    assert.deepEqual(session.stats, { geometry: 1, analysis: 1, inversion: 1, balance: 1, tone: 1 });
+
+    session.process({ ...initial, exposure: 0.4 });
+    assert.deepEqual(session.stats, { geometry: 1, analysis: 1, inversion: 1, balance: 1, tone: 2 });
+
+    // Manual temperature is intentionally absent from the automatic-WB key.
+    session.process({ ...initial, temperatureKelvin: 7200 });
+    assert.deepEqual(session.stats, { geometry: 1, analysis: 1, inversion: 1, balance: 1, tone: 3 });
+
+    session.process({ ...initial, autoWhiteBalance: false, temperatureKelvin: 7200 });
+    assert.deepEqual(session.stats, { geometry: 1, analysis: 1, inversion: 1, balance: 2, tone: 4 });
+
+    session.process({ ...initial, preSaturation: 1.2 });
+    assert.deepEqual(session.stats, { geometry: 1, analysis: 1, inversion: 2, balance: 3, tone: 5 });
+
+    session.process({ ...initial, dmaxMode: "manual", manualDmax: 2.2 });
+    assert.deepEqual(session.stats, { geometry: 1, analysis: 2, inversion: 3, balance: 4, tone: 6 });
+
+    session.process({ ...initial, rotate: 90 });
+    assert.deepEqual(session.stats, { geometry: 2, analysis: 3, inversion: 4, balance: 5, tone: 7 });
+  });
+
+  it("matches the previous sorted percentile definition exactly", () => {
+    let seed = 0x5eed1234;
+    const random = (): number => {
+      seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
+      return seed / 0x1_0000_0000;
+    };
+    for (let length = 1; length <= 257; length += 7) {
+      const values = Array.from({ length }, (_, index) => (
+        index % 9 === 0 ? 0.5 : Math.round((random() * 20 - 10) * 8) / 8
+      ));
+      for (const fraction of [0, 0.01, 0.25, 0.5, 0.73, 0.995, 1]) {
+        const sorted = [...values].sort((left, right) => left - right);
+        const position = (length - 1) * fraction;
+        const lower = Math.floor(position);
+        const upper = Math.ceil(position);
+        const weight = position - lower;
+        const expected = sorted[lower]! * (1 - weight) + sorted[upper]! * weight;
+        assert.equal(percentile(values, fraction), expected);
+      }
+    }
+  });
+
+  it("produces byte-identical 8/16-bit output with 1, 2, and 4 pixel partitions", () => {
+    const source = performanceNegative();
+    for (const recipe of [
+      baseRecipe({ autoNeutralize: true, autoWhiteBalance: true }),
+      baseRecipe({
+        rotate: 7.5,
+        crop: { x: 0.03, y: 0.03, width: 0.94, height: 0.94 },
+        autoNeutralize: false,
+        autoWhiteBalance: false,
+        temperatureKelvin: 7200,
+        preSaturation: 1.25,
+        exposure: 0.35,
+        contrast: 1.2,
+        highlightCompression: 0.45,
+        saturation: 1.3,
+      }),
+    ]) {
+      const canonical = processNegative(source, recipe).display;
+      const expected8 = encode8(canonical);
+      const expected16 = encode16(canonical);
+      for (const partitions of [1, 2, 4]) {
+        const { bytes8, bytes16 } = runPartitionedPipeline(source, recipe, partitions);
+        assert.deepEqual(bytes8, expected8, `${partitions}-partition 8-bit output diverged`);
+        assert.deepEqual(bytes16, expected16, `${partitions}-partition 16-bit output diverged`);
+      }
+
+      const preview = new NegativeSession(source).processPreview(recipe);
+      const expectedRgba = new Uint8ClampedArray(expected8.length / 3 * 4);
+      for (let sourceOffset = 0, targetOffset = 0; sourceOffset < expected8.length; sourceOffset += 3, targetOffset += 4) {
+        expectedRgba[targetOffset] = expected8[sourceOffset]!;
+        expectedRgba[targetOffset + 1] = expected8[sourceOffset + 1]!;
+        expectedRgba[targetOffset + 2] = expected8[sourceOffset + 2]!;
+        expectedRgba[targetOffset + 3] = 255;
+      }
+      assert.deepEqual(preview.rgba, expectedRgba, "fused preview RGBA output diverged");
+    }
+  });
+
+  it("matches canonical rotation and crop exactly across geometry partitions", () => {
+    const source = performanceNegative();
+    const sourceBuffer = new SharedArrayBuffer(source.data.byteLength);
+    new Float32Array(sourceBuffer).set(source.data);
+    for (const specification of [
+      { rotate: 0, crop: undefined },
+      { rotate: 90, crop: { x: 0.05, y: 0.1, width: 0.8, height: 0.75 } },
+      { rotate: -17.35, crop: { x: 0.03, y: 0.04, width: 0.91, height: 0.89 } },
+      { rotate: 132.5, crop: undefined },
+    ] as const) {
+      const rotated = rotateRaster(source, specification.rotate);
+      const expected = specification.crop === undefined ? rotated : cropRaster(rotated, specification.crop);
+      const plan = createGeometryPlan(source.width, source.height, specification.rotate, specification.crop);
+      assert.equal(plan.width, expected.width);
+      assert.equal(plan.height, expected.height);
+      const pixelCount = plan.width * plan.height;
+      for (const partitions of [1, 2, 4]) {
+        const output = new SharedArrayBuffer(expected.data.byteLength);
+        for (let part = 0; part < partitions; part += 1) {
+          executeKernelTask({
+            taskId: part,
+            action: "geometry",
+            startPixel: Math.floor(pixelCount * part / partitions),
+            endPixel: Math.floor(pixelCount * (part + 1) / partitions),
+            pixels: output,
+            source: sourceBuffer,
+            geometryPlan: plan,
+          });
+        }
+        assert.deepEqual(new Float32Array(output), expected.data);
+      }
+    }
+  });
+
+  it("keeps identity tone fast paths byte-identical to the original equations", () => {
+    let seed = 0x13579bdf;
+    const scene = build(257, 193, "scene-linear-rgb", () => {
+      seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0;
+      const red = seed / 0x1_0000_0000 * 6;
+      seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0;
+      const green = seed / 0x1_0000_0000 * 6;
+      seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0;
+      const blue = seed / 0x1_0000_0000 * 6;
+      return [red, green, blue];
+    });
+    for (const recipe of [
+      baseRecipe({ exposure: 0.37, contrast: 1, highlightCompression: 0, saturation: 1 }),
+      baseRecipe({ exposure: -0.63, contrast: 1, highlightCompression: 0.4, saturation: 1 }),
+      baseRecipe({ exposure: 0.12, contrast: 1, highlightCompression: 0.2, saturation: 0.8 }),
+      baseRecipe({ exposure: 0.12, contrast: 1.2, highlightCompression: 0.2, saturation: 1 }),
+    ]) {
+      assert.deepEqual(toneMapEncodeRgba8(scene, recipe, 2.3), legacyToneRgba(scene, recipe, 2.3));
+    }
+  });
+});
+
+function legacyToneRgba(scene: Raster, recipe: Recipe, whitePoint: number): Uint8ClampedArray {
+  const target = new Uint8ClampedArray(scene.width * scene.height * 4);
+  const exposureScale = Math.pow(2, recipe.exposure);
+  const kneeSlope = 1 - recipe.highlightCompression;
+  for (let offset = 0; offset < scene.data.length; offset += 3) {
+    const channels = [scene.data[offset]!, scene.data[offset + 1]!, scene.data[offset + 2]!].map((input) => {
+      const exposed = input * exposureScale;
+      const contrasted = exposed <= 0
+        ? 0
+        : 0.18 * Math.pow(2, Math.log2(exposed / 0.18) * recipe.contrast);
+      return recipe.highlightCompression > 0 && contrasted > 1
+        ? 1 + (contrasted - 1) * kneeSlope
+        : contrasted;
+    });
+    const luma = channels[0]! * 0.2126 + channels[1]! * 0.7152 + channels[2]! * 0.0722;
+    const rgbaOffset = offset / 3 * 4;
+    for (let channel = 0; channel < 3; channel += 1) {
+      const display = Math.fround(
+        Math.max(0, luma + (channels[channel]! - luma) * recipe.saturation) / whitePoint,
+      );
+      target[rgbaOffset + channel] = Math.round(srgbOetf(display) * 255);
+    }
+    target[rgbaOffset + 3] = 255;
+  }
+  return target;
+}
+
+function runPartitionedPipeline(
+  source: Raster,
+  recipe: Recipe,
+  partitions: number,
+): { bytes8: Uint8Array; bytes16: Uint16Array } {
+  const rotated = rotateRaster(source, recipe.rotate);
+  const framed = recipe.crop === undefined ? rotated : cropRaster(rotated, recipe.crop);
+  const base = recipe.baseMode === "roi" && recipe.baseRoi !== undefined
+    ? sampleFilmBase(framed, recipe.baseRoi)
+    : estimateFilmBase(framed);
+  const pixels = new SharedArrayBuffer(framed.data.byteLength);
+  new Float32Array(pixels).set(framed.data);
+  const pixelCount = framed.width * framed.height;
+  const execute = (action: KernelAction, parameters: Partial<KernelTask> = {}): void => {
+    for (let part = 0; part < partitions; part += 1) {
+      executeKernelTask({
+        taskId: part,
+        action,
+        startPixel: Math.floor(pixelCount * part / partitions),
+        endPixel: Math.floor(pixelCount * (part + 1) / partitions),
+        pixels,
+        ...parameters,
+      });
+    }
+  };
+
+  execute("density", { base: base.rgb });
+  const density = new Raster(framed.width, framed.height, "relative-density", new Float32Array(pixels));
+  const anchors = measureDensityAnchors(base.rgb, density, 0.995, {
+    dmaxOverride: recipe.dmaxMode === "manual" ? recipe.manualDmax : undefined,
+    neutralRoi: recipe.autoNeutralize ? recipe.neutralRoi : undefined,
+    autoNeutralize: recipe.autoNeutralize,
+  });
+  execute("invert", { anchors, preSaturation: recipe.preSaturation });
+  const inverted = new Raster(framed.width, framed.height, "scene-linear-rgb", new Float32Array(pixels));
+  const gains = recipe.autoWhiteBalance
+    ? estimateWhiteBalance(inverted)
+    : temperatureToGains(recipe.temperatureKelvin);
+  execute("gains", { gains });
+  const scene = new Raster(framed.width, framed.height, "scene-linear-rgb", new Float32Array(pixels));
+  const whitePoint = estimateWhitePoint(scene);
+  const output8 = new SharedArrayBuffer(pixelCount * 3);
+  const output16 = new SharedArrayBuffer(pixelCount * 3 * Uint16Array.BYTES_PER_ELEMENT);
+  execute("toneEncode8", { output: output8, recipe, whitePoint });
+  execute("toneEncode16", { output: output16, recipe, whitePoint });
+  return { bytes8: new Uint8Array(output8), bytes16: new Uint16Array(output16) };
+}

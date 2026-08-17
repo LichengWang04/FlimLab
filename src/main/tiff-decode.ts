@@ -1,6 +1,12 @@
 import { promises as fs } from "node:fs";
 import { promisify } from "node:util";
 import { inflate, inflateRaw } from "node:zlib";
+import {
+  assertImageDimensions,
+  assertSourceFile,
+  assertTiffStrips,
+  MAX_TIFF_STRIP_BYTES,
+} from "./resource-limits.ts";
 
 const inflateAsync = promisify(inflate);
 const inflateRawAsync = promisify(inflateRaw);
@@ -37,6 +43,7 @@ const COMPRESSION_DEFLATE = 8;
 const COMPRESSION_PACKBITS = 32773;
 
 export async function readTiff(path: string): Promise<TiffImage> {
+  await assertSourceFile(path);
   const file = await fs.readFile(path);
   if (file.length < 8) throw new Error("TIFF 文件过小或已损坏。");
   const littleEndian = file.toString("ascii", 0, 2) === "II";
@@ -53,7 +60,10 @@ export async function readTiff(path: string): Promise<TiffImage> {
 
   const tags = new Map<number, Tag>();
   let ifdOffset = read32(4);
+  const seenIfds = new Set<number>();
   while (ifdOffset !== 0) {
+    if (seenIfds.has(ifdOffset) || seenIfds.size >= 64) throw new Error("TIFF IFD 链无效或过长。");
+    seenIfds.add(ifdOffset);
     if (ifdOffset + 2 > file.length) throw new Error("TIFF 文件已截断或损坏。");
     const entryCount = read16(ifdOffset);
     if (ifdOffset + 2 + entryCount * 12 + 4 > file.length) throw new Error("TIFF 文件已截断或损坏。");
@@ -79,7 +89,7 @@ export async function readTiff(path: string): Promise<TiffImage> {
   const samples = tags.get(277)?.value ?? 3;
   const planar = tags.get(284)?.value ?? 1;
 
-  if (width < 1 || height < 1) throw new Error("TIFF 尺寸无效。");
+  assertImageDimensions(width, height);
   if (photometric !== 1 && photometric !== 2) {
     throw new Error("暂不支持该 TIFF 色彩布局(仅支持 RGB/灰度),请先转换为 16 位 RGB TIFF。");
   }
@@ -107,14 +117,20 @@ export async function readTiff(path: string): Promise<TiffImage> {
   const compression = tags.get(259)?.value ?? 1;
   const stripOffsets = readLongArray(file, required(273, "StripOffsets"), littleEndian);
   const stripCounts = readLongArray(file, required(279, "StripByteCounts"), littleEndian);
-  if (stripOffsets.length !== stripCounts.length || stripOffsets.length === 0) {
-    throw new Error("TIFF 条带偏移与长度不匹配。");
-  }
+  assertTiffStrips(stripOffsets, stripCounts);
   const predictor = tags.get(317)?.value ?? 1;
   if (predictor !== 1 && predictor !== 2) throw new Error("TIFF Predictor 标签不受支持。");
 
   const expectedLength = width * height * samples * (depth / 8);
   const rowsPerStrip = tags.get(278)?.value ?? height;
+  // TIFF permits RowsPerStrip to exceed ImageLength; that still describes one
+  // strip and is what libvips/sharp commonly writes for small images.
+  if (!Number.isSafeInteger(rowsPerStrip) || rowsPerStrip < 1) {
+    throw new Error("TIFF RowsPerStrip 无效。");
+  }
+  if (stripOffsets.length !== Math.ceil(height / rowsPerStrip)) {
+    throw new Error("TIFF 条带数量与 RowsPerStrip 不一致。");
+  }
   const stripRows = stripOffsets.map((_, index) => (
     index === stripOffsets.length - 1
       ? height - rowsPerStrip * (stripOffsets.length - 1)
@@ -126,9 +142,16 @@ export async function readTiff(path: string): Promise<TiffImage> {
   for (let index = 0; index < stripOffsets.length; index += 1) {
     const offset = stripOffsets[index]!;
     const count = stripCounts[index]!;
-    if (offset + count > file.length) throw new Error("TIFF 条带数据越界,文件可能已截断。");
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset + count > file.length) {
+      throw new Error("TIFF 条带数据越界,文件可能已截断。");
+    }
     const encoded = file.subarray(offset, offset + count);
-    const decoded = await decompressStrip(encoded, compression);
+    const decodedBytes = stripRows[index]! * width * bytesPerPixel;
+    if (decodedBytes < 1 || decodedBytes > MAX_TIFF_STRIP_BYTES) {
+      throw new Error("TIFF 解码条带超过安全内存上限。");
+    }
+    const decoded = await decompressStrip(encoded, compression, decodedBytes);
+    if (decoded.length !== decodedBytes) throw new Error("TIFF 条带解码长度与声明尺寸不一致。");
     if (predictor === 2) undoHorizontalPredictor(decoded, stripRows[index]!, width, bytesPerPixel, depth, samples);
     const rowBytes = width * bytesPerPixel;
     target.set(decoded.subarray(0, stripRows[index]! * rowBytes), index * rowsPerStrip * rowBytes);
@@ -149,6 +172,7 @@ export async function readTiff(path: string): Promise<TiffImage> {
 
 function readShortArray(file: Buffer, tag: Tag, littleEndian: boolean): number[] {
   const values: number[] = [];
+  if (tag.count > 65_536) throw new Error("TIFF SHORT 标签数组过长。");
   if (tag.type === 3) {
     if (tag.count === 1) {
       // A single SHORT is stored inline in the low 16 bits of the value field.
@@ -156,6 +180,7 @@ function readShortArray(file: Buffer, tag: Tag, littleEndian: boolean): number[]
     } else if (tag.count === 2) {
       values.push(tag.value & 0xffff, (tag.value >>> 16) & 0xffff);
     } else {
+      if (tag.value + tag.count * 2 > file.length) throw new Error("TIFF SHORT 标签数据越界。");
       for (let index = 0; index < tag.count; index += 1) {
         values.push(littleEndian
           ? file.readUInt16LE(tag.value + index * 2)
@@ -168,10 +193,12 @@ function readShortArray(file: Buffer, tag: Tag, littleEndian: boolean): number[]
 
 function readLongArray(file: Buffer, tag: Tag, littleEndian: boolean): number[] {
   const values: number[] = [];
+  if (tag.count > 65_536) throw new Error("TIFF LONG 标签数组过长。");
   if (tag.type === 4) {
     if (tag.count === 1) {
       values.push(tag.value);
     } else {
+      if (tag.value + tag.count * 4 > file.length) throw new Error("TIFF LONG 标签数据越界。");
       for (let index = 0; index < tag.count; index += 1) {
         values.push(littleEndian
           ? file.readUInt32LE(tag.value + index * 4)
@@ -182,21 +209,21 @@ function readLongArray(file: Buffer, tag: Tag, littleEndian: boolean): number[] 
   return values;
 }
 
-async function decompressStrip(encoded: Buffer, compression: number): Promise<Buffer> {
+async function decompressStrip(encoded: Buffer, compression: number, expectedBytes: number): Promise<Buffer> {
   switch (compression) {
     case COMPRESSION_NONE:
       return encoded;
     case COMPRESSION_DEFLATE:
       // libtiff writes zlib streams; a few writers emit raw deflate.
       try {
-        return await inflateAsync(encoded);
+        return await inflateAsync(encoded, { maxOutputLength: expectedBytes });
       } catch {
-        return await inflateRawAsync(encoded);
+        return await inflateRawAsync(encoded, { maxOutputLength: expectedBytes });
       }
     case COMPRESSION_LZW:
-      return lzwDecode(encoded);
+      return lzwDecode(encoded, expectedBytes);
     case COMPRESSION_PACKBITS:
-      return packBitsDecode(encoded);
+      return packBitsDecode(encoded, expectedBytes);
     default:
       throw new Error(`不支持的 TIFF 压缩方式(${compression}),请先转换为 Deflate/无压缩 TIFF。`);
   }
@@ -235,7 +262,7 @@ function undoHorizontalPredictor(
  * "early change" rule (the code width grows when the next table slot is
  * 2^width - 1, not one code later).
  */
-function lzwDecode(input: Buffer): Buffer {
+function lzwDecode(input: Buffer, outputLimit: number): Buffer {
   const clear = 256;
   const eoi = 257;
   const table: Uint8Array[] = [];
@@ -246,11 +273,13 @@ function lzwDecode(input: Buffer): Buffer {
   let previous: Uint8Array | null = null;
 
   const chunks: Uint8Array[] = [];
+  let outputLength = 0;
   let bitBuffer = 0;
   let bitCount = 0;
   let position = 0;
   const readCode = (): number => {
     while (bitCount < codeSize) {
+      if (position >= input.length) throw new Error("LZW 数据流已截断。");
       bitBuffer = (bitBuffer << 8) | (input[position] ?? 0);
       bitCount += 8;
       position += 1;
@@ -280,6 +309,8 @@ function lzwDecode(input: Buffer): Buffer {
       throw new Error("LZW 数据流损坏。");
     }
     if (entry.length === 0) throw new Error("LZW 数据流损坏(空表项)。");
+    outputLength += entry.length;
+    if (outputLength > outputLimit) throw new Error("LZW 解码结果超过条带安全上限。");
     chunks.push(entry);
     if (previous !== null) {
       const joined = new Uint8Array(previous.length + 1);
@@ -294,20 +325,27 @@ function lzwDecode(input: Buffer): Buffer {
   return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)));
 }
 
-function packBitsDecode(input: Buffer): Buffer {
+function packBitsDecode(input: Buffer, outputLimit: number): Buffer {
   const chunks: Buffer[] = [];
   let position = 0;
+  let outputLength = 0;
   while (position < input.length) {
     const header = input[position]!;
     position += 1;
     if (header <= 127) {
       // Literal run of header + 1 bytes.
       const length = header + 1;
+      if (position + length > input.length) throw new Error("PackBits 数据流已截断。");
+      outputLength += length;
+      if (outputLength > outputLimit) throw new Error("PackBits 解码结果超过条带安全上限。");
       chunks.push(input.subarray(position, position + length));
       position += length;
     } else if (header >= 129) {
       // Replicate the next byte 257 - header times.
       const length = 257 - header;
+      if (position >= input.length) throw new Error("PackBits 数据流已截断。");
+      outputLength += length;
+      if (outputLength > outputLimit) throw new Error("PackBits 解码结果超过条带安全上限。");
       const value = input[position] ?? 0;
       position += 1;
       chunks.push(Buffer.alloc(length, value));

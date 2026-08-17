@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { DEFAULT_RECIPE, Raster, encode8, processNegative, srgbOetf } from "../../core/index.ts";
+import {
+  DEFAULT_RECIPE,
+  Raster,
+  encode8,
+  normalizeRotation,
+  processNegative,
+  straightenAngle,
+} from "../../core/index.ts";
 import type { BaseSample, DensityAnchors, Recipe, Rect, Rgb } from "../../core/index.ts";
 import type {
+  AppInfo,
   RollExportProgress,
   RollExportResult,
   RollFrameInfo,
@@ -9,85 +17,24 @@ import type {
   RollPreview,
   RollThumbnail,
 } from "../../shared/ipc.ts";
-import { RadioGroup, Section, Slider } from "./ui.tsx";
-
-type DrawMode = "view" | "base-roi" | "neutral-roi" | "crop";
-
-interface PreviewResult {
-  rgba: Uint8ClampedArray<ArrayBuffer>;
-  /** Delivered composition size (after rotation and crop). */
-  width: number;
-  height: number;
-  base: BaseSample;
-  anchors: DensityAnchors;
-  whitePoint: number;
-  autoGains?: Rgb;
-  ms: number;
-}
-
-interface FrameEntry {
-  info: RollFrameInfo;
-  thumbnail: { width: number; height: number; raster: Float32Array } | null;
-  status: "idle" | "exported" | "failed";
-  failure?: string;
-}
+import { RadioGroup } from "./ui.tsx";
+import { AboutDialog } from "./AboutDialog.tsx";
+import { AdjustmentPanel } from "./AdjustmentPanel.tsx";
+import { Filmstrip } from "./Filmstrip.tsx";
+import { FilmCanisterIcon } from "./FilmCanisterIcon.tsx";
+import { PreviewWorkerClient } from "./preview-worker-client.ts";
+import { cloneRecipe } from "./renderer-types.ts";
+import type { DrawMode, FrameEntry, PreviewResult, StraightenLine } from "./renderer-types.ts";
 
 const BASE_ERROR = /片基/;
 const PREVIEW_CACHE_LIMIT = 3;
-
-function cloneRecipe(recipe: Recipe): Recipe {
-  return {
-    ...recipe,
-    crop: recipe.crop === undefined ? undefined : { ...recipe.crop },
-    baseRoi: recipe.baseRoi === undefined ? undefined : { ...recipe.baseRoi },
-    neutralRoi: recipe.neutralRoi === undefined ? undefined : { ...recipe.neutralRoi },
-    whiteBalance: [...recipe.whiteBalance],
-  };
-}
-
-function FrameThumb({ frame, recipe }: { frame: FrameEntry; recipe: Recipe | undefined }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const thumb = frame.thumbnail;
-    if (canvas === null || thumb === null) return;
-    canvas.width = thumb.width;
-    canvas.height = thumb.height;
-    const context = canvas.getContext("2d");
-    if (context === null) return;
-
-    let bytes: Uint8Array;
-    let outWidth = thumb.width;
-    let outHeight = thumb.height;
-    try {
-      if (recipe === undefined) throw new Error("配方尚未就绪。");
-      const raster = new Raster(thumb.width, thumb.height, "transmission-linear", thumb.raster);
-      const { display } = processNegative(raster, recipe);
-      bytes = encode8(display);
-      outWidth = display.width;
-      outHeight = display.height;
-    } catch {
-      // Fallback: show the raw negative scan (linear → sRGB).
-      bytes = new Uint8Array(thumb.raster.length);
-      for (let index = 0; index < thumb.raster.length; index += 1) {
-        bytes[index] = Math.round(srgbOetf(thumb.raster[index]!) * 255);
-      }
-    }
-    canvas.width = outWidth;
-    canvas.height = outHeight;
-    const rgba = new Uint8ClampedArray(bytes.length / 3 * 4);
-    for (let i = 0, j = 0; i < bytes.length; i += 3, j += 4) {
-      rgba[j] = bytes[i]!;
-      rgba[j + 1] = bytes[i + 1]!;
-      rgba[j + 2] = bytes[i + 2]!;
-      rgba[j + 3] = 255;
-    }
-    context.putImageData(new ImageData(rgba, outWidth, outHeight), 0, 0);
-  }, [frame.thumbnail, recipe]);
-
-  return <canvas ref={canvasRef} className="frame-thumb" />;
-}
+const NEUTRALIZATION_LABEL = {
+  curve: "曲线",
+  "neutral-axis": "中性轴",
+  pca: "PCA",
+  anchor: "锚点",
+  none: "无校正",
+} as const;
 
 export function App() {
   const [frames, setFrames] = useState<FrameEntry[]>([]);
@@ -100,16 +47,28 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [mode, setMode] = useState<DrawMode>("view");
   const [draft, setDraft] = useState<Rect | null>(null);
+  const [draftLine, setDraftLine] = useState<StraightenLine | null>(null);
+  const [overlayRevision, setOverlayRevision] = useState(0);
   const [exporting, setExporting] = useState<"tiff" | "jpeg" | null>(null);
   const [rollProgress, setRollProgress] = useState<RollExportProgress | null>(null);
   const [summary, setSummary] = useState<RollExportResult | null>(null);
+  const [workerReady, setWorkerReady] = useState(false);
+  const [workerFailed, setWorkerFailed] = useState(false);
+  const [sessionReady, setSessionReady] = useState(false);
+  const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
+  const [aboutOpen, setAboutOpen] = useState(false);
 
   const imageCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+  const draftLineRef = useRef<StraightenLine | null>(null);
   const debounceRef = useRef<number | undefined>(undefined);
   const toastTimerRef = useRef<number | undefined>(undefined);
+  const sessionSaveTimerRef = useRef<number | undefined>(undefined);
   const previewCacheRef = useRef(new Map<string, RollPreview>());
+  const previewWorkerRef = useRef<PreviewWorkerClient | null>(null);
+  const previewRevisionRef = useRef(0);
+  const thumbnailRecipeKeysRef = useRef(new Map<string, string>());
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
 
@@ -131,16 +90,89 @@ export function App() {
     toastTimerRef.current = window.setTimeout(() => setToast(null), 6000);
   }, []);
 
+  const loadThumbnails = useCallback((infos: RollFrameInfo[]) => {
+    for (const info of infos) {
+      window.filmlab.thumbnailFrame(info.id).then((thumb: RollThumbnail) => {
+        setFrames((current) => current.map(
+          (frame) => frame.info.id === thumb.id ? { ...frame, thumbnail: thumb } : frame,
+        ));
+      }).catch(() => {
+        // Thumbnail decode failures leave the card blank; preview/export
+        // still report their own errors.
+      });
+    }
+  }, []);
+
   // Listen to batch export progress for the lifetime of the window.
   useEffect(() => window.filmlab.onExportProgress(setRollProgress), []);
+
+  useEffect(() => {
+    void window.filmlab.appInfo().then(setAppInfo).catch(() => setAppInfo(null));
+  }, []);
+
+  useEffect(() => {
+    try {
+      const client = new PreviewWorkerClient();
+      client.onFatal((message) => {
+        previewWorkerRef.current = null;
+        setWorkerReady(false);
+        setWorkerFailed(true);
+        setError(`后台预览不可用，已回退到兼容模式：${message}`);
+      });
+      previewWorkerRef.current = client;
+      setWorkerReady(true);
+      return () => {
+        previewWorkerRef.current = null;
+        client.terminate();
+      };
+    } catch (caught) {
+      setWorkerFailed(true);
+      setError(`后台预览不可用，已回退到兼容模式：${caught instanceof Error ? caught.message : String(caught)}`);
+      return;
+    }
+  }, []);
 
   // Debounced preview processing of the active frame; thumbnails and export
   // reuse the same core so everything stays on one formula set.
   useEffect(() => {
-    if (preview === null || recipe === null) return;
+    if (preview === null || recipe === null || (!workerReady && !workerFailed)) return;
     window.clearTimeout(debounceRef.current);
     debounceRef.current = window.setTimeout(() => {
       const id = activeIdRef.current;
+      const client = previewWorkerRef.current;
+      if (client !== null) {
+        const submit = (revision: number, retried = false): void => {
+          client.requestPreview({
+            id: preview.id,
+            recipe,
+            revision,
+            onResult: (processed, completedRevision) => {
+              if (completedRevision !== previewRevisionRef.current || activeIdRef.current !== preview.id) return;
+              setResult(processed);
+              setError(null);
+            },
+            onError: (message, missingSource) => {
+              if (activeIdRef.current !== preview.id) return;
+              if (missingSource && !retried) {
+                client.registerSource(preview.id, preview.width, preview.height, preview.raster);
+                submit(++previewRevisionRef.current, true);
+                return;
+              }
+              if (BASE_ERROR.test(message) && recipe.baseMode !== "auto") {
+                setRecipes((current) => {
+                  const previous = current[id ?? ""];
+                  if (id === null || previous === undefined) return current;
+                  return { ...current, [id]: { ...previous, baseMode: "auto", baseRoi: undefined } };
+                });
+              } else {
+                setError(message);
+              }
+            },
+          });
+        };
+        submit(++previewRevisionRef.current);
+        return;
+      }
       try {
         const raster = new Raster(preview.width, preview.height, "transmission-linear", preview.raster);
         const started = performance.now();
@@ -180,7 +212,32 @@ export function App() {
       }
     }, 110);
     return () => window.clearTimeout(debounceRef.current);
-  }, [preview, recipe]);
+  }, [preview, recipe, workerReady, workerFailed]);
+
+  useEffect(() => {
+    const client = previewWorkerRef.current;
+    if (client === null) return;
+    for (const frame of frames) {
+      const thumbnail = frame.thumbnail;
+      const frameRecipe = recipes[frame.info.id];
+      if (thumbnail === null || frameRecipe === undefined) continue;
+      const key = JSON.stringify(frameRecipe);
+      if (thumbnailRecipeKeysRef.current.get(frame.info.id) === key) continue;
+      thumbnailRecipeKeysRef.current.set(frame.info.id, key);
+      client.requestThumbnail({
+        id: frame.info.id,
+        width: thumbnail.width,
+        height: thumbnail.height,
+        raster: thumbnail.raster,
+        recipe: frameRecipe,
+        onResult: (renderedThumbnail) => {
+          setFrames((current) => current.map(
+            (entry) => entry.info.id === frame.info.id ? { ...entry, renderedThumbnail } : entry,
+          ));
+        },
+      });
+    }
+  }, [frames, recipes, workerReady]);
 
   // Draw the processed preview at the delivered (post-geometry) size.
   useEffect(() => {
@@ -193,27 +250,44 @@ export function App() {
     context.putImageData(new ImageData(result.rgba, result.width, result.height), 0, 0);
   }, [result]);
 
+  useEffect(() => {
+    const canvas = overlayCanvasRef.current;
+    if (canvas === null) return;
+    const observer = new ResizeObserver(() => setOverlayRevision((current) => current + 1));
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [preview]);
+
   // Draw region overlays in delivered-space coordinates (base and neutral
   // ROIs are already relative to the delivered frame), on a layer matching
   // the delivered canvas so drags stay cheap.
   useEffect(() => {
     const canvas = overlayCanvasRef.current;
-    if (canvas === null || result === null || recipe === null) return;
-    canvas.width = result.width;
-    canvas.height = result.height;
+    const imageCanvas = imageCanvasRef.current;
+    if (canvas === null || imageCanvas === null || result === null || recipe === null) return;
+    const overlayBounds = canvas.getBoundingClientRect();
+    const imageBounds = imageCanvas.getBoundingClientRect();
+    canvas.width = Math.max(1, Math.round(overlayBounds.width));
+    canvas.height = Math.max(1, Math.round(overlayBounds.height));
+    const imageRect = {
+      x: imageBounds.left - overlayBounds.left,
+      y: imageBounds.top - overlayBounds.top,
+      width: imageBounds.width,
+      height: imageBounds.height,
+    };
     const context = canvas.getContext("2d");
     if (context === null) return;
     context.clearRect(0, 0, canvas.width, canvas.height);
 
     const stroke = (rect: Rect, color: string) => {
       context.strokeStyle = color;
-      context.lineWidth = Math.max(2, Math.round(canvas.width / 500));
-      context.setLineDash([Math.round(canvas.width / 90), Math.round(canvas.width / 180)]);
+      context.lineWidth = Math.max(2, Math.round(imageRect.width / 500));
+      context.setLineDash([Math.round(imageRect.width / 90), Math.round(imageRect.width / 180)]);
       context.strokeRect(
-        rect.x * canvas.width,
-        rect.y * canvas.height,
-        rect.width * canvas.width,
-        rect.height * canvas.height,
+        imageRect.x + rect.x * imageRect.width,
+        imageRect.y + rect.y * imageRect.height,
+        rect.width * imageRect.width,
+        rect.height * imageRect.height,
       );
       context.setLineDash([]);
     };
@@ -228,18 +302,45 @@ export function App() {
       // outline rather than a region that no longer exists on the canvas.
       context.strokeStyle = "#f8fafc";
       context.lineWidth = 1;
-      context.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
+      context.strokeRect(imageRect.x + 1, imageRect.y + 1, imageRect.width - 2, imageRect.height - 2);
     }
     if (draft !== null) {
       stroke(draft, "#facc15");
     }
-  }, [result, recipe, mode, draft]);
+    if (draftLine !== null) {
+      const startX = imageRect.x + draftLine.start.x * imageRect.width;
+      const startY = imageRect.y + draftLine.start.y * imageRect.height;
+      const endX = imageRect.x + draftLine.end.x * imageRect.width;
+      const endY = imageRect.y + draftLine.end.y * imageRect.height;
+      context.strokeStyle = "#f2a33a";
+      context.fillStyle = "#f2a33a";
+      context.lineWidth = Math.max(2, Math.round(imageRect.width / 500));
+      context.beginPath();
+      context.moveTo(startX, startY);
+      context.lineTo(endX, endY);
+      context.stroke();
+      for (const [x, y] of [[startX, startY], [endX, endY]] as const) {
+        context.beginPath();
+        context.arc(x, y, Math.max(4, imageRect.width / 220), 0, Math.PI * 2);
+        context.fill();
+      }
+      try {
+        const correction = straightenAngle({ x: startX, y: startY }, { x: endX, y: endY });
+        context.font = `${Math.max(12, Math.round(imageRect.width / 90))}px Segoe UI`;
+        context.fillText(`${correction >= 0 ? "+" : ""}${correction.toFixed(2)}°`, (startX + endX) / 2 + 8, (startY + endY) / 2 - 8);
+      } catch {
+        // A zero-length draft has no angle yet.
+      }
+    }
+  }, [result, recipe, mode, draft, draftLine, overlayRevision]);
 
   const selectFrame = useCallback(async (id: string) => {
     setActiveId(id);
     setResult(null);
     setError(null);
     setDraft(null);
+    setDraftLine(null);
+    draftLineRef.current = null;
     setMode("view");
     const cache = previewCacheRef.current;
     const cached = cache.get(id);
@@ -250,6 +351,7 @@ export function App() {
     try {
       const decoded = await window.filmlab.previewFrame(id);
       if (activeIdRef.current === id) {
+        previewWorkerRef.current?.registerSource(id, decoded.width, decoded.height, decoded.raster);
         cache.set(id, decoded);
         while (cache.size > PREVIEW_CACHE_LIMIT) {
           const oldest = cache.keys().next().value as string | undefined;
@@ -265,6 +367,51 @@ export function App() {
     }
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    void window.filmlab.restoreSession().then(async (restored) => {
+      if (cancelled || restored === null || restored.frames.length === 0) return;
+      const entries = restored.frames.map(({ info }) => ({ info, thumbnail: null, status: "idle" as const }));
+      const restoredRecipes = Object.fromEntries(restored.frames.map((frame) => [frame.info.id, frame.recipe]));
+      setFrames(entries);
+      setRecipes(restoredRecipes);
+      setSkipped(new Set(restored.frames.filter((frame) => frame.skipped).map((frame) => frame.info.id)));
+      loadThumbnails(restored.frames.map((frame) => frame.info));
+      await selectFrame(restored.activeId ?? restored.frames[0]!.info.id);
+      if (!cancelled) showToast(`已恢复上次会话：${restored.frames.length} 帧。`);
+    }).catch((caught: unknown) => {
+      if (!cancelled) setError(`无法恢复上次会话：${caught instanceof Error ? caught.message : String(caught)}`);
+    }).finally(() => {
+      if (!cancelled) setSessionReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadThumbnails, selectFrame, showToast]);
+
+  useEffect(() => {
+    if (!sessionReady) return;
+    window.clearTimeout(sessionSaveTimerRef.current);
+    sessionSaveTimerRef.current = window.setTimeout(() => {
+      const sessionFrames = frames.flatMap((frame) => {
+        const frameRecipe = recipes[frame.info.id];
+        return frameRecipe === undefined
+          ? []
+          : [{ id: frame.info.id, recipe: frameRecipe, skipped: skipped.has(frame.info.id) }];
+      });
+      const savedActiveId = activeId !== null && sessionFrames.some((frame) => frame.id === activeId)
+        ? activeId
+        : undefined;
+      void window.filmlab.saveSession({
+        frames: sessionFrames,
+        ...(savedActiveId === undefined ? {} : { activeId: savedActiveId }),
+      }).catch((caught: unknown) => {
+        setError(`无法自动保存本地会话：${caught instanceof Error ? caught.message : String(caught)}`);
+      });
+    }, 500);
+    return () => window.clearTimeout(sessionSaveTimerRef.current);
+  }, [activeId, frames, recipes, sessionReady, skipped]);
+
   const handleOpen = useCallback(async (openMode: RollOpenMode) => {
     try {
       const infos = await window.filmlab.openRoll(openMode);
@@ -274,33 +421,27 @@ export function App() {
         return;
       }
       setFrames(infos.map((info) => ({ info, thumbnail: null, status: "idle" as const })));
+      previewWorkerRef.current?.clear();
+      previewCacheRef.current.clear();
+      thumbnailRecipeKeysRef.current.clear();
       setSkipped(new Set());
       setSummary(null);
       setRollProgress(null);
-      setRecipes((current) => {
-        const next = { ...current };
-        for (const info of infos) {
-          if (next[info.id] === undefined) next[info.id] = DEFAULT_RECIPE;
-        }
-        return next;
-      });
-      for (const info of infos) {
-        window.filmlab.thumbnailFrame(info.id).then((thumb: RollThumbnail) => {
-          setFrames((current) => current.map(
-            (frame) => frame.info.id === thumb.id ? { ...frame, thumbnail: thumb } : frame,
-          ));
-        }).catch(() => {
-          // Thumbnail decode failures leave the card blank; preview/export
-          // still report their own errors.
-        });
-      }
+      setRecipes(Object.fromEntries(infos.map((info) => [info.id, cloneRecipe(DEFAULT_RECIPE)])));
+      loadThumbnails(infos);
       await selectFrame(infos[0]!.id);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
-  }, [selectFrame, showToast]);
+  }, [loadThumbnails, selectFrame, showToast]);
 
   const removeFrame = useCallback((id: string) => {
+    void window.filmlab.releaseFrame(id).catch((caught: unknown) => {
+      setError(`无法释放源文件记录：${caught instanceof Error ? caught.message : String(caught)}`);
+    });
+    previewWorkerRef.current?.release(id);
+    previewCacheRef.current.delete(id);
+    thumbnailRecipeKeysRef.current.delete(id);
     setFrames((current) => {
       const index = current.findIndex((frame) => frame.info.id === id);
       const next = current.filter((frame) => frame.info.id !== id);
@@ -396,11 +537,11 @@ export function App() {
   }, [exporting, frames, skipped, recipes, showToast]);
 
   const toImagePoint = useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
-    const canvas = overlayCanvasRef.current!;
+    const canvas = imageCanvasRef.current!;
     const bounds = canvas.getBoundingClientRect();
     return {
-      x: (event.clientX - bounds.left) * canvas.width / bounds.width,
-      y: (event.clientY - bounds.top) * canvas.height / bounds.height,
+      x: Math.min(canvas.width, Math.max(0, (event.clientX - bounds.left) * canvas.width / bounds.width)),
+      y: Math.min(canvas.height, Math.max(0, (event.clientY - bounds.top) * canvas.height / bounds.height)),
     };
   }, []);
 
@@ -408,24 +549,66 @@ export function App() {
     if (mode === "view") return;
     event.currentTarget.setPointerCapture(event.pointerId);
     dragStartRef.current = toImagePoint(event);
+    if (mode === "straighten") {
+      setDraft(null);
+      draftLineRef.current = null;
+      setDraftLine(null);
+    } else {
+      setDraftLine(null);
+      draftLineRef.current = null;
+    }
   }, [mode, toImagePoint]);
 
   const handlePointerMove = useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
     if (dragStartRef.current === null) return;
-    const canvas = overlayCanvasRef.current;
+    const canvas = imageCanvasRef.current;
     if (canvas === null) return;
     const point = toImagePoint(event);
     const start = dragStartRef.current;
+    if (mode === "straighten") {
+      const line: StraightenLine = {
+        start: { x: start.x / canvas.width, y: start.y / canvas.height },
+        end: { x: point.x / canvas.width, y: point.y / canvas.height },
+      };
+      draftLineRef.current = line;
+      setDraftLine(line);
+      return;
+    }
     setDraft({
       x: Math.min(start.x, point.x) / canvas.width,
       y: Math.min(start.y, point.y) / canvas.height,
       width: Math.abs(point.x - start.x) / canvas.width,
       height: Math.abs(point.y - start.y) / canvas.height,
     });
-  }, [toImagePoint]);
+  }, [mode, toImagePoint]);
 
   const handlePointerUp = useCallback(() => {
     dragStartRef.current = null;
+    if (mode === "straighten") {
+      const line = draftLineRef.current;
+      const canvas = imageCanvasRef.current;
+      draftLineRef.current = null;
+      setDraftLine(null);
+      setMode("view");
+      if (line === null || canvas === null || recipe === null) return;
+      const start = { x: line.start.x * canvas.width, y: line.start.y * canvas.height };
+      const end = { x: line.end.x * canvas.width, y: line.end.y * canvas.height };
+      const length = Math.hypot(end.x - start.x, end.y - start.y);
+      if (length < Math.hypot(canvas.width, canvas.height) * 0.05) {
+        showToast("水平参考线过短，请沿应为水平的边缘拖得更长一些。");
+        return;
+      }
+      const correction = straightenAngle(start, end);
+      update({
+        rotate: normalizeRotation(recipe.rotate + correction),
+        crop: undefined,
+        baseRoi: undefined,
+        neutralRoi: undefined,
+        baseMode: "auto",
+      });
+      showToast("已校正水平；原裁剪、片基和中性选区已清除。");
+      return;
+    }
     setDraft((current) => {
       if (current === null || current.width < 0.002 || current.height < 0.002) return null;
       if (mode === "base-roi") {
@@ -438,21 +621,34 @@ export function App() {
       setMode("view");
       return null;
     });
-  }, [mode, update]);
+  }, [mode, recipe, showToast, update]);
 
   const baseLabel = result === null ? "—" : result.base.method === "roi" ? "ROI 选区" : "自动估算";
   const baseDetail = result === null ? "" : `${(result.base.confidence * 100).toFixed(0)}% 置信度`;
-  const batchTotal = frames.length - skipped.size;
   const batchBusy = exporting !== null && rollProgress !== null;
+  const diagnostics = [
+    `FilmLab ${appInfo?.version ?? "unknown"}`,
+    `Platform ${appInfo?.platform ?? "unknown"}/${appInfo?.arch ?? "unknown"}`,
+    `Electron ${appInfo?.electron ?? "unknown"}`,
+    `Preview worker ${workerFailed ? "fallback" : workerReady ? "ready" : "starting"}`,
+    `Frames ${frames.length}; error ${error === null ? "no" : "yes"}`,
+  ].join("\n");
+
+  const copyDiagnostics = (): void => {
+    void navigator.clipboard.writeText(diagnostics).then(
+      () => showToast("诊断信息已复制；其中不包含文件路径或图像内容。"),
+      () => showToast("无法访问剪贴板，请手动复制诊断信息。"),
+    );
+  };
 
   return (
     <div className="app">
       <header className="topbar">
-        <span className="brand">FilmLab</span>
-        <span className="topbar-sep" />
-        <button className="btn primary" onClick={() => void handleOpen("single")} disabled={batchBusy}>打开负片…</button>
-        <button className="btn" onClick={() => void handleOpen("files")} disabled={batchBusy}>导入整卷…</button>
-        <button className="btn" onClick={() => void handleOpen("folder")} disabled={batchBusy}>导入文件夹…</button>
+        <span className="brand"><FilmCanisterIcon className="brand-icon" />FilmLab</span>
+        <div className="toolbar-group import-group">
+          <button className="btn primary" onClick={() => void handleOpen("files")} disabled={batchBusy || !sessionReady}>导入底片…</button>
+          <button className="btn" onClick={() => void handleOpen("folder")} disabled={batchBusy || !sessionReady}>导入文件夹…</button>
+        </div>
         <span className="topbar-sep" />
         {rollProgress !== null && (
           <span className="roll-progress">
@@ -460,18 +656,26 @@ export function App() {
             <button className="btn ghost" onClick={() => void window.filmlab.cancelRollExport()}>取消</button>
           </span>
         )}
-        <button className="btn" disabled={activeId === null || exporting !== null} onClick={() => void handleExportSingle("tiff")}>
-          {exporting === "tiff" && rollProgress === null ? "导出中…" : "导出单帧 TIFF"}
-        </button>
-        <button className="btn" disabled={activeId === null || exporting !== null} onClick={() => void handleExportSingle("jpeg")}>
-          {exporting === "jpeg" && rollProgress === null ? "导出中…" : "导出单帧 JPEG"}
-        </button>
-        <button className="btn" disabled={frames.length === 0 || exporting !== null} onClick={() => void handleExportRoll("tiff")}>
-          {batchBusy && exporting === "tiff" ? "整卷导出中…" : "整卷→TIFF"}
-        </button>
-        <button className="btn" disabled={frames.length === 0 || exporting !== null} onClick={() => void handleExportRoll("jpeg")}>
-          {batchBusy && exporting === "jpeg" ? "整卷导出中…" : "整卷→JPEG"}
-        </button>
+        <div className="toolbar-group export-group">
+          <span className="toolbar-label">导出当前</span>
+          <button className="btn" disabled={activeId === null || exporting !== null} onClick={() => void handleExportSingle("tiff")}>
+            {exporting === "tiff" && rollProgress === null ? "导出中…" : "TIFF"}
+          </button>
+          <button className="btn" disabled={activeId === null || exporting !== null} onClick={() => void handleExportSingle("jpeg")}>
+            {exporting === "jpeg" && rollProgress === null ? "导出中…" : "JPEG"}
+          </button>
+        </div>
+        {frames.length > 1 && (
+          <div className="toolbar-group export-group">
+            <span className="toolbar-label">导出整卷</span>
+            <button className="btn" disabled={exporting !== null} onClick={() => void handleExportRoll("tiff")}>
+              {batchBusy && exporting === "tiff" ? "导出中…" : "TIFF"}
+            </button>
+            <button className="btn" disabled={exporting !== null} onClick={() => void handleExportRoll("jpeg")}>
+              {batchBusy && exporting === "jpeg" ? "导出中…" : "JPEG"}
+            </button>
+          </div>
+        )}
         <button
           className="btn ghost"
           disabled={activeId === null}
@@ -479,65 +683,34 @@ export function App() {
         >
           复位当前帧
         </button>
+        <button className="btn ghost" onClick={() => setAboutOpen(true)}>关于</button>
       </header>
 
       <main className="layout">
-        {frames.length > 0 && (
-          <aside className="filmstrip">
-            {frames.map((frame) => (
-              <div
-                key={frame.info.id}
-                className={[
-                  "frame-card",
-                  frame.info.id === activeId ? "active" : "",
-                  skipped.has(frame.info.id) ? "skipped" : "",
-                ].filter(Boolean).join(" ")}
-                onClick={() => void selectFrame(frame.info.id)}
-              >
-                <FrameThumb frame={frame} recipe={recipes[frame.info.id]} />
-                <div className="frame-meta">
-                  <span className="frame-name" title={frame.failure ?? frame.info.fileName}>
-                    {frame.info.fileName}
-                  </span>
-                  <span className={`frame-status ${frame.status}`}>
-                    {frame.status === "exported" ? "✓" : frame.status === "failed" ? "✕" : ""}
-                  </span>
-                </div>
-                <button
-                  className="frame-remove"
-                  title="移除该帧"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    removeFrame(frame.info.id);
-                  }}
-                >
-                  ✕
-                </button>
-                <button
-                  className="frame-skip"
-                  title={skipped.has(frame.info.id) ? "取消跳过" : "导出时跳过"}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    toggleSkip(frame.info.id);
-                  }}
-                >
-                  {skipped.has(frame.info.id) ? "⊘" : "⏭"}
-                </button>
-              </div>
-            ))}
-            <div className="filmstrip-footer">{batchTotal} 帧待导出</div>
-          </aside>
+        {frames.length > 1 && (
+          <Filmstrip
+            frames={frames}
+            activeId={activeId}
+            skipped={skipped}
+            recipes={recipes}
+            workerFailed={workerFailed}
+            onSelect={(id) => void selectFrame(id)}
+            onRemove={removeFrame}
+            onToggleSkip={toggleSkip}
+          />
         )}
 
         <div className="workspace">
           {preview === null ? (
             <div className="empty">
+              <FilmCanisterIcon className="empty-icon" />
               <h1>负片 → 正像</h1>
-              <p>打开单张负片,或一次导入整卷胶片,自动检测片基、反转密度并还原正像。</p>
+              <p>选择一张或多张底片，自动检测片基、反转密度并还原正像。</p>
               <div className="empty-actions">
-                <button className="btn primary large" onClick={() => void handleOpen("single")}>打开负片…</button>
-                <button className="btn large" onClick={() => void handleOpen("files")}>导入整卷…</button>
-                <button className="btn large" onClick={() => void handleOpen("folder")}>导入文件夹…</button>
+                <button className="btn primary large" disabled={!sessionReady} onClick={() => void handleOpen("files")}>
+                  {sessionReady ? "导入底片…" : "正在恢复会话…"}
+                </button>
+                <button className="btn large" disabled={!sessionReady} onClick={() => void handleOpen("folder")}>导入文件夹…</button>
               </div>
               <p className="hint">支持 8/16 位 TIFF、JPEG、PNG;16 位 TIFF 无 ICC 时按线性扫描数据读取。</p>
             </div>
@@ -566,13 +739,18 @@ export function App() {
                   onChange={setMode}
                   options={[
                     { value: "view", label: "视图" },
+                    { value: "straighten", label: "水平校正" },
                     { value: "base-roi", label: "框选片基" },
                     { value: "neutral-roi", label: "框选中性高密度" },
                     { value: "crop", label: "框选裁剪" },
                   ]}
                 />
                 <span className="modebar-hint">
-                  {mode === "view" ? "选择一种框选模式后在画面上拖拽。" : "在画面上拖拽出选区。"}
+                  {mode === "view"
+                    ? "选择一种工具后在画面上拖拽。"
+                    : mode === "straighten"
+                      ? "沿画面中应为水平的边缘拖一条参考线。"
+                      : "在画面上拖拽出选区。"}
                 </span>
               </div>
             </>
@@ -580,170 +758,42 @@ export function App() {
         </div>
 
         {recipe !== null && preview !== null && (
-          <aside className="panel">
-            <Section title="整卷">
-              <button className="btn" onClick={applyRecipeToAll} disabled={frames.length < 2}>应用到整卷</button>
-              <p className="field-note">把当前帧的完整配方复制给整卷(跳过的帧除外)。</p>
-            </Section>
-
-            <Section title="几何">
-              <button className="btn" onClick={() => update({ rotate: ((recipe.rotate + 90) % 360) as Recipe["rotate"] })}>
-                ⟲ 旋转 90°(当前 {recipe.rotate}°)
-              </button>
-              <button className="btn" onClick={() => setMode("crop")} disabled={recipe.crop !== undefined}>
-                框选裁剪
-              </button>
-              {recipe.crop !== undefined && (
-                <button className="btn ghost" onClick={() => update({ crop: undefined })}>清除裁剪</button>
-              )}
-            </Section>
-
-            <Section title="片基">
-              <RadioGroup
-                value={recipe.baseMode}
-                onChange={(baseMode) => {
-                  update({ baseMode });
-                  if (baseMode === "roi" && recipe.baseRoi === undefined) setMode("base-roi");
-                }}
-                options={[
-                  { value: "auto", label: "默认" },
-                  { value: "roi", label: "手动选取" },
-                ]}
-              />
-              <button className="btn" onClick={() => setMode("base-roi")}>框选片基区域</button>
-              {recipe.baseMode === "roi" && recipe.baseRoi !== undefined && (
-                <button
-                  className="btn ghost"
-                  onClick={() => update({ baseRoi: undefined, baseMode: "auto" })}
-                >
-                  清除选区(回到默认)
-                </button>
-              )}
-              <p className="field-note">
-                片基:{baseLabel} · {baseDetail}
-              </p>
-            </Section>
-
-            <Section title="反转">
-              <RadioGroup
-                value={recipe.dmaxMode}
-                onChange={(dmaxMode) => update({ dmaxMode })}
-                options={[
-                  { value: "auto", label: "自动 Dmax" },
-                  { value: "manual", label: "手动 Dmax" },
-                ]}
-              />
-              {recipe.dmaxMode === "manual" && (
-                <Slider
-                  label="Dmax"
-                  value={recipe.manualDmax}
-                  min={0.2}
-                  max={3.5}
-                  step={0.01}
-                  onChange={(manualDmax) => update({ manualDmax })}
-                  format={(value) => value.toFixed(2)}
-                />
-              )}
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={recipe.autoNeutralize}
-                  onChange={(event) => update({ autoNeutralize: event.target.checked })}
-                />
-                自动中和橙罩(中性像素拟合)
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={recipe.autoWhiteBalance}
-                  onChange={(event) => update({ autoWhiteBalance: event.target.checked })}
-                />
-                自动白平衡(灰世界中位数)
-              </label>
-              <button className="btn" onClick={() => setMode("neutral-roi")}>框选中性高密度区域</button>
-              {recipe.neutralRoi !== undefined && (
-                <button className="btn ghost" onClick={() => update({ neutralRoi: undefined })}>清除中性区</button>
-              )}
-              <Slider
-                label="白平衡 R"
-                value={recipe.whiteBalance[0]}
-                min={0.6}
-                max={1.6}
-                step={0.01}
-                onChange={(value) => update({ whiteBalance: [value, recipe.whiteBalance[1], recipe.whiteBalance[2]] })}
-              />
-              <Slider
-                label="白平衡 B"
-                value={recipe.whiteBalance[2]}
-                min={0.6}
-                max={1.6}
-                step={0.01}
-                onChange={(value) => update({ whiteBalance: [recipe.whiteBalance[0], recipe.whiteBalance[1], value] })}
-              />
-              <Slider
-                label="密度预饱和"
-                value={recipe.preSaturation}
-                min={0.5}
-                max={2}
-                step={0.01}
-                onChange={(preSaturation) => update({ preSaturation })}
-              />
-            </Section>
-
-            <Section title="调色">
-              <Slider
-                label="曝光"
-                value={recipe.exposure}
-                min={-3}
-                max={3}
-                step={0.05}
-                onChange={(exposure) => update({ exposure })}
-                format={(value) => `${value >= 0 ? "+" : ""}${value.toFixed(2)} EV`}
-              />
-              <Slider
-                label="对比度"
-                value={recipe.contrast}
-                min={0.5}
-                max={1.5}
-                step={0.01}
-                onChange={(contrast) => update({ contrast })}
-              />
-              <Slider
-                label="高光压缩"
-                value={recipe.highlightCompression}
-                min={0}
-                max={1}
-                step={0.01}
-                onChange={(highlightCompression) => update({ highlightCompression })}
-              />
-              <Slider
-                label="饱和度"
-                value={recipe.saturation}
-                min={0}
-                max={2}
-                step={0.01}
-                onChange={(saturation) => update({ saturation })}
-              />
-            </Section>
-          </aside>
+          <AdjustmentPanel
+            recipe={recipe}
+            mode={mode}
+            frameCount={frames.length}
+            baseLabel={baseLabel}
+            baseDetail={baseDetail}
+            update={update}
+            setMode={setMode}
+            applyRecipeToAll={applyRecipeToAll}
+            showToast={showToast}
+          />
         )}
       </main>
 
       {preview !== null && (
         <footer className="statusbar">
           <span>{preview.fileName} · {preview.width}×{preview.height} 预览 · {preview.depth} 位{preview.hasIcc ? " · 带 ICC" : " · 无 ICC"}</span>
+          <span>会话已在本机自动保存</span>
           {result !== null && (
             <>
               <span>
                 Dmin {result.anchors.dmin.toFixed(3)} · Dmax {result.anchors.dmax.toFixed(3)} · 范围 {result.anchors.range.toFixed(3)}
               </span>
               <span>
-                通道拟合 {result.anchors.channelFit === undefined
-                  ? "—"
-                  : result.anchors.channelFit.slope.map((value) => value.toFixed(3)).join("/")}
+                去色罩 {result.anchors.neutralization === undefined
+                  ? "无校正"
+                  : `${NEUTRALIZATION_LABEL[result.anchors.neutralization.method]} · 改善 ${(result.anchors.neutralization.improvement * 100).toFixed(0)}%`}
+                {result.anchors.channelFit === undefined
+                  ? " · 斜率 —"
+                  : ` · 斜率 ${result.anchors.channelFit.slope.map((value) => value.toFixed(3)).join("/")}`}
               </span>
               {result.autoGains !== undefined && (
                 <span>自动白平衡 {result.autoGains.map((value) => value.toFixed(2)).join("/")}</span>
+              )}
+              {result.autoGains === undefined && (
+                <span>手动色温 {recipe?.temperatureKelvin.toFixed(0)} K</span>
               )}
               <span>白点 {result.whitePoint.toFixed(3)} · 预览 {result.ms.toFixed(0)} ms</span>
             </>
@@ -771,6 +821,10 @@ export function App() {
             <button className="btn" onClick={() => setSummary(null)}>关闭</button>
           </div>
         </div>
+      )}
+
+      {aboutOpen && (
+        <AboutDialog info={appInfo} diagnostics={diagnostics} onCopy={copyDiagnostics} onClose={() => setAboutOpen(false)} />
       )}
     </div>
   );

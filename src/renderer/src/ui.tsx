@@ -17,11 +17,12 @@ interface SliderProps {
   step: number;
   onChange: (value: number) => void;
   format?: (value: number) => string;
+  disabled?: boolean;
 }
 
-export function Slider({ label, value, min, max, step, onChange, format }: SliderProps) {
+export function Slider({ label, value, min, max, step, onChange, format, disabled = false }: SliderProps) {
   return (
-    <label className="slider-row">
+    <label className={`slider-row${disabled ? " disabled" : ""}`}>
       <span className="slider-label">{label}</span>
       <input
         type="range"
@@ -29,6 +30,7 @@ export function Slider({ label, value, min, max, step, onChange, format }: Slide
         max={max}
         step={step}
         value={value}
+        disabled={disabled}
         onChange={(event) => onChange(Number(event.target.value))}
       />
       <span className="slider-value">{format === undefined ? value.toFixed(2) : format(value)}</span>

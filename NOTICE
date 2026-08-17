@@ -1,0 +1,12 @@
+FilmLab
+Copyright (c) 2026 Licheng Wang. All rights reserved.
+
+FilmLab includes third-party software distributed under open-source licenses.
+The component inventory and license identifiers are in THIRD_PARTY_NOTICES.md.
+The corresponding license texts are distributed in the application's
+resources/legal/licenses directory. Electron distributions also include
+LICENSE.electron.txt and LICENSES.chromium.html supplied by Electron.
+
+FilmLab and its original icon, interface, documentation, and processing code
+are proprietary and governed by LICENSE. Third-party names and marks belong to
+their respective owners. Inclusion does not imply endorsement.
