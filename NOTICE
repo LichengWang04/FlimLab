@@ -10,3 +10,11 @@ LICENSE.electron.txt and LICENSES.chromium.html supplied by Electron.
 FilmLab and its original icon, interface, documentation, and processing code
 are proprietary and governed by LICENSE. Third-party names and marks belong to
 their respective owners. Inclusion does not imply endorsement.
+
+The optional "Negadoctor 5.6" processing engine is an independent
+implementation targeting parameter and principal visual-structure
+compatibility with darktable 5.6.0 negadoctor. Its public documentation and
+the release-5.6.0 source file src/iop/negadoctor.c were used as behavioral
+references. No darktable source code is included in FilmLab. darktable is a
+separate GPL-3.0-or-later project; compatibility does not imply affiliation or
+endorsement. Reference: https://github.com/darktable-org/darktable/tree/release-5.6.0

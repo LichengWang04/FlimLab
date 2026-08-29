@@ -17,6 +17,7 @@ export interface RollPreview {
   height: number;
   depth: 8 | 16;
   hasIcc: boolean;
+  format: string;
   /** Linear transmission samples, RGB packed. */
   raster: Float32Array;
 }

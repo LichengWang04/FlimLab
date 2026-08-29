@@ -1,10 +1,17 @@
 import { toRelativeDensity, measureDensityAnchors } from "./density.ts";
+import { encode8 } from "./encode.ts";
 import { estimateFilmBase, sampleFilmBase } from "./film-base.ts";
 import { cropRaster, rotateRaster } from "./geometry.ts";
 import { invertDensity } from "./invert.ts";
+import {
+  prepareNegadoctor56,
+  processNegadoctor56,
+  renderPreparedNegadoctor56,
+  type PreparedNegadoctor56,
+} from "./negadoctor.ts";
 import { Raster } from "./raster.ts";
 import { estimateWhitePoint, toneMap, toneMapEncodeRgba8 } from "./tone.ts";
-import type { BaseSample, DensityAnchors, Recipe, Rect, Rgb } from "./types.ts";
+import type { BaseSample, ClassicRecipe, DensityAnchors, Recipe, Rect, Rgb } from "./types.ts";
 import { applyGains, estimateWhiteBalance, temperatureToGains } from "./wb.ts";
 
 /** Result of the full negative-to-positive pipeline. */
@@ -52,6 +59,13 @@ export interface NegativePreviewResult extends Omit<NegativeResult, "display"> {
   height: number;
 }
 
+/** CPU-canonical analysis values consumed by the WebGPU pixel pipeline. */
+export interface NegativeGpuPreparation extends Omit<NegativeResult, "display"> {
+  width: number;
+  height: number;
+  gains: Rgb;
+}
+
 /**
  * Stateful form of the CPU pipeline used by the preview worker. Each cache
  * boundary follows the real dependency graph, so creative adjustments do
@@ -69,6 +83,8 @@ export class NegativeSession {
   private anchors?: DensityAnchors;
   private autoGains?: Rgb;
   private whitePoint?: number;
+  private negadoctorPrepared?: PreparedNegadoctor56;
+  private negadoctorPrepareKey = "";
   private geometryKey = "";
   private analysisKey = "";
   private inversionKey = "";
@@ -81,6 +97,14 @@ export class NegativeSession {
   }
 
   process(recipe: Recipe): NegativeResult {
+    if (recipe.engine === "negadoctor-5.6") {
+      const result = processNegadoctor56(this.source, recipe);
+      this.stats.geometry += 1;
+      this.stats.analysis += 1;
+      this.stats.inversion += 1;
+      this.stats.tone += 1;
+      return { ...result, whitePoint: 1 };
+    }
     const prepared = this.prepare(recipe);
     const { display } = toneMap(prepared.scene, recipe, prepared.whitePoint);
     this.stats.tone += 1;
@@ -94,6 +118,34 @@ export class NegativeSession {
   }
 
   processPreview(recipe: Recipe): NegativePreviewResult {
+    if (recipe.engine === "negadoctor-5.6") {
+      const prepareKey = keyOfNegadoctorPreparation(recipe);
+      if (this.negadoctorPrepared === undefined || prepareKey !== this.negadoctorPrepareKey) {
+        this.negadoctorPrepared = prepareNegadoctor56(this.source, recipe);
+        this.negadoctorPrepareKey = prepareKey;
+        this.stats.geometry += 1;
+        this.stats.analysis += 1;
+      }
+      const result = renderPreparedNegadoctor56(this.negadoctorPrepared, recipe);
+      const rgb = encode8(result.display);
+      const rgba = new Uint8ClampedArray(result.display.width * result.display.height * 4);
+      for (let source = 0, target = 0; source < rgb.length; source += 3, target += 4) {
+        rgba[target] = rgb[source]!;
+        rgba[target + 1] = rgb[source + 1]!;
+        rgba[target + 2] = rgb[source + 2]!;
+        rgba[target + 3] = 255;
+      }
+      this.stats.inversion += 1;
+      this.stats.tone += 1;
+      return {
+        rgba,
+        width: result.display.width,
+        height: result.display.height,
+        base: result.base,
+        anchors: result.anchors,
+        whitePoint: 1,
+      };
+    }
     const prepared = this.prepare(recipe);
     const rgba = toneMapEncodeRgba8(prepared.scene, recipe, prepared.whitePoint);
     this.stats.tone += 1;
@@ -108,7 +160,48 @@ export class NegativeSession {
     };
   }
 
-  private prepare(recipe: Recipe): {
+  /**
+   * Resolve geometry-dependent analysis on the canonical CPU path without
+   * quantizing a preview. WebGPU consumes only these small values and reads
+   * the original transmission raster itself.
+   */
+  prepareGpu(recipe: Recipe): NegativeGpuPreparation {
+    if (recipe.engine === "negadoctor-5.6") {
+      const prepareKey = keyOfNegadoctorPreparation(recipe);
+      if (this.negadoctorPrepared === undefined || prepareKey !== this.negadoctorPrepareKey) {
+        this.negadoctorPrepared = prepareNegadoctor56(this.source, recipe);
+        this.negadoctorPrepareKey = prepareKey;
+        this.stats.geometry += 1;
+        this.stats.analysis += 1;
+      }
+      const prepared = this.negadoctorPrepared;
+      const meanDmin = (prepared.dmin[0] + prepared.dmin[1] + prepared.dmin[2]) / 3;
+      return {
+        width: prepared.framed.width,
+        height: prepared.framed.height,
+        base: { ...prepared.base, rgb: [...prepared.dmin] },
+        anchors: {
+          dmin: -Math.log10(Math.max(2 ** -32, meanDmin)),
+          dmax: recipe.dmax,
+          range: recipe.dmax,
+        },
+        whitePoint: 1,
+        gains: [1, 1, 1],
+      };
+    }
+    const prepared = this.prepare(recipe);
+    return {
+      width: prepared.scene.width,
+      height: prepared.scene.height,
+      base: prepared.base,
+      anchors: prepared.anchors,
+      whitePoint: prepared.whitePoint,
+      gains: prepared.autoGains ?? temperatureToGains(recipe.temperatureKelvin),
+      ...(prepared.autoGains === undefined ? {} : { autoGains: prepared.autoGains }),
+    };
+  }
+
+  private prepare(recipe: ClassicRecipe): {
     scene: Raster;
     base: BaseSample;
     anchors: DensityAnchors;
@@ -170,15 +263,29 @@ export class NegativeSession {
   }
 }
 
-function keyOfGeometry(recipe: Recipe): string {
+function keyOfGeometry(recipe: ClassicRecipe): string {
   return `${recipe.rotate}|${keyOfRect(recipe.crop)}`;
 }
 
-function keyOfAnalysis(recipe: Recipe): string {
+function keyOfAnalysis(recipe: ClassicRecipe): string {
   const base = recipe.baseMode === "roi" ? `roi:${keyOfRect(recipe.baseRoi)}` : "auto";
   const dmax = recipe.dmaxMode === "manual" ? `manual:${recipe.manualDmax}` : "auto";
   const neutral = recipe.autoNeutralize ? `on:${keyOfRect(recipe.neutralRoi)}` : "off";
   return `${base}|${dmax}|${neutral}`;
+}
+
+function keyOfNegadoctorPreparation(recipe: Extract<Recipe, { engine: "negadoctor-5.6" }>): string {
+  const base = recipe.baseMode === "manual"
+    ? `manual:${recipe.dminRgb.join(",")}`
+    : `${recipe.baseMode}:${keyOfRect(recipe.baseRoi)}`;
+  return [
+    recipe.rotate,
+    keyOfRect(recipe.crop),
+    recipe.inputPrimaries,
+    recipe.workingSpace,
+    recipe.filmStock,
+    base,
+  ].join("|");
 }
 
 function keyOfRect(rect: Rect | undefined): string {

@@ -1,8 +1,13 @@
 import { extname } from "node:path";
 import sharp from "sharp";
-import { Raster, downscaleRaster, srgbToLinear } from "../core/index.ts";
-import { readTiff } from "./tiff-decode.ts";
-import { assertImageDimensions, assertSourceFile } from "./resource-limits.ts";
+import { Raster, srgbToLinear } from "../core/index.ts";
+import { readTiffMetadata, readTiffPreviewRaster, readTiffRaster } from "./tiff-decode.ts";
+import type { FloatRasterAllocator } from "./tiff-decode.ts";
+import { assertImageDimensions, assertSourceFile, MAX_IMAGE_PIXELS } from "./resource-limits.ts";
+import { decodeRawSource, isRawExtension, probeRawSource } from "./raw-decode.ts";
+
+const SRGB8_TO_LINEAR = Float32Array.from({ length: 256 }, (_, value) => srgbToLinear(value / 255));
+let srgb16ToLinear: Float32Array | undefined;
 
 export interface SourceMeta {
   width: number;
@@ -16,6 +21,34 @@ export interface SourceMeta {
 export interface DecodedFrame {
   raster: Raster;
   meta: SourceMeta;
+}
+
+export async function probeSource(path: string): Promise<SourceMeta> {
+  await assertSourceFile(path);
+  const extension = extname(path).toLowerCase();
+  if (isRawExtension(extension)) return probeRawSource(path);
+  if (extension === ".tiff" || extension === ".tif") {
+    const info = await readTiffMetadata(path);
+    return {
+      width: info.width,
+      height: info.height,
+      depth: info.depth,
+      hasIcc: info.hasIcc,
+      format: "tiff",
+    };
+  }
+  const meta = await sharp(path, { sequentialRead: true, limitInputPixels: MAX_IMAGE_PIXELS }).metadata();
+  if (meta.width === undefined || meta.height === undefined || meta.width < 1 || meta.height < 1) {
+    throw new Error("无法读取图像尺寸,文件可能已损坏或格式不受支持。");
+  }
+  assertImageDimensions(meta.width, meta.height);
+  return {
+    width: meta.width,
+    height: meta.height,
+    depth: meta.depth === "ushort" ? 16 : 8,
+    hasIcc: meta.icc !== undefined,
+    format: meta.format ?? "",
+  };
 }
 
 /**
@@ -34,71 +67,93 @@ export interface DecodedFrame {
  * Non-positive and non-finite samples are clamped so out-of-gamut profile
  * conversions cannot poison the density logarithm.
  */
-export async function decodeSource(path: string, maxSide?: number): Promise<DecodedFrame> {
+export async function decodeSource(
+  path: string,
+  maxSide?: number,
+  allocator?: FloatRasterAllocator,
+): Promise<DecodedFrame> {
   await assertSourceFile(path);
   if (maxSide !== undefined && (!Number.isFinite(maxSide) || maxSide < 1 || maxSide > 4096)) {
     throw new Error("预览尺寸请求无效。");
   }
   const extension = extname(path).toLowerCase();
+  if (isRawExtension(extension)) return decodeRawSource(path, maxSide);
   if (extension === ".tiff" || extension === ".tif") {
-    return decodeTiff(path, maxSide);
+    return decodeTiff(path, maxSide, allocator);
+  }
+  return decodeRasterFile(path, maxSide, allocator);
+}
+
+/** Low-memory display-only decode used by the filmstrip queue. */
+export async function decodeThumbnailSource(path: string, maxSide = 256): Promise<DecodedFrame> {
+  if (!Number.isFinite(maxSide) || maxSide < 1 || maxSide > 4096) throw new Error("缩略图尺寸请求无效。");
+  await assertSourceFile(path);
+  const extension = extname(path).toLowerCase();
+  if (isRawExtension(extension)) return decodeRawSource(path, maxSide);
+  if (extension === ".tiff" || extension === ".tif") {
+    const info = await readTiffMetadata(path);
+    if (info.hasIcc) {
+      throw new Error(
+        "该 TIFF 内嵌 ICC 色彩配置。为保留 16 位精度,请先用外部工具转换为无 ICC 的线性或 sRGB TIFF 后再打开。",
+      );
+    }
+    return decodeRasterFile(path, maxSide, undefined, info.depth);
   }
   return decodeRasterFile(path, maxSide);
 }
 
-async function decodeTiff(path: string, maxSide?: number): Promise<DecodedFrame> {
-  const image = await readTiff(path);
-  if (image.hasIcc) {
-    throw new Error(
-      "该 TIFF 内嵌 ICC 色彩配置。为保留 16 位精度,请先用外部工具(如 ImageMagick)转换为 16 位线性或 sRGB TIFF 后再打开。",
-    );
+async function decodeTiff(
+  path: string,
+  maxSide?: number,
+  allocator?: FloatRasterAllocator,
+): Promise<DecodedFrame> {
+  if (maxSide !== undefined) {
+    const image = await readTiffPreviewRaster(path, maxSide);
+    return {
+      raster: new Raster(image.width, image.height, "transmission-linear", image.data),
+      meta: {
+        width: image.sourceWidth,
+        height: image.sourceHeight,
+        depth: image.depth,
+        hasIcc: false,
+        format: "tiff",
+      },
+    };
   }
-  const raster = samplesToRaster(image.width, image.height, image.depth, image.samples, image.pixels);
-  const preview = maxSide === undefined ? raster : downscaleRaster(raster, maxSide);
+  const image = await readTiffRaster(path, allocator);
+  const raster = new Raster(image.width, image.height, "transmission-linear", image.data);
   return {
-    raster: preview,
+    raster,
     meta: { width: image.width, height: image.height, depth: image.depth, hasIcc: false, format: "tiff" },
   };
 }
 
-function samplesToRaster(
-  width: number,
-  height: number,
-  depth: 8 | 16,
-  samples: 1 | 3,
-  pixels: Uint16Array | Uint8Array,
-): Raster {
-  const raster = new Raster(width, height, "transmission-linear");
-  const target = raster.data;
-  const scale = depth === 16 ? 1 / 65535 : 1 / 255;
-  for (let pixel = 0; pixel < width * height; pixel += 1) {
-    const targetOffset = pixel * 3;
-    const sourceOffset = pixel * samples;
-    const grey = pixels[sourceOffset]! * scale;
-    for (let channel = 0; channel < 3; channel += 1) {
-      const sample = samples === 1 ? grey : pixels[sourceOffset + channel]! * scale;
-      // 16-bit scans are linear transmission; 8-bit TIFFs are display-referred.
-      const linear = depth === 16 ? sample : srgbToLinear(sample);
-      target[targetOffset + channel] = Number.isFinite(linear) ? Math.max(0, linear) : 0;
-    }
-  }
-  return raster;
-}
-
-async function decodeRasterFile(path: string, maxSide?: number): Promise<DecodedFrame> {
-  const input = sharp(path);
+async function decodeRasterFile(
+  path: string,
+  maxSide?: number,
+  allocator?: FloatRasterAllocator,
+  tiffThumbnailDepth?: 8 | 16,
+): Promise<DecodedFrame> {
+  const input = sharp(path, { sequentialRead: true, limitInputPixels: MAX_IMAGE_PIXELS });
   const meta = await input.metadata();
   if (meta.width === undefined || meta.height === undefined || meta.width < 1 || meta.height < 1) {
     throw new Error("无法读取图像尺寸,文件可能已损坏或格式不受支持。");
   }
   assertImageDimensions(meta.width, meta.height);
   const format = meta.format ?? "";
-  const is16 = meta.depth === "ushort";
+  // libvips can report an existing 16-bit TIFF as uchar before the raw output
+  // depth is selected. Trust the bounded TIFF metadata parser for thumbnails.
+  const sourceIs16 = tiffThumbnailDepth === 16 || (tiffThumbnailDepth === undefined && meta.depth === "ushort");
+  const tiffThumbnail = tiffThumbnailDepth !== undefined;
   const hasIcc = meta.icc !== undefined;
-
+  if (tiffThumbnail && hasIcc) {
+    throw new Error(
+      "该 TIFF 内嵌 ICC 色彩配置。为保留 16 位精度,请先用外部工具转换为无 ICC 的线性或 sRGB TIFF 后再打开。",
+    );
+  }
   let pipeline = input;
   if (meta.hasAlpha === true) pipeline = pipeline.removeAlpha();
-  if (hasIcc) pipeline = pipeline.toColourspace("srgb");
+  if (hasIcc && !tiffThumbnail) pipeline = pipeline.toColourspace("srgb");
   if (maxSide !== undefined) {
     pipeline = pipeline.resize(maxSide, maxSide, {
       fit: "inside",
@@ -108,32 +163,50 @@ async function decodeRasterFile(path: string, maxSide?: number): Promise<Decoded
   }
 
   const { data, info } = await pipeline
-    .raw({ depth: is16 ? "ushort" : "uchar" })
+    // libvips' TIFF loader already reduces this display-only path to 8-bit;
+    // asking for ushort would merely return values in 0..255 stored as words.
+    .raw({ depth: sourceIs16 && !tiffThumbnail ? "ushort" : "uchar" })
     .toBuffer({ resolveWithObject: true });
   const channels = Math.min(3, info.channels);
-  const raster = new Raster(info.width, info.height, "transmission-linear");
+  const raster = new Raster(
+    info.width,
+    info.height,
+    "transmission-linear",
+    allocator?.(info.width * info.height * 3),
+  );
   const target = raster.data;
   const wordCount = data.byteLength / 2;
-  const words = is16
+  const rawIs16 = sourceIs16 && !tiffThumbnail;
+  const words = rawIs16
     ? data.byteOffset % 2 === 0
       ? new Uint16Array(data.buffer, data.byteOffset, wordCount)
       : new Uint16Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength))
     : undefined;
-  const scale = is16 ? 1 / 65535 : 1 / 255;
+  const scale = rawIs16 ? 1 / 65535 : 1 / 255;
+  const linear16 = rawIs16 ? srgb16ToLinear ??= Float32Array.from(
+    { length: 65_536 },
+    (_, value) => srgbToLinear(value / 65_535),
+  ) : undefined;
 
   for (let pixel = 0; pixel < info.width * info.height; pixel += 1) {
     const offset = pixel * 3;
     const sourceOffset = pixel * info.channels;
-    const grey = (is16 ? words![sourceOffset]! : data[sourceOffset]!) * scale;
+    const greySample = rawIs16 ? words![sourceOffset]! : data[sourceOffset]!;
+    const grey = greySample * scale;
     for (let channel = 0; channel < 3; channel += 1) {
-      const sample = is16 ? words![sourceOffset + channel]! : data[sourceOffset + channel]!;
+      const sample = rawIs16 ? words![sourceOffset + channel]! : data[sourceOffset + channel]!;
+      const selected = channels === 1 ? greySample : sample;
       const encoded = channels === 1 ? grey : sample * scale;
-      const linear = srgbToLinear(encoded);
+      const linear = tiffThumbnail && sourceIs16
+        ? encoded
+        : rawIs16
+          ? linear16![selected]!
+          : SRGB8_TO_LINEAR[selected]!;
       target[offset + channel] = Number.isFinite(linear) ? Math.max(0, linear) : 0;
     }
   }
   return {
     raster,
-    meta: { width: meta.width, height: meta.height, depth: is16 ? 16 : 8, hasIcc, format },
+    meta: { width: meta.width, height: meta.height, depth: tiffThumbnailDepth ?? (sourceIs16 ? 16 : 8), hasIcc, format },
   };
 }

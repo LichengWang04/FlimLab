@@ -1,17 +1,19 @@
 import {
   applyGainsRange,
+  convertLinearRgbRange,
   encode16Range,
   encode8Range,
   invertDensityRange,
+  negadoctor56Range,
   sampleGeometryRange,
   toRelativeDensityRange,
   toneMapEncode16Range,
   toneMapEncode8Range,
   toneMapRange,
 } from "../core/index.ts";
-import type { DensityAnchors, GeometryPlan, Recipe, Rgb } from "../core/index.ts";
+import type { DensityAnchors, GeometryPlan, LinearPrimaries, NegadoctorRecipe, Recipe, Rgb } from "../core/index.ts";
 
-export type KernelAction = "geometry" | "density" | "invert" | "gains" | "tone" | "encode8" | "encode16" | "toneEncode8" | "toneEncode16";
+export type KernelAction = "geometry" | "primaries" | "density" | "invert" | "negadoctor" | "gains" | "tone" | "encode8" | "encode16" | "toneEncode8" | "toneEncode16";
 
 export interface KernelTask {
   taskId: number;
@@ -23,10 +25,13 @@ export interface KernelTask {
   geometryPlan?: GeometryPlan;
   output?: SharedArrayBuffer;
   base?: Rgb;
+  fromPrimaries?: LinearPrimaries;
+  toPrimaries?: LinearPrimaries;
   anchors?: DensityAnchors;
   preSaturation?: number;
   gains?: Rgb;
   recipe?: Recipe;
+  negadoctorRecipe?: NegadoctorRecipe;
   whitePoint?: number;
 }
 
@@ -50,11 +55,33 @@ export function executeKernelTask(task: KernelTask): void {
     toRelativeDensityRange(pixels, pixels, task.startPixel, task.endPixel, task.base);
     return;
   }
+  if (task.action === "primaries") {
+    if (task.fromPrimaries === undefined || task.toPrimaries === undefined) {
+      throw new Error("Colour-space task is missing primaries.");
+    }
+    convertLinearRgbRange(
+      pixels,
+      pixels,
+      task.startPixel,
+      task.endPixel,
+      task.fromPrimaries,
+      task.toPrimaries,
+      task.toPrimaries !== "srgb" || task.fromPrimaries !== task.toPrimaries,
+    );
+    return;
+  }
   if (task.action === "invert") {
     if (task.anchors === undefined || task.preSaturation === undefined) {
       throw new Error("Inversion task is missing density parameters.");
     }
     invertDensityRange(pixels, pixels, task.startPixel, task.endPixel, task.anchors, task.preSaturation);
+    return;
+  }
+  if (task.action === "negadoctor") {
+    if (task.negadoctorRecipe === undefined || task.base === undefined) {
+      throw new Error("Negadoctor task is missing its recipe or Dmin.");
+    }
+    negadoctor56Range(pixels, pixels, task.startPixel, task.endPixel, task.negadoctorRecipe, task.base);
     return;
   }
   if (task.action === "gains") {
@@ -63,7 +90,7 @@ export function executeKernelTask(task: KernelTask): void {
     return;
   }
   if (task.action === "tone") {
-    if (task.recipe === undefined || task.whitePoint === undefined) {
+    if (task.recipe === undefined || task.recipe.engine !== "classic" || task.whitePoint === undefined) {
       throw new Error("Tone task is missing display parameters.");
     }
     toneMapRange(pixels, pixels, task.startPixel, task.endPixel, task.recipe, task.whitePoint);
@@ -71,7 +98,7 @@ export function executeKernelTask(task: KernelTask): void {
   }
   if (task.output === undefined) throw new Error("Encoding task is missing its output buffer.");
   if (task.action === "toneEncode8" || task.action === "toneEncode16") {
-    if (task.recipe === undefined || task.whitePoint === undefined) {
+    if (task.recipe === undefined || task.recipe.engine !== "classic" || task.whitePoint === undefined) {
       throw new Error("Fused tone/encoding task is missing display parameters.");
     }
     if (task.action === "toneEncode8") {

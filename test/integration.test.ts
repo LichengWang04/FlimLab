@@ -262,7 +262,7 @@ describe("Positive export", () => {
     const expected = processNegative(raster, DEFAULT_RECIPE);
 
     const outcome = await renderPositive(tiff, DEFAULT_RECIPE, "tiff", out);
-    assert.equal(outcome.ok, true);
+    assert.equal(outcome.ok, true, outcome.message);
 
     const image = await readTiff(out);
     assert.equal(image.width, WIDTH);
@@ -287,7 +287,7 @@ describe("Positive export", () => {
     await writeNegativeTiff(tiff);
 
     const outcome = await renderPositive(tiff, DEFAULT_RECIPE, "tiff", out);
-    assert.equal(outcome.ok, true);
+    assert.equal(outcome.ok, true, outcome.message);
     const image = await readTiff(out);
     const words = image.pixels as Uint16Array;
 
@@ -307,7 +307,7 @@ describe("Positive export", () => {
 
     const recipe = { ...DEFAULT_RECIPE, rotate: 90 as const, crop: { x: 0, y: 0, width: 0.5, height: 1 } };
     const outcome = await renderPositive(tiff, recipe, "jpeg", out);
-    assert.equal(outcome.ok, true);
+    assert.equal(outcome.ok, true, outcome.message);
     const meta = await sharp(out).metadata();
     assert.equal(meta.format, "jpeg");
     assert.equal(meta.width, HEIGHT / 2);
@@ -324,7 +324,7 @@ describe("Positive export", () => {
     const decoded = await decodeSource(tiff);
     const expected = processNegative(decoded.raster, recipe).display;
     const outcome = await renderPositive(tiff, recipe, "tiff", out);
-    assert.equal(outcome.ok, true);
+    assert.equal(outcome.ok, true, outcome.message);
     const exported = await readTiff(out);
     assert.equal(exported.width, expected.width);
     assert.equal(exported.height, expected.height);

@@ -1,6 +1,7 @@
 import { StrictMode, Component, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.tsx";
+import { runWebGpuPreviewSmoke } from "./webgpu/smoke.ts";
 import "./styles.css";
 
 /**
@@ -62,3 +63,12 @@ createRoot(container).render(
     </ErrorBoundary>
   </StrictMode>,
 );
+
+const gpuSmokeTransport = new URLSearchParams(window.location.search).get("gpuSmoke");
+if (gpuSmokeTransport === "shared" || gpuSmokeTransport === "array-buffer") {
+  void runWebGpuPreviewSmoke(gpuSmokeTransport).then((message) => {
+    console.log(`[gpu-smoke] ${message}`);
+  }).catch((error: unknown) => {
+    console.error(`[gpu-smoke] failed ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+  });
+}

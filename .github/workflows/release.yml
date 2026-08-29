@@ -27,7 +27,7 @@ jobs:
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           if ($env:GITHUB_REF_NAME -ne $version) { throw "Tag $env:GITHUB_REF_NAME does not match package version $version" }
       - run: npm ci
-      - run: npm audit --omit=dev
+      - run: npm run audit:release
       - run: npm run check
       - run: npm run build
       - name: Build signed installer

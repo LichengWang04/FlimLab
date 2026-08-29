@@ -5,15 +5,21 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { Worker } from "node:worker_threads";
 import {
+  DEFAULT_NEGADOCTOR_56,
   DEFAULT_RECIPE,
+  downscaleRaster,
   NegativeSession,
   Raster,
 } from "../src/core/index.ts";
 import { renderPositive } from "../src/main/export.ts";
-import { readTiff } from "../src/main/tiff-decode.ts";
+import { decodeSource } from "../src/main/decode.ts";
+import { readTiff, readTiffRaster } from "../src/main/tiff-decode.ts";
 import { writeTiff16 } from "../src/main/tiff-write.ts";
 
 const quick = process.argv.includes("--quick");
+const parallelOnly = process.argv.includes("--parallel-only");
+const includeDecode = process.argv.includes("--include-decode");
+const workerCount = Number(process.argv.find((argument) => argument.startsWith("--workers="))?.slice("--workers=".length) ?? 4);
 const temp = await fs.mkdtemp(join(tmpdir(), "filmlab-benchmark-"));
 
 try {
@@ -27,6 +33,13 @@ try {
   console.log(`preview tone-only hot: ${hot.ms.toFixed(1)} ms (${(hotRatio * 100).toFixed(1)}% of cold)`);
   console.log(`preview encoded hash: ${hash(hot.value.rgba)}`);
 
+  const negadoctorSession = new NegativeSession(preview);
+  const negadoctorCold = measure(() => negadoctorSession.processPreview(DEFAULT_NEGADOCTOR_56));
+  const negadoctorHot = measure(() => negadoctorSession.processPreview({ ...DEFAULT_NEGADOCTOR_56, printExposure: 0.95 }));
+  console.log(`Negadoctor preview cold: ${negadoctorCold.ms.toFixed(1)} ms`);
+  console.log(`Negadoctor print-control hot: ${negadoctorHot.ms.toFixed(1)} ms (${(negadoctorHot.ms / negadoctorCold.ms * 100).toFixed(1)}% of cold)`);
+  console.log(`Negadoctor encoded hash: ${hash(negadoctorHot.value.rgba)}`);
+
   const width = quick ? 1600 : 6000;
   const height = quick ? 1067 : 4000;
   console.log(`export fixture: ${width}x${height} (${(width * height / 1_000_000).toFixed(1)} MP)`);
@@ -36,8 +49,28 @@ try {
   const raw = makeNegative16(width, height);
   await writeTiff16(input, width, height, raw);
 
-  const canonical = await measureAsync(() => renderPositive(input, DEFAULT_RECIPE, "tiff", canonicalPath));
-  if (!canonical.value.ok) throw new Error(canonical.value.message);
+  if (includeDecode) {
+    const legacyPreview = await measureAsync(async () => {
+      const full = await readTiffRaster(input);
+      return downscaleRaster(new Raster(width, height, "transmission-linear", full.data), 1600);
+    });
+    const streamingPreview = await measureAsync(async () => (await decodeSource(input, 1600)).raster);
+    if (!Buffer.from(legacyPreview.value.data.buffer).equals(Buffer.from(streamingPreview.value.data.buffer))) {
+      throw new Error("Streaming TIFF preview differs from full decode plus area-average downscale.");
+    }
+    const fullBytes = width * height * 3 * Float32Array.BYTES_PER_ELEMENT;
+    const previewBytes = longestSide(width, height) <= 1600
+      ? streamingPreview.value.data.byteLength
+      : streamingPreview.value.data.byteLength * (1 + Float64Array.BYTES_PER_ELEMENT / Float32Array.BYTES_PER_ELEMENT);
+    console.log(`TIFF preview legacy full-raster: ${legacyPreview.ms.toFixed(1)} ms, ${(fullBytes / 2 ** 20).toFixed(1)} MiB raster`);
+    console.log(`TIFF preview streaming: ${streamingPreview.ms.toFixed(1)} ms, ${(previewBytes / 2 ** 20).toFixed(1)} MiB sums+raster`);
+    console.log(`TIFF preview parity: Float32 byte-identical, ${hash(streamingPreview.value.data)}`);
+  }
+
+  const canonical = parallelOnly
+    ? undefined
+    : await measureAsync(() => renderPositive(input, DEFAULT_RECIPE, "tiff", canonicalPath));
+  if (canonical !== undefined && !canonical.value.ok) throw new Error(canonical.value.message);
 
   const bundles = await fs.readdir(join(process.cwd(), "out", "main"));
   const coordinatorName = bundles.find((name) => /^export-worker-.+\.js$/.test(name));
@@ -47,17 +80,22 @@ try {
   }
   const coordinatorPath = join(process.cwd(), "out", "main", coordinatorName);
   const pixelPath = join(process.cwd(), "out", "main", pixelName);
-  const parallel = await measureAsync(() => runExportWorker(coordinatorPath, pixelPath, input, parallelPath));
+  const parallel = await measureAsync(() => runExportWorker(coordinatorPath, pixelPath, input, parallelPath, workerCount));
   if (!parallel.value.ok) throw new Error(parallel.value.message);
 
-  const [canonicalImage, parallelImage] = await Promise.all([readTiff(canonicalPath), readTiff(parallelPath)]);
-  const left = Buffer.from(canonicalImage.pixels.buffer, canonicalImage.pixels.byteOffset, canonicalImage.pixels.byteLength);
+  const parallelImage = await readTiff(parallelPath);
   const right = Buffer.from(parallelImage.pixels.buffer, parallelImage.pixels.byteOffset, parallelImage.pixels.byteLength);
-  if (!left.equals(right)) throw new Error("Parallel 16-bit export differs from the canonical output.");
-
-  console.log(`canonical export: ${canonical.ms.toFixed(1)} ms`);
-  console.log(`parallel export: ${parallel.ms.toFixed(1)} ms (${(canonical.ms / parallel.ms).toFixed(2)}x)`);
-  console.log(`parallel parity: byte-identical, ${hash(right)}`);
+  if (canonical !== undefined) {
+    const canonicalImage = await readTiff(canonicalPath);
+    const left = Buffer.from(canonicalImage.pixels.buffer, canonicalImage.pixels.byteOffset, canonicalImage.pixels.byteLength);
+    if (!left.equals(right)) throw new Error("Parallel 16-bit export differs from the canonical output.");
+    console.log(`canonical export: ${canonical.ms.toFixed(1)} ms`);
+    console.log(`parallel export (${workerCount} pixel workers): ${parallel.ms.toFixed(1)} ms (${(canonical.ms / parallel.ms).toFixed(2)}x)`);
+    console.log(`parallel parity: byte-identical, ${hash(right)}`);
+  } else {
+    console.log(`parallel export (${workerCount} pixel workers): ${parallel.ms.toFixed(1)} ms`);
+    console.log(`parallel output hash: ${hash(right)}`);
+  }
 } finally {
   await fs.rm(temp, { recursive: true, force: true });
 }
@@ -104,9 +142,9 @@ function fillNegative(target, width, height, scale) {
   }
 }
 
-function runExportWorker(coordinatorPath, pixelPath, sourcePath, outPath) {
+function runExportWorker(coordinatorPath, pixelPath, sourcePath, outPath, workers) {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(coordinatorPath, { workerData: { pixelWorkerPath: pixelPath } });
+    const worker = new Worker(coordinatorPath, { workerData: { pixelWorkerPath: pixelPath, workerCountOverride: workers } });
     worker.once("error", reject);
     worker.on("message", (message) => {
       if (message.jobId !== 1) return;
@@ -125,4 +163,8 @@ function runExportWorker(coordinatorPath, pixelPath, sourcePath, outPath) {
 
 function hash(data) {
   return createHash("sha256").update(data).digest("hex").slice(0, 16);
+}
+
+function longestSide(width, height) {
+  return Math.max(width, height);
 }

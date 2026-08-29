@@ -1,4 +1,4 @@
-import type { Recipe, Rect } from "../core/index.ts";
+import type { ClassicRecipe, NegadoctorRecipe, Recipe, Rect, Rgb } from "../core/index.ts";
 import type {
   RollExportRequest,
   RollOpenMode,
@@ -71,9 +71,18 @@ export function parseSessionSaveRequest(value: unknown): SessionSaveRequest {
 
 export function parseRecipe(value: unknown): Recipe {
   const recipe = asRecord(value, "配方");
+  const engineValue = recipe["engine"];
+  const engine = engineValue === undefined
+    ? "classic"
+    : enumValue(engineValue, ["classic", "negadoctor-5.6"] as const, "处理引擎");
+  return engine === "classic" ? parseClassicRecipe(recipe) : parseNegadoctorRecipe(recipe);
+}
+
+function parseClassicRecipe(recipe: Record<string, unknown>): ClassicRecipe {
   const baseMode = enumValue(recipe["baseMode"], ["auto", "roi"] as const, "片基模式");
   const dmaxMode = enumValue(recipe["dmaxMode"], ["auto", "manual"] as const, "Dmax 模式");
-  const parsed: Recipe = {
+  const parsed: ClassicRecipe = {
+    engine: "classic",
     rotate: finiteRange(recipe["rotate"], -180, 180, "旋转角度", false),
     baseMode,
     dmaxMode,
@@ -94,6 +103,42 @@ export function parseRecipe(value: unknown): Recipe {
   if (baseRoi !== undefined) parsed.baseRoi = baseRoi;
   if (neutralRoi !== undefined) parsed.neutralRoi = neutralRoi;
   return parsed;
+}
+
+function parseNegadoctorRecipe(recipe: Record<string, unknown>): NegadoctorRecipe {
+  const parsed: NegadoctorRecipe = {
+    engine: "negadoctor-5.6",
+    rotate: finiteRange(recipe["rotate"], -180, 180, "旋转角度", false),
+    baseMode: enumValue(recipe["baseMode"], ["auto", "roi", "manual"] as const, "片基模式"),
+    filmStock: enumValue(recipe["filmStock"], ["color", "black-and-white"] as const, "胶片类型"),
+    inputPrimaries: enumValue(recipe["inputPrimaries"], ["srgb", "rec2020"] as const, "输入原色"),
+    workingSpace: enumValue(recipe["workingSpace"], ["linear-srgb", "linear-rec2020"] as const, "工作空间"),
+    dminRgb: rgbValue(recipe["dminRgb"], 0.00001, 1.5, "Dmin RGB"),
+    dmax: finiteRange(recipe["dmax"], 0.1, 6, "Dmax"),
+    scanExposureBias: finiteRange(recipe["scanExposureBias"], -1, 1, "扫描曝光偏置"),
+    shadowCastRgb: rgbValue(recipe["shadowCastRgb"], 0.25, 2, "阴影色偏"),
+    highlightBalanceRgb: rgbValue(recipe["highlightBalanceRgb"], 0.25, 2, "高光白平衡"),
+    paperBlack: finiteRange(recipe["paperBlack"], -0.5, 0.5, "相纸黑位"),
+    paperGrade: finiteRange(recipe["paperGrade"], 1, 8, "相纸等级"),
+    paperGloss: finiteRange(recipe["paperGloss"], 0.0001, 1, "相纸光泽"),
+    printExposure: finiteRange(recipe["printExposure"], 0.5, 2, "打印曝光"),
+  };
+  for (const [key, label] of [
+    ["crop", "裁剪区域"],
+    ["baseRoi", "片基区域"],
+    ["contentRoi", "内容区域"],
+    ["shadowRoi", "阴影中性区域"],
+    ["highlightRoi", "高光中性区域"],
+  ] as const) {
+    const rect = optionalRect(recipe[key], label);
+    if (rect !== undefined) parsed[key] = rect;
+  }
+  return parsed;
+}
+
+function rgbValue(value: unknown, min: number, max: number, name: string): Rgb {
+  if (!Array.isArray(value) || value.length !== 3) throw new Error(`${name}必须包含三个通道。`);
+  return value.map((channel, index) => finiteRange(channel, min, max, `${name}通道 ${index + 1}`)) as Rgb;
 }
 
 function optionalRect(value: unknown, name: string): Rect | undefined {

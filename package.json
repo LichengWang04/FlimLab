@@ -1,6 +1,6 @@
 {
   "name": "filmlab",
-  "version": "1.0.0-beta.1",
+  "version": "1.0.0-beta.2",
   "private": true,
   "author": {
     "name": "Licheng Wang"
@@ -23,8 +23,12 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test",
     "check": "npm run typecheck && npm run test",
+    "audit:release": "node scripts/audit-release.mjs",
+    "acceptance:negadoctor": "node scripts/accept-negadoctor.mjs",
     "benchmark": "node scripts/benchmark.mjs",
     "smoke": "npm run build && node scripts/smoke.mjs",
+    "smoke:gpu": "npm run build && node scripts/gpu-smoke.mjs",
+    "smoke:raw": "npm run build && node scripts/raw-smoke.mjs",
     "smoke:export": "npm run build && node scripts/export-smoke.mjs",
     "dist": "npm run build && electron-builder",
     "dist:win": "node scripts/require-signing.mjs && npm run build && electron-builder --win --x64",
@@ -33,6 +37,7 @@
     "dist:linux": "npm run build && electron-builder --linux"
   },
   "dependencies": {
+    "libraw-wasm": "1.6.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "sharp": "^0.35.3"

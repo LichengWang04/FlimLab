@@ -1,11 +1,12 @@
 import sharp from "sharp";
-import { encode16, encode8, processNegative } from "../core/index.ts";
+import { createGeometryPlan, encode16, encode8, negadoctorInputPrimaries, processNegative } from "../core/index.ts";
 import type { Recipe } from "../core/index.ts";
 import type { SingleExportResult } from "../shared/ipc.ts";
-import { decodeSource } from "./decode.ts";
+import { decodeSource, probeSource } from "./decode.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { writeTiff16 } from "./tiff-write.ts";
 import { assertExportCapacity, friendlyProcessingError } from "./resource-limits.ts";
+import { assertProcessingMemory } from "./processing-memory.ts";
 
 /**
  * Decodes the source at full resolution, runs the shared core pipeline with
@@ -21,9 +22,24 @@ export async function renderPositive(
   outPath: string,
 ): Promise<SingleExportResult> {
   try {
+    const meta = await probeSource(sourcePath);
+    const plan = createGeometryPlan(meta.width, meta.height, recipe.rotate, recipe.crop);
+    await assertExportCapacity(outPath, plan.width, plan.height, format);
+    assertProcessingMemory({
+      sourceWidth: meta.width,
+      sourceHeight: meta.height,
+      targetWidth: plan.width,
+      targetHeight: plan.height,
+      sourceDepth: meta.depth,
+      sourceFormat: meta.format,
+      format,
+      identityGeometry: isIdentityGeometry(plan),
+    });
     const { raster } = await decodeSource(sourcePath);
-    const { display } = processNegative(raster, recipe);
-    await assertExportCapacity(outPath, display.width, display.height, format);
+    const effectiveRecipe: Recipe = recipe.engine === "negadoctor-5.6"
+      ? { ...recipe, inputPrimaries: negadoctorInputPrimaries(recipe, meta.format) }
+      : recipe;
+    const { display } = processNegative(raster, effectiveRecipe);
     if (format === "tiff") {
       await writeTiff16(outPath, display.width, display.height, encode16(display));
     } else {
@@ -39,4 +55,10 @@ export async function renderPositive(
   } catch (error) {
     return { ok: false, message: friendlyProcessingError(error) };
   }
+}
+
+function isIdentityGeometry(plan: ReturnType<typeof createGeometryPlan>): boolean {
+  return plan.quarter === 0 && plan.residualRadians === 0
+    && plan.cropX === 0 && plan.cropY === 0
+    && plan.width === plan.sourceWidth && plan.height === plan.sourceHeight;
 }

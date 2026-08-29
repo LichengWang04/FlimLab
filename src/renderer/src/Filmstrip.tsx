@@ -66,46 +66,63 @@ export function Filmstrip({
   onToggleSkip: (id: string) => void;
 }) {
   return (
-    <aside className="filmstrip">
-      {frames.map((frame) => (
-        <div
+    <aside className="filmstrip" aria-label="胶卷帧列表">
+      <div className="filmstrip-header">
+        <h2>胶卷</h2>
+        <span>{frames.length} 帧</span>
+      </div>
+      <div className="filmstrip-list" role="listbox" aria-label="胶卷帧">
+        {frames.map((frame) => (
+          <div
           key={frame.info.id}
+          role="option"
+          tabIndex={0}
+          aria-selected={frame.info.id === activeId}
+          aria-label={`${frame.info.fileName}${skipped.has(frame.info.id) ? "，已跳过" : ""}`}
           className={[
             "frame-card",
             frame.info.id === activeId ? "active" : "",
             skipped.has(frame.info.id) ? "skipped" : "",
           ].filter(Boolean).join(" ")}
           onClick={() => onSelect(frame.info.id)}
-        >
-          <FrameThumb frame={frame} recipe={recipes[frame.info.id]} synchronousFallback={workerFailed} />
-          <div className="frame-meta">
-            <span className="frame-name" title={frame.failure ?? frame.info.fileName}>{frame.info.fileName}</span>
-            <span className={`frame-status ${frame.status}`}>
-              {frame.status === "exported" ? "✓" : frame.status === "failed" ? "✕" : ""}
-            </span>
+          onKeyDown={(event) => {
+            if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+            event.preventDefault();
+            onSelect(frame.info.id);
+          }}
+          >
+            <FrameThumb frame={frame} recipe={recipes[frame.info.id]} synchronousFallback={workerFailed} />
+            <div className="frame-meta">
+              <span className="frame-name" title={frame.failure ?? frame.info.fileName}>{frame.info.fileName}</span>
+              <span className={`frame-status ${frame.status}`}>
+                {frame.status === "exported" ? "✓" : frame.status === "failed" ? "✕" : ""}
+              </span>
+            </div>
+            <button
+              className="frame-remove"
+              title="移除该帧"
+              aria-label={`移除 ${frame.info.fileName}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onRemove(frame.info.id);
+              }}
+            >
+              ✕
+            </button>
+            <button
+              className="frame-skip"
+              title={skipped.has(frame.info.id) ? "取消跳过" : "导出时跳过"}
+              aria-label={`${skipped.has(frame.info.id) ? "取消跳过" : "导出时跳过"} ${frame.info.fileName}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleSkip(frame.info.id);
+              }}
+            >
+              {skipped.has(frame.info.id) ? "⊘" : "⏭"}
+            </button>
           </div>
-          <button
-            className="frame-remove"
-            title="移除该帧"
-            onClick={(event) => {
-              event.stopPropagation();
-              onRemove(frame.info.id);
-            }}
-          >
-            ✕
-          </button>
-          <button
-            className="frame-skip"
-            title={skipped.has(frame.info.id) ? "取消跳过" : "导出时跳过"}
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggleSkip(frame.info.id);
-            }}
-          >
-            {skipped.has(frame.info.id) ? "⊘" : "⏭"}
-          </button>
-        </div>
-      ))}
+        ))}
+      </div>
       <div className="filmstrip-footer">{frames.length - skipped.size} 帧待导出</div>
     </aside>
   );

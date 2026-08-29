@@ -2,8 +2,10 @@ import { constants, promises as fs } from "node:fs";
 import { dirname } from "node:path";
 
 export const MAX_SOURCE_FILE_BYTES = 1024 * 1024 * 1024;
+export const MAX_RAW_SOURCE_FILE_BYTES = 256 * 1024 * 1024;
 export const MAX_IMAGE_EDGE = 32_768;
 export const MAX_IMAGE_PIXELS = 100_000_000;
+export const MAX_RAW_IMAGE_PIXELS = 70_000_000;
 export const MAX_FLOAT_RASTER_BYTES = 1_200_000_000;
 export const MAX_TIFF_STRIPS = 65_536;
 export const MAX_TIFF_STRIP_BYTES = 256 * 1024 * 1024;
@@ -25,6 +27,14 @@ export async function assertSourceFile(path: string): Promise<void> {
   }
 }
 
+export async function assertRawSourceFile(path: string): Promise<void> {
+  await assertSourceFile(path);
+  const stat = await fs.stat(path);
+  if (stat.size > MAX_RAW_SOURCE_FILE_BYTES) {
+    throw new Error(`相机 RAW 文件超过 ${formatMiB(MAX_RAW_SOURCE_FILE_BYTES)} MiB 的安全上限。`);
+  }
+}
+
 export function assertImageDimensions(width: number, height: number): void {
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1) {
     throw new Error("图像尺寸无效。");
@@ -39,6 +49,14 @@ export function assertImageDimensions(width: number, height: number): void {
   const floatBytes = pixels * 3 * Float32Array.BYTES_PER_ELEMENT;
   if (!Number.isSafeInteger(floatBytes) || floatBytes > MAX_FLOAT_RASTER_BYTES) {
     throw new Error("图像解码后的内存需求超过安全上限。");
+  }
+}
+
+export function assertRawImageDimensions(width: number, height: number): void {
+  assertImageDimensions(width, height);
+  const pixels = width * height;
+  if (pixels > MAX_RAW_IMAGE_PIXELS) {
+    throw new Error(`相机 RAW 超过 ${(MAX_RAW_IMAGE_PIXELS / 1_000_000).toFixed(0)} MP 的安全上限。`);
   }
 }
 

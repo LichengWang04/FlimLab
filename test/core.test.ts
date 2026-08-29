@@ -30,7 +30,8 @@ import {
   toneMapEncodeRgba8,
   validateRect,
 } from "../src/core/index.ts";
-import type { ChannelFit, DensityCurve, RasterDomain, Recipe, Rect, Rgb } from "../src/core/index.ts";
+import { getSrgb16Quantizer, getSrgb8Quantizer } from "../src/core/encode.ts";
+import type { ChannelFit, ClassicRecipe, DensityCurve, RasterDomain, Rect, Rgb } from "../src/core/index.ts";
 import { executeKernelTask } from "../src/main/parallel-kernel.ts";
 import type { KernelAction, KernelTask } from "../src/main/parallel-kernel.ts";
 
@@ -57,7 +58,7 @@ function approx(actual: number | undefined, expected: number, tolerance = 1e-6, 
   );
 }
 
-function baseRecipe(overrides: Partial<Recipe> = {}): Recipe {
+function baseRecipe(overrides: Partial<ClassicRecipe> = {}): ClassicRecipe {
   return { ...DEFAULT_RECIPE, ...overrides };
 }
 
@@ -197,6 +198,18 @@ describe("Film base sampling", () => {
     approx(sample.rgb[2], 0.3);
     assert.equal(sample.confidence, 1);
     assert.equal(sample.method, "roi");
+  });
+
+  it("clamps an ROI that overshoots the raster by the IPC rounding slack", () => {
+    const frame = build(100, 20, "transmission-linear", (x, y) => {
+      const content = x >= 10 ? (x + y) / 20 * 0.1 : 0;
+      return [base[0] - content, base[1] - content, base[2] - content];
+    });
+    const overshoot = sampleFilmBase(frame, { x: 0, y: 0, width: 1 + 5e-9, height: 1 + 5e-9 });
+    const exact = sampleFilmBase(frame, { x: 0, y: 0, width: 1, height: 1 });
+    assert.deepEqual(overshoot.rgb, exact.rgb);
+    assert.equal(overshoot.confidence, exact.confidence);
+    assert.equal(overshoot.sampleCount, exact.sampleCount);
   });
 
   it("ignores dust and content inside the ROI", () => {
@@ -876,6 +889,29 @@ describe("sRGB encoding", () => {
     const scene = new Raster(1, 1, "scene-linear-rgb");
     assert.throws(() => encode8(scene));
   });
+
+  it("keeps exact legacy quantization at every 8/16-bit code boundary", () => {
+    const storage = new ArrayBuffer(4);
+    const float = new Float32Array(storage);
+    const bits = new Uint32Array(storage);
+    const adjacent = (value: number, delta: number): number => {
+      float[0] = value;
+      bits[0] = bits[0]! + delta;
+      return float[0]!;
+    };
+    for (const [scale, quantize] of [[255, getSrgb8Quantizer()], [65_535, getSrgb16Quantizer()]] as const) {
+      for (let code = 0; code < scale; code += 1) {
+        const boundary = Math.fround(srgbToLinear((code + 0.5) / scale));
+        for (let delta = -2; delta <= 2; delta += 1) {
+          const value = adjacent(boundary, delta);
+          assert.equal(quantize(value), Math.round(srgbOetf(value) * scale));
+        }
+      }
+      assert.equal(quantize(Number.NaN), 0);
+      assert.equal(quantize(Number.NEGATIVE_INFINITY), 0);
+      assert.equal(quantize(Number.POSITIVE_INFINITY), scale);
+    }
+  });
 });
 
 describe("End-to-end negative inversion", () => {
@@ -1316,7 +1352,7 @@ describe("CPU pipeline acceleration", () => {
   });
 });
 
-function legacyToneRgba(scene: Raster, recipe: Recipe, whitePoint: number): Uint8ClampedArray {
+function legacyToneRgba(scene: Raster, recipe: ClassicRecipe, whitePoint: number): Uint8ClampedArray {
   const target = new Uint8ClampedArray(scene.width * scene.height * 4);
   const exposureScale = Math.pow(2, recipe.exposure);
   const kneeSlope = 1 - recipe.highlightCompression;
@@ -1345,7 +1381,7 @@ function legacyToneRgba(scene: Raster, recipe: Recipe, whitePoint: number): Uint
 
 function runPartitionedPipeline(
   source: Raster,
-  recipe: Recipe,
+  recipe: ClassicRecipe,
   partitions: number,
 ): { bytes8: Uint8Array; bytes16: Uint16Array } {
   const rotated = rotateRaster(source, recipe.rotate);

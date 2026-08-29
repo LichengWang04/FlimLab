@@ -16,6 +16,7 @@ import {
 import { ProcessingServiceCore as ProcessingService } from "../src/main/processing-service-core.ts";
 import {
   assertImageDimensions,
+  assertRawImageDimensions,
   assertTiffStrips,
   friendlyProcessingError,
   MAX_IMAGE_EDGE,
@@ -70,6 +71,8 @@ describe("Release input boundaries", () => {
     assert.doesNotThrow(() => assertImageDimensions(10_000, 6_000));
     assert.throws(() => assertImageDimensions(MAX_IMAGE_EDGE + 1, 1), /最长边/);
     assert.throws(() => assertImageDimensions(MAX_IMAGE_PIXELS, 2), /最长边|MP/);
+    assert.doesNotThrow(() => assertRawImageDimensions(9_504, 6_336));
+    assert.throws(() => assertRawImageDimensions(10_000, 7_001), /RAW/);
     assert.throws(() => assertTiffStrips([0], [MAX_TIFF_STRIP_BYTES + 1]), /单条带/);
   });
 
@@ -81,7 +84,50 @@ describe("Release input boundaries", () => {
   });
 });
 
+describe("Installer legal bundle", () => {
+  it("declares an existing source for every legal file and covers the bundled libvips runtime", async () => {
+    const builder = await fs.readFile(new URL("../electron-builder.yml", import.meta.url), "utf8");
+    const fromPaths = [...builder.matchAll(/^\s*-\s*from:\s*(.+)$/gm)].map((match) => match[1]!.trim());
+    const toPaths = [...builder.matchAll(/^\s*to:\s*(.+)$/gm)].map((match) => match[1]!.trim());
+    assert.ok(fromPaths.length >= 18, "extraResources 条目数量异常");
+    assert.equal(toPaths.length, fromPaths.length, "每个 extraResources 都必须有唯一目标名");
+    assert.equal(new Set(toPaths).size, toPaths.length, "legal 目标文件名不得互相覆盖");
+    for (const relative of fromPaths) {
+      await fs.access(new URL(`../${relative}`, import.meta.url));
+    }
+    for (const required of [
+      "third-party/licenses/LGPL-3.0-or-later.txt",
+      "third-party/licenses/libvips-SOURCE-NOTICE.md",
+      "node_modules/@img/sharp-wasm32/LICENSE",
+    ]) {
+      assert.ok(fromPaths.includes(required), `extraResources 缺少 ${required}`);
+    }
+    const notices = await fs.readFile(new URL("../THIRD_PARTY_NOTICES.md", import.meta.url), "utf8");
+    assert.match(notices, /libvips（含其捆绑的图像编解码组件） \| 8\.18\.3 \| LGPL-3\.0-or-later/);
+    assert.match(notices, /@img\/sharp-wasm32 \| 0\.35\.3 \| Apache-2\.0 AND LGPL-3\.0-or-later AND MIT/);
+    assert.doesNotMatch(notices, /捆绑组件声明见包内许可证/);
+    const lgpl = await fs.readFile(
+      new URL("../third-party/licenses/LGPL-3.0-or-later.txt", import.meta.url),
+      "utf8",
+    );
+    assert.match(lgpl, /GNU LESSER GENERAL PUBLIC LICENSE\s+Version 3, 29 June 2007/);
+  });
+});
+
 describe("Preview Worker scheduling and cache", () => {
+  it("copies and transfers an unshared preview source for the CPU Worker fallback", () => {
+    const worker = new FakePreviewWorker();
+    const client = new PreviewWorkerClient(() => worker);
+    const raster = new Float32Array([0.1, 0.2, 0.3]);
+    client.registerSource(ID_A, 1, 1, raster);
+    const message = worker.messages[0] as { kind: string; raster: Float32Array };
+    assert.equal(message.kind, "register");
+    assert.notEqual(message.raster, raster);
+    assert.deepEqual(message.raster, raster);
+    assert.deepEqual(worker.transfers[0], [message.raster.buffer]);
+    assert.equal(raster.byteLength, 12);
+  });
+
   it("publishes only the newest queued revision", () => {
     const worker = new FakePreviewWorker();
     const client = new PreviewWorkerClient(() => worker);
@@ -103,6 +149,36 @@ describe("Preview Worker scheduling and cache", () => {
     assert.equal(lastMessage.revision, 3);
     worker.respond(previewResponse(3));
     assert.deepEqual(published, [3]);
+  });
+
+  it("publishes only the newly selected frame when GPU preparation overlaps a switch", () => {
+    const worker = new FakePreviewWorker();
+    const client = new PreviewWorkerClient(() => worker);
+    const published: string[] = [];
+    client.requestGpuPreparation({
+      id: ID_A,
+      recipe: DEFAULT_RECIPE,
+      revision: 1,
+      onResult: () => published.push(ID_A),
+      onError: () => assert.fail("GPU preparation should not fail"),
+    });
+    client.requestGpuPreparation({
+      id: ID_B,
+      recipe: DEFAULT_RECIPE,
+      revision: 2,
+      onResult: () => published.push(ID_B),
+      onError: () => assert.fail("GPU preparation should not fail"),
+    });
+    worker.respond(gpuPreparationResponse(1, ID_A));
+    assert.deepEqual(published, []);
+    const next = worker.messages.at(-1) as { kind: string; revision?: number; id?: string };
+    assert.deepEqual({ kind: next.kind, revision: next.revision, id: next.id }, {
+      kind: "prepare-gpu",
+      revision: 2,
+      id: ID_B,
+    });
+    worker.respond(gpuPreparationResponse(2, ID_B));
+    assert.deepEqual(published, [ID_B]);
   });
 
   it("suppresses released work and reports fatal Worker failures", () => {
@@ -210,7 +286,8 @@ describe("Local session and source-path lifecycle", () => {
     registerFrames([]);
     const restored = await store.restore();
     assert.equal(restored?.frames.length, 2);
-    assert.equal(restored?.frames[1]!.recipe.exposure, 0.5);
+    assert.equal(restored?.frames[1]!.recipe.engine, "classic");
+    assert.equal(restored?.frames[1]!.recipe.engine === "classic" ? restored.frames[1]!.recipe.exposure : undefined, 0.5);
     assert.equal(restored?.frames[1]!.skipped, true);
     const restoredId = restored!.frames[0]!.info.id;
     assert.equal(framePath(restoredId), first);
@@ -249,14 +326,35 @@ function previewResponse(revision: number): PreviewWorkerResponse {
   };
 }
 
+function gpuPreparationResponse(revision: number, id: string): PreviewWorkerResponse {
+  return {
+    kind: "gpu-prepared",
+    requestId: revision,
+    revision,
+    id,
+    result: {
+      width: 1,
+      height: 1,
+      base: { rgb: [1, 1, 1], confidence: 1, method: "automatic", sampleCount: 1 },
+      anchors: { dmin: 0, dmax: 1, range: 1 },
+      whitePoint: 1,
+      gains: [1, 1, 1],
+      ms: 1,
+      cacheStats: { geometry: 1, analysis: 1, inversion: 1, balance: 1, tone: 1 },
+    },
+  };
+}
+
 class FakePreviewWorker implements PreviewWorkerPort {
   onmessage: ((event: MessageEvent<PreviewWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   readonly messages: unknown[] = [];
+  readonly transfers: Transferable[][] = [];
   terminated = false;
 
-  postMessage(message: unknown): void {
+  postMessage(message: unknown, transfer: Transferable[] = []): void {
     this.messages.push(message);
+    this.transfers.push(transfer);
   }
 
   terminate(): void {

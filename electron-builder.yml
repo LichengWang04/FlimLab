@@ -25,16 +25,33 @@ extraResources:
     to: legal/licenses/img-colour-LICENSE.txt
   - from: node_modules/@img/sharp-win32-x64/LICENSE
     to: legal/licenses/sharp-win32-x64-LICENSE.txt
+  - from: node_modules/@img/sharp-wasm32/LICENSE
+    to: legal/licenses/sharp-wasm32-LICENSE.txt
   - from: node_modules/detect-libc/LICENSE
     to: legal/licenses/detect-libc-LICENSE.txt
   - from: node_modules/sharp/node_modules/semver/LICENSE
     to: legal/licenses/semver-LICENSE.txt
+  - from: third-party/licenses/libraw-wasm-ISC.txt
+    to: legal/licenses/libraw-wasm-ISC.txt
+  - from: third-party/licenses/LibRaw-CDDL-1.0.txt
+    to: legal/licenses/LibRaw-CDDL-1.0.txt
+  - from: third-party/licenses/LibRaw-COPYRIGHT.txt
+    to: legal/licenses/LibRaw-COPYRIGHT.txt
+  - from: third-party/licenses/Little-CMS-2-MIT.txt
+    to: legal/licenses/Little-CMS-2-MIT.txt
+  - from: third-party/licenses/LGPL-3.0-or-later.txt
+    to: legal/licenses/LGPL-3.0-or-later.txt
+  - from: third-party/licenses/libvips-SOURCE-NOTICE.md
+    to: legal/licenses/libvips-SOURCE-NOTICE.md
+  - from: third-party/RAW-SOURCE-NOTICE.md
+    to: legal/RAW-SOURCE-NOTICE.md
 asarUnpack:
   - node_modules/sharp/**
   - node_modules/@img/**
+  - node_modules/libraw-wasm/**
 win:
   target: nsis
-  icon: build/icon.svg
+  icon: build/icon.png
   signAndEditExecutable: true
   signtoolOptions:
     rfc3161TimeStampServer: http://timestamp.digicert.com
@@ -45,9 +62,9 @@ nsis:
 mac:
   target: dmg
   category: public.app-category.photography
-  icon: build/icon.svg
+  icon: build/icon.png
 linux:
   target: AppImage
   category: Graphics
-  icon: build/icon.svg
+  icon: build/icon.png
 npmRebuild: true

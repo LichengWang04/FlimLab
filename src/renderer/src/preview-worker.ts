@@ -63,6 +63,28 @@ self.onmessage = (event: MessageEvent<PreviewWorkerRequest>) => {
       self.postMessage(response);
       return;
     }
+    if (message.kind === "prepare-gpu") {
+      const prepared = entry.session.prepareGpu(message.recipe);
+      const response: PreviewWorkerResponse = {
+        kind: "gpu-prepared",
+        requestId: message.requestId,
+        revision: message.revision,
+        id: message.id,
+        result: {
+          width: prepared.width,
+          height: prepared.height,
+          base: prepared.base,
+          anchors: prepared.anchors,
+          whitePoint: prepared.whitePoint,
+          gains: prepared.gains,
+          ...(prepared.autoGains === undefined ? {} : { autoGains: prepared.autoGains }),
+          ms: performance.now() - started,
+          cacheStats: { ...entry.session.stats },
+        },
+      };
+      self.postMessage(response);
+      return;
+    }
     const processed = entry.session.processPreview(message.recipe);
     const rgba = processed.rgba;
     const response: PreviewWorkerResponse = {
@@ -87,7 +109,7 @@ self.onmessage = (event: MessageEvent<PreviewWorkerRequest>) => {
     const response: PreviewWorkerResponse = {
       kind: "error",
       requestId: message.requestId,
-      ...(message.kind === "process" ? { revision: message.revision } : {}),
+      ...(message.kind === "process" || message.kind === "prepare-gpu" ? { revision: message.revision } : {}),
       id: message.id,
       message: error instanceof Error ? error.message : String(error),
     };

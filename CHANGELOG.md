@@ -2,6 +2,18 @@
 
 本文件记录面向用户的变更。
 
+## 1.0.0-beta.2 — 2026-08-30
+
+- 新增 CR2、NEF、RW2、ARW 相机原始文件导入：内置 LibRaw 0.22.1 WebAssembly 解码器，以 16 位线性 sRGB 贯通缩略图、1600 px 预览和全分辨率导出；JPEG/PNG/TIFF 既有路径保持不变。
+- 新增 WebGPU 预览调色路径：场景线性缓存上传一次后，曝光、对比度、高光压缩和饱和度改为 WGSL uniform 热更新，经典引擎与“相纸反相 5.6”引擎共用该路径。WebGPU 不可用时回退 Canvas2D/CPU，导出继续使用确定性的 CPU Worker。
+- RAW 新增 256 MiB 文件、70 MP 像素与 WASM 解码峰值内存边界；真实 Sony ARW 覆盖元数据、预览、全尺寸解码和 JPEG 导出验收，并增加独立 GPU 冒烟入口。
+- 安装包新增 libraw-wasm、LibRaw 与 Little CMS 的运行时解包规则、完整许可证和 CDDL 源码取得说明。
+- 新增独立“相纸反相 5.6”处理引擎，冻结到 darktable 5.6.0 negadoctor 的默认值、参数范围和片基密度/相纸打印/高光软压缩结构；历史配方继续迁移为经典引擎。
+- 新引擎默认在线性 Rec.2020 中处理并回到线性 sRGB 导出，提供彩负/黑白预设、片基与三类分析 ROI，以及可复现的一次性稳健自动设置。
+- 同一像素核贯通同步预览、Web Worker、并行导出 Worker 与故障回退，并新增公式 oracle、色彩空间、配方迁移和 darktable CLI 私有样张验收入口。
+- 性能优化保持逐字节输出不变：8/16 位 sRGB 量化改用精确 Float32 阈值表，JPEG/PNG 解码改用整数反传递函数表；相纸反相预览缓存几何、工作色域和片基准备结果。
+- 16 位 TIFF 预览改为按 strip 直接生成精确面积平均缩图，避免完整 Float32 源栅格；大图导出按像素量动态使用最多 10 个 Worker，并并发压缩有序 TIFF strips。24 MP 基准的 canonical 与并行输出逐字节一致。
+
 ## 1.0.0-beta.1 — 2026-08-17
 
 - Windows 公测收口：新增输入文件、像素、边长、整卷帧数、TIFF strip/IFD 与预计内存上限；IPC 对导入模式、frame ID、Recipe、ROI、格式和数组长度执行主进程验证。

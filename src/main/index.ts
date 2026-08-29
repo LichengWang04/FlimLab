@@ -1,8 +1,12 @@
-import { basename } from "node:path";
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { basename, relative, resolve } from "node:path";
+import { promises as fs } from "node:fs";
+import { pathToFileURL } from "node:url";
+import { app, BrowserWindow, dialog, ipcMain, net, protocol } from "electron";
 import { join } from "node:path";
+import { DEFAULT_RECIPE } from "../core/index.ts";
 import { IPC_CHANNELS } from "../shared/ipc.ts";
 import type { RollExportRequest, RollFrameInfo, RollOpenMode, SingleExportRequest } from "../shared/ipc.ts";
+import { applyRendererIsolationHeaders } from "../shared/renderer-isolation.ts";
 import { ProcessingService } from "./processing-service.ts";
 import {
   parseFrameId,
@@ -23,11 +27,17 @@ import {
 } from "./roll-service.ts";
 import { SessionStore } from "./session-store.ts";
 import { runReleaseExportSmoke } from "./release-export-smoke.ts";
+import { decodeRawSource, probeRawSource } from "./raw-decode.ts";
 
-const smokeMode = process.argv.includes("--smoke") || process.env["FILMLAB_SMOKE"] === "1";
+const gpuSmokeTransport = process.argv.includes("--gpu-smoke-array-buffer") ? "array-buffer" : "shared";
+const gpuSmokeMode = process.argv.includes("--gpu-smoke") || process.argv.includes("--gpu-smoke-array-buffer");
+const smokeMode = process.argv.includes("--smoke") || gpuSmokeMode || process.env["FILMLAB_SMOKE"] === "1";
 const exportSmokeRoot = process.argv
   .find((argument) => argument.startsWith("--release-export-smoke="))
   ?.slice("--release-export-smoke=".length);
+const rawSmokeFixture = process.argv
+  .find((argument) => argument.startsWith("--raw-import-smoke="))
+  ?.slice("--raw-import-smoke=".length);
 
 let mainWindow: BrowserWindow | null = null;
 const exportCancelFlags = new Map<number, boolean>();
@@ -35,9 +45,20 @@ const processingService = new ProcessingService();
 const sessionStore = new SessionStore(() => join(app.getPath("userData"), "session-v1.json"));
 
 const IMAGE_FILTERS = [
-  { name: "支持的图像", extensions: ["tif", "tiff", "jpg", "jpeg", "png"] },
+  { name: "支持的图像", extensions: ["tif", "tiff", "jpg", "jpeg", "png", "cr2", "nef", "rw2", "arw"] },
   { name: "所有文件", extensions: ["*"] },
 ];
+
+protocol.registerSchemesAsPrivileged([{
+  scheme: "filmlab",
+  privileges: {
+    standard: true,
+    secure: true,
+    supportFetchAPI: true,
+    corsEnabled: true,
+    codeCache: true,
+  },
+}]);
 
 async function openRoll(mode: RollOpenMode): Promise<RollFrameInfo[] | null> {
   if (mode === "folder") {
@@ -137,8 +158,10 @@ function createWindow(): void {
     // React has mounted into the document.
     mainWindow.webContents.on("console-message", (details) => {
       console.log(`[smoke] renderer console: ${details.message}`);
+      if (gpuSmokeMode && details.message.includes("[gpu-smoke] webgpu")) app.quit();
     });
     mainWindow.webContents.on("did-finish-load", () => {
+      if (gpuSmokeMode) return;
       void mainWindow?.webContents
         .executeJavaScript('document.querySelector("#root")?.children.length ?? 0')
         .then((children) => {
@@ -158,13 +181,51 @@ function createWindow(): void {
   }
 
   if (process.env["ELECTRON_RENDERER_URL"] !== undefined) {
-    void mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"]);
+    const rendererUrl = new URL(process.env["ELECTRON_RENDERER_URL"]);
+    if (gpuSmokeMode) rendererUrl.searchParams.set("gpuSmoke", gpuSmokeTransport);
+    void mainWindow.loadURL(rendererUrl.toString());
   } else {
-    void mainWindow.loadFile(join(import.meta.dirname, "../renderer/index.html"));
+    void mainWindow.loadURL(`filmlab://app/index.html${gpuSmokeMode ? `?gpuSmoke=${gpuSmokeTransport}` : ""}`);
   }
 }
 
+function installRendererProtocol(): void {
+  const rendererRoot = resolve(import.meta.dirname, "../renderer");
+  protocol.handle("filmlab", async (request) => {
+    const url = new URL(request.url);
+    const requested = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
+    const target = resolve(rendererRoot, `.${requested}`);
+    const fromRoot = relative(rendererRoot, target);
+    if (fromRoot.startsWith("..") || resolve(rendererRoot, fromRoot) !== target) {
+      return new Response("Not found", { status: 404 });
+    }
+    const file = await net.fetch(pathToFileURL(target).toString());
+    const headers = applyRendererIsolationHeaders(new Headers(file.headers));
+    return new Response(file.body, { status: file.status, statusText: file.statusText, headers });
+  });
+}
+
 app.whenReady().then(async () => {
+  if (rawSmokeFixture !== undefined) {
+    const outPath = join(app.getPath("temp"), `filmlab-raw-smoke-${process.pid}.jpg`);
+    let exitCode = 0;
+    try {
+      const meta = await probeRawSource(rawSmokeFixture);
+      const preview = await decodeRawSource(rawSmokeFixture, 1600);
+      const result = await processingService.renderPositive(rawSmokeFixture, DEFAULT_RECIPE, "jpeg", outPath);
+      if (!result.ok) throw new Error(result.message);
+      const output = await fs.stat(outPath);
+      console.log(`[raw-smoke] complete ${meta.width}x${meta.height} preview=${preview.raster.width}x${preview.raster.height} jpeg=${output.size}`);
+    } catch (error) {
+      console.error("[raw-smoke] failed:", error);
+      exitCode = 1;
+    } finally {
+      processingService.close();
+      await fs.rm(outPath, { force: true }).catch(() => {});
+      app.exit(exitCode);
+    }
+    return;
+  }
   if (exportSmokeRoot !== undefined) {
     try {
       const output = await runReleaseExportSmoke(exportSmokeRoot, processingService);
@@ -199,6 +260,7 @@ app.whenReady().then(async () => {
     arch: process.arch,
     electron: process.versions.electron,
   }));
+  installRendererProtocol();
   createWindow();
 
   app.on("activate", () => {

@@ -1,6 +1,6 @@
 import { Raster } from "./raster.ts";
 import { applyDensityCurve } from "./density.ts";
-import type { DensityAnchors, DensityCurve, Recipe } from "./types.ts";
+import type { ClassicRecipe, DensityAnchors, DensityCurve } from "./types.ts";
 
 /**
  * Inverts relative density into scene-linear positive light, before any
@@ -18,7 +18,7 @@ import type { DensityAnchors, DensityCurve, Recipe } from "./types.ts";
 export function invertDensity(
   density: Raster,
   anchors: DensityAnchors,
-  recipe: Pick<Recipe, "preSaturation">,
+  recipe: Pick<ClassicRecipe, "preSaturation">,
 ): Raster {
   density.assertDomain(["relative-density"]);
   validateInvertParameters(anchors, recipe.preSaturation);

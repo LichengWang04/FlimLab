@@ -3,6 +3,7 @@ import type {
   PreviewWorkerRequest,
   PreviewWorkerResponse,
   PreviewWorkerResult,
+  GpuPreparationWorkerResult,
   ThumbnailWorkerResult,
 } from "./preview-worker-protocol.ts";
 
@@ -23,6 +24,14 @@ interface ThumbnailJob {
   onResult: (result: ThumbnailWorkerResult) => void;
 }
 
+interface GpuPreparationJob {
+  id: string;
+  recipe: Recipe;
+  revision: number;
+  onResult: (result: GpuPreparationWorkerResult, revision: number) => void;
+  onError: (message: string, missingSource: boolean) => void;
+}
+
 export interface PreviewWorkerPort {
   onmessage: ((event: MessageEvent<PreviewWorkerResponse>) => void) | null;
   onerror: ((event: ErrorEvent) => void) | null;
@@ -36,8 +45,10 @@ export class PreviewWorkerClient {
   private busy = false;
   private sequence = 0;
   private pendingPreview?: PreviewJob;
+  private pendingGpu?: GpuPreparationJob;
   private readonly pendingThumbnails = new Map<string, ThumbnailJob>();
   private activePreview?: PreviewJob;
+  private activeGpu?: GpuPreparationJob;
   private activeThumbnail?: ThumbnailJob;
   private fatalHandler?: (message: string) => void;
 
@@ -57,8 +68,9 @@ export class PreviewWorkerClient {
   }
 
   registerSource(id: string, width: number, height: number, raster: Float32Array): void {
-    const owned = new Float32Array(raster.length);
-    owned.set(raster);
+    const SharedBuffer = globalThis.SharedArrayBuffer;
+    const shared = SharedBuffer !== undefined && raster.buffer instanceof SharedBuffer;
+    const owned = shared ? raster : new Float32Array(raster);
     const message: PreviewWorkerRequest = {
       kind: "register",
       id,
@@ -66,11 +78,16 @@ export class PreviewWorkerClient {
       height,
       raster: owned,
     };
-    this.worker.postMessage(message, [owned.buffer]);
+    this.worker.postMessage(message, shared ? [] : [owned.buffer]);
   }
 
   requestPreview(job: PreviewJob): void {
     this.pendingPreview = job;
+    this.pump();
+  }
+
+  requestGpuPreparation(job: GpuPreparationJob): void {
+    this.pendingGpu = job;
     this.pump();
   }
 
@@ -82,13 +99,16 @@ export class PreviewWorkerClient {
   release(id: string): void {
     this.pendingThumbnails.delete(id);
     if (this.pendingPreview?.id === id) this.pendingPreview = undefined;
+    if (this.pendingGpu?.id === id) this.pendingGpu = undefined;
     if (this.activePreview?.id === id) this.activePreview = undefined;
+    if (this.activeGpu?.id === id) this.activeGpu = undefined;
     if (this.activeThumbnail?.id === id) this.activeThumbnail = undefined;
     this.worker.postMessage({ kind: "release", id } satisfies PreviewWorkerRequest);
   }
 
   clear(): void {
     this.pendingPreview = undefined;
+    this.pendingGpu = undefined;
     this.pendingThumbnails.clear();
     this.worker.postMessage({ kind: "clear" } satisfies PreviewWorkerRequest);
   }
@@ -99,6 +119,21 @@ export class PreviewWorkerClient {
 
   private pump(): void {
     if (this.busy) return;
+    const gpu = this.pendingGpu;
+    if (gpu !== undefined) {
+      this.pendingGpu = undefined;
+      this.activeGpu = gpu;
+      this.busy = true;
+      const message: PreviewWorkerRequest = {
+        kind: "prepare-gpu",
+        requestId: ++this.sequence,
+        revision: gpu.revision,
+        id: gpu.id,
+        recipe: gpu.recipe,
+      };
+      this.worker.postMessage(message);
+      return;
+    }
     const preview = this.pendingPreview;
     if (preview !== undefined) {
       this.pendingPreview = undefined;
@@ -143,6 +178,13 @@ export class PreviewWorkerClient {
       if (!superseded && active !== undefined && active.id === message.id && active.revision === message.revision) {
         active.onResult(message.result, message.revision);
       }
+    } else if (message.kind === "gpu-prepared") {
+      const active = this.activeGpu;
+      this.activeGpu = undefined;
+      const superseded = this.pendingGpu !== undefined && this.pendingGpu.revision > message.revision;
+      if (!superseded && active !== undefined && active.id === message.id && active.revision === message.revision) {
+        active.onResult(message.result, message.revision);
+      }
     } else if (message.kind === "thumbnail") {
       const active = this.activeThumbnail;
       this.activeThumbnail = undefined;
@@ -150,8 +192,10 @@ export class PreviewWorkerClient {
     } else {
       const active = this.activePreview;
       this.activePreview = undefined;
+      const activeGpu = this.activeGpu;
+      this.activeGpu = undefined;
       this.activeThumbnail = undefined;
-      active?.onError(message.message, message.missingSource === true);
+      (active ?? activeGpu)?.onError(message.message, message.missingSource === true);
     }
     this.pump();
   }

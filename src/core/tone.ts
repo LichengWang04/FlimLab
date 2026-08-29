@@ -1,6 +1,6 @@
-import { srgbOetf } from "./encode.ts";
+import { getSrgb16Quantizer, getSrgb8Quantizer } from "./encode.ts";
 import { Raster, selectNumberInPlace } from "./raster.ts";
-import type { Recipe } from "./types.ts";
+import type { ClassicRecipe } from "./types.ts";
 
 const MID_GREY = 0.18;
 const KNEE = 1.0;
@@ -13,7 +13,7 @@ const SAMPLE_CAP = 65_536;
  */
 export function toneMap(
   scene: Raster,
-  recipe: Pick<Recipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
+  recipe: Pick<ClassicRecipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
   whitePointOverride?: number,
 ): { display: Raster; whitePoint: number } {
   scene.assertDomain(["scene-linear-rgb"]);
@@ -28,7 +28,7 @@ export function toneMap(
 }
 
 export function validateToneParameters(
-  recipe: Pick<Recipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
+  recipe: Pick<ClassicRecipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
 ): void {
   const { exposure, contrast, highlightCompression, saturation } = recipe;
   if (
@@ -47,7 +47,7 @@ export function toneMapRange(
   target: Float32Array,
   startPixel: number,
   endPixel: number,
-  recipe: Pick<Recipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
+  recipe: Pick<ClassicRecipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
   whitePoint: number,
 ): void {
   toneKernel(source, startPixel, endPixel, recipe, whitePoint, target);
@@ -58,7 +58,7 @@ export function toneMapEncode8Range(
   target: Uint8Array,
   startPixel: number,
   endPixel: number,
-  recipe: Pick<Recipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
+  recipe: Pick<ClassicRecipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
   whitePoint: number,
 ): void {
   toneKernel(source, startPixel, endPixel, recipe, whitePoint, undefined, target);
@@ -69,7 +69,7 @@ export function toneMapEncode16Range(
   target: Uint16Array,
   startPixel: number,
   endPixel: number,
-  recipe: Pick<Recipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
+  recipe: Pick<ClassicRecipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
   whitePoint: number,
 ): void {
   toneKernel(source, startPixel, endPixel, recipe, whitePoint, undefined, undefined, target);
@@ -77,7 +77,7 @@ export function toneMapEncode16Range(
 
 export function toneMapEncodeRgba8(
   scene: Raster,
-  recipe: Pick<Recipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
+  recipe: Pick<ClassicRecipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
   whitePoint: number,
 ): Uint8ClampedArray<ArrayBuffer> {
   scene.assertDomain(["scene-linear-rgb"]);
@@ -92,7 +92,7 @@ function toneKernel(
   source: Float32Array,
   startPixel: number,
   endPixel: number,
-  recipe: Pick<Recipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
+  recipe: Pick<ClassicRecipe, "exposure" | "contrast" | "highlightCompression" | "saturation">,
   whitePoint: number,
   floatTarget?: Float32Array,
   target8?: Uint8Array,
@@ -102,6 +102,11 @@ function toneKernel(
   const { exposure, contrast, highlightCompression, saturation } = recipe;
   const exposureScale = Math.pow(2, exposure);
   const kneeSlope = 1 - highlightCompression;
+  const quantize = target16 !== undefined
+    ? getSrgb16Quantizer()
+    : target8 !== undefined || rgbaTarget !== undefined
+      ? getSrgb8Quantizer()
+      : undefined;
   for (let offset = startPixel * 3; offset < endPixel * 3; offset += 3) {
     let red = source[offset]! * exposureScale;
     let green = source[offset + 1]! * exposureScale;
@@ -140,22 +145,22 @@ function toneKernel(
     }
     // Preserve the Float32 display-raster rounding boundary of the original
     // two-stage tone-map then encode path.
-    const encodedRed = srgbOetf(Math.fround(outRed));
-    const encodedGreen = srgbOetf(Math.fround(outGreen));
-    const encodedBlue = srgbOetf(Math.fround(outBlue));
+    const encodedRed = quantize!(Math.fround(outRed));
+    const encodedGreen = quantize!(Math.fround(outGreen));
+    const encodedBlue = quantize!(Math.fround(outBlue));
     if (target8 !== undefined) {
-      target8[offset] = Math.round(encodedRed * 255);
-      target8[offset + 1] = Math.round(encodedGreen * 255);
-      target8[offset + 2] = Math.round(encodedBlue * 255);
+      target8[offset] = encodedRed;
+      target8[offset + 1] = encodedGreen;
+      target8[offset + 2] = encodedBlue;
     } else if (target16 !== undefined) {
-      target16[offset] = Math.round(encodedRed * 65535);
-      target16[offset + 1] = Math.round(encodedGreen * 65535);
-      target16[offset + 2] = Math.round(encodedBlue * 65535);
+      target16[offset] = encodedRed;
+      target16[offset + 1] = encodedGreen;
+      target16[offset + 2] = encodedBlue;
     } else if (rgbaTarget !== undefined) {
       const rgbaOffset = offset / 3 * 4;
-      rgbaTarget[rgbaOffset] = Math.round(encodedRed * 255);
-      rgbaTarget[rgbaOffset + 1] = Math.round(encodedGreen * 255);
-      rgbaTarget[rgbaOffset + 2] = Math.round(encodedBlue * 255);
+      rgbaTarget[rgbaOffset] = encodedRed;
+      rgbaTarget[rgbaOffset + 1] = encodedGreen;
+      rgbaTarget[rgbaOffset + 2] = encodedBlue;
       rgbaTarget[rgbaOffset + 3] = 255;
     }
   }

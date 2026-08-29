@@ -13,7 +13,9 @@ interface PersistedSession {
   frames: { path: string; recipe: Recipe; skipped: boolean }[];
 }
 
-const SUPPORTED = new Set([".tif", ".tiff", ".jpg", ".jpeg", ".png"]);
+const SUPPORTED = new Set([
+  ".tif", ".tiff", ".jpg", ".jpeg", ".png", ".cr2", ".nef", ".rw2", ".arw",
+]);
 
 export class SessionStore {
   private saveChain = Promise.resolve();

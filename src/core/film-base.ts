@@ -14,10 +14,13 @@ export function sampleFilmBase(linear: Raster, roi: Rect): BaseSample {
   linear.assertDomain(["transmission-linear"]);
   validateRect(roi, "Film-base ROI");
 
-  const left = Math.floor(roi.x * linear.width);
-  const top = Math.floor(roi.y * linear.height);
-  const right = Math.max(left + 1, Math.ceil((roi.x + roi.width) * linear.width));
-  const bottom = Math.max(top + 1, Math.ceil((roi.y + roi.height) * linear.height));
+  // IPC validation keeps ROIs within [0,1] up to a rounding slack, so an
+  // edge can still land one pixel out of bounds; clamp every edge so the
+  // sampling loop never wraps onto unrelated rows or columns.
+  const left = Math.min(Math.max(Math.floor(roi.x * linear.width), 0), linear.width - 1);
+  const top = Math.min(Math.max(Math.floor(roi.y * linear.height), 0), linear.height - 1);
+  const right = Math.min(Math.max(Math.max(left + 1, Math.ceil((roi.x + roi.width) * linear.width)), left + 1), linear.width);
+  const bottom = Math.min(Math.max(Math.max(top + 1, Math.ceil((roi.y + roi.height) * linear.height)), top + 1), linear.height);
   const capacity = (right - left) * (bottom - top);
   if (capacity < 3) {
     throw new Error(

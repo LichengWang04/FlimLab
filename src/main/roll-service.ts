@@ -9,16 +9,19 @@ import type {
   RollPreview,
   RollThumbnail,
 } from "../shared/ipc.ts";
-import { decodeSource } from "./decode.ts";
+import { decodeSource, decodeThumbnailSource } from "./decode.ts";
 import { renderPositive } from "./export.ts";
 import { MAX_ROLL_FRAMES } from "./resource-limits.ts";
+import { ThumbnailDecodeQueue } from "./thumbnail-decode-queue.ts";
 
 export type PositiveRenderer = typeof renderPositive;
 
 const PREVIEW_MAX_SIDE = 1600;
 const THUMBNAIL_MAX_SIDE = 256;
 
-const SUPPORTED_EXTENSIONS = new Set([".tif", ".tiff", ".jpg", ".jpeg", ".png"]);
+const SUPPORTED_EXTENSIONS = new Set([
+  ".tif", ".tiff", ".jpg", ".jpeg", ".png", ".cr2", ".nef", ".rw2", ".arw",
+]);
 
 /**
  * Roll of frames. The registry keeps the absolute source paths inside the
@@ -27,30 +30,42 @@ const SUPPORTED_EXTENSIONS = new Set([".tif", ".tiff", ".jpg", ".jpeg", ".png"])
  * Node.
  */
 
-const frames = new Map<string, string>();
+interface RegisteredFrame {
+  path: string;
+  generation: number;
+}
+
+const frames = new Map<string, RegisteredFrame>();
+const thumbnailQueue = new ThumbnailDecodeQueue(2);
+let frameGeneration = 0;
 
 export function registerFrames(paths: string[]): RollFrameInfo[] {
   if (paths.length > MAX_ROLL_FRAMES) throw new Error(`整卷最多导入 ${MAX_ROLL_FRAMES} 帧。`);
+  frameGeneration += 1;
+  thumbnailQueue.cancelAll();
   frames.clear();
   const infos: RollFrameInfo[] = [];
   for (const path of paths) {
     const id = randomUUID();
-    frames.set(id, path);
+    frames.set(id, { path, generation: frameGeneration });
     infos.push({ id, fileName: basename(path) });
   }
   return infos;
 }
 
 export function releaseFrame(id: string): boolean {
+  thumbnailQueue.cancelKey(id);
   return frames.delete(id);
 }
 
 export function clearFrames(): void {
+  frameGeneration += 1;
+  thumbnailQueue.cancelAll();
   frames.clear();
 }
 
 export function framePath(id: string): string | null {
-  return frames.get(id) ?? null;
+  return frames.get(id)?.path ?? null;
 }
 
 /** Scans a directory (non-recursive) for supported images, sorted by name. */
@@ -71,6 +86,10 @@ async function requireFramePath(id: string): Promise<string> {
 export async function decodeRollPreview(id: string): Promise<RollPreview> {
   const path = await requireFramePath(id);
   const { raster, meta } = await decodeSource(path, PREVIEW_MAX_SIDE);
+  // Electron's invoke serializer cannot clone SharedArrayBuffer values from
+  // main to renderer. Keep this IPC payload cloneable; the renderer promotes
+  // it to one shared surface immediately after receipt.
+  const ipcRaster = new Float32Array(raster.data);
   return {
     id,
     fileName: basename(path),
@@ -78,14 +97,22 @@ export async function decodeRollPreview(id: string): Promise<RollPreview> {
     height: raster.height,
     depth: meta.depth,
     hasIcc: meta.hasIcc,
-    raster: raster.data,
+    format: meta.format,
+    raster: ipcRaster,
   };
 }
 
 export async function decodeRollThumbnail(id: string): Promise<RollThumbnail> {
-  const path = await requireFramePath(id);
-  const { raster } = await decodeSource(path, THUMBNAIL_MAX_SIDE);
-  return { id, width: raster.width, height: raster.height, raster: raster.data };
+  const registered = frames.get(id);
+  if (registered === undefined) throw new Error("帧不存在,请重新导入。");
+  return thumbnailQueue.submit(
+    id,
+    () => frames.get(id) === registered && registered.generation === frameGeneration,
+    async () => {
+      const { raster } = await decodeThumbnailSource(registered.path, THUMBNAIL_MAX_SIDE);
+      return { id, width: raster.width, height: raster.height, raster: raster.data };
+    },
+  );
 }
 
 async function fileExists(path: string): Promise<boolean> {

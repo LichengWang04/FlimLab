@@ -1,0 +1,39 @@
+<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="FilmLab darktable 5.6 acceptance template">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:darktable="http://darktable.sf.net/"
+      darktable:xmp_version="4"
+      darktable:raw_params="0"
+      darktable:auto_presets_applied="1"
+      darktable:history_end="2">
+      <darktable:history>
+        <rdf:Seq>
+          <rdf:li
+            darktable:num="0"
+            darktable:operation="colorin"
+            darktable:enabled="1"
+            darktable:modversion="7"
+            darktable:params="{{COLORIN_PARAMS}}"
+            darktable:multi_name=""
+            darktable:multi_name_hand_edited="0"
+            darktable:multi_priority="0"
+            darktable:blendop_version="13"
+            darktable:blendop_params="gz08eJxjYGBgYAFiCQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dlAx68oBEMbFxwX+AwGIBgCbGCeh"/>
+          <rdf:li
+            darktable:num="1"
+            darktable:operation="negadoctor"
+            darktable:enabled="1"
+            darktable:modversion="2"
+            darktable:params="{{NEGADOCTOR_PARAMS}}"
+            darktable:multi_name=""
+            darktable:multi_name_hand_edited="0"
+            darktable:multi_priority="0"
+            darktable:blendop_version="13"
+            darktable:blendop_params="gz08eJxjYGBgYAFiCQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dlAx68oBEMbFxwX+AwGIBgCbGCeh"/>
+        </rdf:Seq>
+      </darktable:history>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>

@@ -12,9 +12,11 @@ dist/
 /*-positive.tif
 /*-positive.tiff
 *.filmlab/
+/artifacts/negadoctor-acceptance/
 
 # 其他工具的工作目录与历史备份
 .agents/
+.mimosa/
 .reasonix/
 .tools/
 .workbuddy/

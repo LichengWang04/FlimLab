@@ -4,6 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_raw_smoke:
+        description: "使用 FILMLAB_RAW_FIXTURE_URL secret 运行真实 RAW 冒烟"
+        type: boolean
+        required: false
+        default: false
+      fixture_name:
+        description: "样张保存文件名（扩展名必须是 CR2/NEF/RW2/ARW）"
+        required: false
+        default: "sample.arw"
 
 jobs:
   check:
@@ -22,3 +33,35 @@ jobs:
       - run: npm run build
       - name: Smoke test
         run: ${{ runner.os == 'Linux' && 'xvfb-run -a npm run smoke' || 'npm run smoke' }}
+
+  # libraw-wasm is mocked in unit tests, so real RAW decoding only runs here
+  # when a maintainer dispatches this workflow and the private download URL is
+  # available through the FILMLAB_RAW_FIXTURE_URL repository secret.
+  raw-smoke:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_raw_smoke == true }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Download private RAW fixture
+        shell: bash
+        env:
+          FILMLAB_RAW_FIXTURE_URL: ${{ secrets.FILMLAB_RAW_FIXTURE_URL }}
+        run: |
+          if [ -z "$FILMLAB_RAW_FIXTURE_URL" ]; then
+            echo "::error::缺少 FILMLAB_RAW_FIXTURE_URL repository secret"
+            exit 1
+          fi
+          case "${{ inputs.fixture_name }}" in
+            *.cr2|*.CR2|*.nef|*.NEF|*.rw2|*.RW2|*.arw|*.ARW) ;;
+            *) echo "::error::fixture_name 必须以 .cr2/.nef/.rw2/.arw 结尾" && exit 1 ;;
+          esac
+          curl -fsSL "$FILMLAB_RAW_FIXTURE_URL" -o "${{ github.workspace }}/${{ inputs.fixture_name }}"
+      - name: RAW smoke test
+        run: npm run build && node scripts/raw-smoke.mjs
+        env:
+          FILMLAB_RAW_FIXTURE: ${{ github.workspace }}/${{ inputs.fixture_name }}

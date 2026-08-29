@@ -51,6 +51,7 @@ describe("Roll service", () => {
     assert.equal(preview.height, 32);
     assert.equal(preview.depth, 16);
     assert.equal(preview.raster.length, 64 * 32 * 3);
+    assert.ok(preview.raster.buffer instanceof ArrayBuffer);
 
     const thumb = await decodeRollThumbnail(infos[1]!.id);
     assert.ok(thumb.width <= 256 && thumb.height <= 256);
@@ -71,8 +72,11 @@ describe("Roll service", () => {
     await writeTiff16(join(tempDir, "2.tiff"), 8, 8, makeNegative(8, 8, 1));
     await writeTiff16(join(tempDir, "10.tiff"), 8, 8, makeNegative(8, 8, 1));
     await writeTiff16(join(tempDir, "1.tiff"), 8, 8, makeNegative(8, 8, 1));
+    for (const name of ["3.CR2", "4.nef", "5.RW2", "6.arw"]) await fs.writeFile(join(tempDir, name), "raw");
     const paths = await scanFolder(tempDir);
-    assert.deepEqual(paths.map((path) => path.split(/[\\/]/).pop()), ["1.tiff", "2.tiff", "10.tiff"]);
+    assert.deepEqual(paths.map((path) => path.split(/[\\/]/).pop()), [
+      "1.tiff", "2.tiff", "3.CR2", "4.nef", "5.RW2", "6.arw", "10.tiff",
+    ]);
   });
 
   it("exports every frame with its own recipe and reports failures", async () => {
