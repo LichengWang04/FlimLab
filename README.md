@@ -12,7 +12,7 @@ FilmLab 是一款面向个人胶片翻拍与扫描的负像还原工作台。它
 
 Windows x64 安装包统一通过 [GitHub Releases](https://github.com/LichengWang04/FlimLab/releases) 发布，请以该页面实际列出的可用版本为准。公测版采用手动更新，不会在应用内自动下载新版本。
 
-正式发布的安装程序应带有有效的 Windows 数字签名。仓库工作区或 `dist:win:unsigned` 生成的未签名包仅用于本地结构验收，不应对外分发。
+当前公共测试版有意不使用 Windows 代码签名，Windows Defender SmartScreen 可能显示“未知发布者”。只从 GitHub Releases 下载，并用同页 `SHA256SUMS.txt` 核对安装器；详细安全边界见 [公共测试说明](docs/PUBLIC_BETA.md)。
 
 ### 2. 准备底片文件
 
@@ -64,7 +64,8 @@ FilmLab 会在 Electron 的本地用户数据目录保存最近会话，包括�
 | 类型 | 支持情况 | 说明 |
 | --- | --- | --- |
 | JPEG / PNG 输入 | 支持 | 按显示编码的 sRGB 解码并转换到线性光域 |
-| CR2 / NEF / RW2 / ARW 输入 | 支持 | 由 LibRaw 0.22.1 解码为 16 位线性 sRGB；关闭自动提亮、相机白平衡和自动白平衡 |
+| ARW 输入 | 支持 | Sony A7R V 私有样张已实测；由 LibRaw 0.22.1 解码为 16 位线性 sRGB |
+| CR2 / NEF / RW2 输入 | 实验性 | 共用 LibRaw 解码路径，但当前没有对应真实相机样张验收记录 |
 | 8 位整数 TIFF | 支持 | RGB 或灰度、strip 布局 |
 | 16 位整数 TIFF | 支持 | RGB 或灰度、strip 布局；无 ICC 时按线性扫描数据处理 |
 | TIFF 压缩 | 部分支持 | 无压缩、Deflate、LZW、PackBits |
@@ -169,11 +170,11 @@ node --test test/raw-import.test.ts
 Windows 打包：
 
 ```powershell
-npm run dist:win           # 正式签名构建；要求代码签名环境变量
-npm run dist:win:unsigned  # 本地结构验收；产物不得分发
+npm run dist:win           # Windows x64 未签名公共测试包
+npm run dist:win:unsigned  # 上述命令的兼容别名
 ```
 
-正式发布会从干净 tag 执行依赖安装、审计、测试、构建、签名打包、安装后 smoke、实际导出、卸载和 Authenticode 验证。详细流程见 [docs/RELEASE.md](docs/RELEASE.md)。
+公共测试发布会从干净 tag 执行依赖安装、审计、测试、构建、未签名打包、安装后 smoke、实际导出、卸载、SHA-256 和元数据生成。详细流程见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ## 代码结构
 

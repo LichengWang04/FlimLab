@@ -4,9 +4,11 @@
 
 ## 1.0.0-beta.2 — 2026-08-30
 
-- 新增 CR2、NEF、RW2、ARW 相机原始文件导入：内置 LibRaw 0.22.1 WebAssembly 解码器，以 16 位线性 sRGB 贯通缩略图、1600 px 预览和全分辨率导出；JPEG/PNG/TIFF 既有路径保持不变。
+- 公共测试发布改为明确的 Windows x64 未签名策略：Release 页面、安装说明与构建元数据均标记 `NotSigned`，并通过 SHA-256 校验文件建立下载完整性边界。
+- Sony A7R V ARW 私有样张集扩充到 6 张；ARW 与尚无真实样张的 CR2/NEF/RW2 在公开兼容性说明中分开标注。
+- 新增 CR2、NEF、RW2、ARW 相机原始文件导入：内置 LibRaw 0.22.1 WebAssembly 解码器，以 16 位线性 sRGB 贯通缩略图、1600 px 预览和全分辨率导出；JPEG/PNG/TIFF 既有路径保持不变。当前真实相机验收只覆盖 Sony A7R V ARW 的元数据与 1600 px 解码。
 - 新增 WebGPU 预览调色路径：场景线性缓存上传一次后，曝光、对比度、高光压缩和饱和度改为 WGSL uniform 热更新，经典引擎与“相纸反相 5.6”引擎共用该路径。WebGPU 不可用时回退 Canvas2D/CPU，导出继续使用确定性的 CPU Worker。
-- RAW 新增 256 MiB 文件、70 MP 像素与 WASM 解码峰值内存边界；真实 Sony ARW 覆盖元数据、预览、全尺寸解码和 JPEG 导出验收，并增加独立 GPU 冒烟入口。
+- RAW 新增 256 MiB 文件、70 MP 像素与 WASM 解码峰值内存边界；真实 Sony ARW 覆盖元数据与预览验收，全尺寸导出在内存不足时按设计提前拒绝，并增加独立 GPU 冒烟入口。
 - 安装包新增 libraw-wasm、LibRaw 与 Little CMS 的运行时解包规则、完整许可证和 CDDL 源码取得说明。
 - 新增独立“相纸反相 5.6”处理引擎，冻结到 darktable 5.6.0 negadoctor 的默认值、参数范围和片基密度/相纸打印/高光软压缩结构；历史配方继续迁移为经典引擎。
 - 新引擎默认在线性 Rec.2020 中处理并回到线性 sRGB 导出，提供彩负/黑白预设、片基与三类分析 ROI，以及可复现的一次性稳健自动设置。

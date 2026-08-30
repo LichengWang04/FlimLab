@@ -2,7 +2,15 @@
 
 验收脚本固定要求 darktable CLI 报告 `5.6.0`，并使用独立临时配置、内存数据库、关闭 OpenCL、线性 Rec.2020 输入/工作空间及 sRGB 输出。仓库中的 `scripts/negadoctor-5.6-template.xmp` 只启用输入色彩转换和 negadoctor；自定义预设与额外 tone mapping 均关闭。
 
-设置 `FILMLAB_NEGADOCTOR_FIXTURES` 指向不纳入版本控制的目录。目录需包含 4–6 张无裁切、同尺寸比较所需的 16 位线性 Rec.2020 RGB TIFF，以及：
+可以直接从私有 RAW 目录生成 4–6 张缩小的 16 位线性 Rec.2020 RGB TIFF。生成目录与原始样片都不纳入版本控制：
+
+```powershell
+$env:FILMLAB_RAW_FIXTURES = "D:\private\filmlab-raw"
+$env:FILMLAB_NEGADOCTOR_FIXTURES = "D:\private\filmlab-negadoctor"
+npm.cmd run prepare:negadoctor-fixtures
+```
+
+也可以自行准备同规格 TIFF。`FILMLAB_NEGADOCTOR_FIXTURES` 指向的目录还需包含：
 
 ```json
 {

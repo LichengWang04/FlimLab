@@ -1,0 +1,72 @@
+{
+  "acceptanceDate": "2026-08-30",
+  "darktableVersion": "5.6.0",
+  "input": {
+    "source": "six private Sony A7R V ARW files",
+    "fixtureEncoding": "16-bit linear Rec.2020 TIFF",
+    "fixtureDimensions": "1600x1067",
+    "privateAssetsPublished": false
+  },
+  "thresholds": {
+    "minimumGlobalLuminanceSsim": 0.98,
+    "maximumMedianDeltaE00": 2,
+    "maximumP95DeltaE00": 5
+  },
+  "results": [
+    {
+      "name": "DSC01683",
+      "eligiblePixels": 1478853,
+      "totalPixels": 1707200,
+      "globalLuminanceSsim": 0.9999009419623988,
+      "medianDeltaE00": 0.3109009721948554,
+      "p95DeltaE00": 0.6549642644396936,
+      "pass": true
+    },
+    {
+      "name": "DSC01684",
+      "eligiblePixels": 1448288,
+      "totalPixels": 1707200,
+      "globalLuminanceSsim": 0.9999388073909865,
+      "medianDeltaE00": 0.26021584757897975,
+      "p95DeltaE00": 0.6314383487529008,
+      "pass": true
+    },
+    {
+      "name": "DSC01688",
+      "eligiblePixels": 1402692,
+      "totalPixels": 1707200,
+      "globalLuminanceSsim": 0.9998819550475635,
+      "medianDeltaE00": 0.2391389364184776,
+      "p95DeltaE00": 0.6050034078731247,
+      "pass": true
+    },
+    {
+      "name": "DSC01692",
+      "eligiblePixels": 1400457,
+      "totalPixels": 1707200,
+      "globalLuminanceSsim": 0.9999411657841847,
+      "medianDeltaE00": 0,
+      "p95DeltaE00": 0.6235390157549486,
+      "pass": true
+    },
+    {
+      "name": "DSC01694",
+      "eligiblePixels": 1393496,
+      "totalPixels": 1707200,
+      "globalLuminanceSsim": 0.9999207836088166,
+      "medianDeltaE00": 0,
+      "p95DeltaE00": 0.7138406612331634,
+      "pass": true
+    },
+    {
+      "name": "DSC01695",
+      "eligiblePixels": 1401588,
+      "totalPixels": 1707200,
+      "globalLuminanceSsim": 0.999939679287662,
+      "medianDeltaE00": 0.25446684048646995,
+      "p95DeltaE00": 0.6221025136602626,
+      "pass": true
+    }
+  ],
+  "passed": true
+}

@@ -1,4 +1,4 @@
-name: signed-windows-release
+name: unsigned-windows-prerelease
 
 on:
   push:
@@ -11,9 +11,6 @@ permissions:
 jobs:
   windows-x64:
     runs-on: windows-latest
-    env:
-      CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -30,15 +27,15 @@ jobs:
       - run: npm run audit:release
       - run: npm run check
       - run: npm run build
-      - name: Build signed installer
+      - name: Build unsigned public-beta installer
         run: npm run dist:win
-      - name: Verify signatures, install, smoke and uninstall
+      - name: Verify unsigned installer, install, smoke and uninstall
         shell: pwsh
         run: |
-          $installer = Get-ChildItem release -Filter 'FilmLab-Setup-*.exe' | Select-Object -First 1
-          if (-not $installer) { throw 'Signed installer was not produced' }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $installer = Get-Item -LiteralPath "release/FilmLab-Setup-$version-x64.exe"
           $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
-          if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate) { throw "Installer signature or timestamp invalid: $($signature.Status)" }
+          if ($signature.Status -ne 'NotSigned') { throw "Expected an unsigned public-beta installer, found: $($signature.Status)" }
           $installDir = Join-Path $env:RUNNER_TEMP 'filmlab-install'
           $install = Start-Process -FilePath $installer.FullName -ArgumentList '/S', "/D=$installDir" -WindowStyle Hidden -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "Installer exited $($install.ExitCode)" }
@@ -47,7 +44,7 @@ jobs:
           foreach ($path in @($appExe, $uninstaller)) {
             if (-not (Test-Path -LiteralPath $path)) { throw "Missing installed executable: $path" }
             $installedSignature = Get-AuthenticodeSignature -LiteralPath $path
-            if ($installedSignature.Status -ne 'Valid' -or -not $installedSignature.TimeStamperCertificate) { throw "Invalid installed signature: $path" }
+            if ($installedSignature.Status -ne 'NotSigned') { throw "Expected unsigned installed executable: $path ($($installedSignature.Status))" }
           }
           $smoke = Start-Process -FilePath $appExe -ArgumentList '--smoke' -WindowStyle Hidden -Wait -PassThru
           if ($smoke.ExitCode -ne 0) { throw "Installed smoke exited $($smoke.ExitCode)" }
@@ -59,14 +56,14 @@ jobs:
           if ($exported.Count -lt 8) { throw "Installed export smoke produced only $($exported.Count) image files" }
           $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/S' -WindowStyle Hidden -Wait -PassThru
           if ($uninstall.ExitCode -ne 0) { throw "Uninstaller exited $($uninstall.ExitCode)" }
-      - name: Write hashes and build metadata
+          if (Get-Process FilmLab -ErrorAction SilentlyContinue) { throw 'FilmLab process remained after uninstall' }
+      - name: Write hash and build metadata
         shell: pwsh
         run: |
           $pkg = Get-Content package.json -Raw | ConvertFrom-Json
-          Get-ChildItem release -File | Where-Object Extension -In '.exe','.blockmap','.yml' | ForEach-Object {
-            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
-            "$hash  $($_.Name)"
-          } | Set-Content release/SHA256SUMS.txt -Encoding utf8
+          $installer = Get-Item -LiteralPath "release/FilmLab-Setup-$($pkg.version)-x64.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer.FullName).Hash.ToLowerInvariant()
+          "$hash  $($installer.Name)" | Set-Content release/SHA256SUMS.txt -Encoding utf8
           [ordered]@{
             version = $pkg.version
             tag = $env:GITHUB_REF_NAME
@@ -74,19 +71,28 @@ jobs:
             buildTimeUtc = (Get-Date).ToUniversalTime().ToString('o')
             node = (node --version)
             electron = $pkg.devDependencies.electron
+            channel = 'public-beta'
+            signature = 'NotSigned'
           } | ConvertTo-Json | Set-Content release/RELEASE-METADATA.json -Encoding utf8
       - uses: actions/upload-artifact@v4
         with:
-          name: FilmLab-${{ github.ref_name }}-windows-x64-signed
+          name: FilmLab-${{ github.ref_name }}-windows-x64-unsigned-public-beta
+          if-no-files-found: error
           path: |
-            release/*.exe
-            release/*.blockmap
-            release/*.yml
+            release/FilmLab-Setup-*-x64.exe
             release/SHA256SUMS.txt
             release/RELEASE-METADATA.json
+            CHANGELOG.md
+            PRIVACY.md
+            docs/PUBLIC_BETA.md
+            docs/RAW_ACCEPTANCE.md
+            docs/NEGADOCTOR_ACCEPTANCE_RESULTS.json
       - name: Publish prerelease
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
-        run: gh release create $env:GITHUB_REF_NAME release/*.exe release/*.blockmap release/*.yml release/SHA256SUMS.txt release/RELEASE-METADATA.json --prerelease --generate-notes --verify-tag
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $installer = "release/FilmLab-Setup-$version-x64.exe"
+          gh release create $env:GITHUB_REF_NAME $installer release/SHA256SUMS.txt release/RELEASE-METADATA.json CHANGELOG.md PRIVACY.md docs/PUBLIC_BETA.md docs/RAW_ACCEPTANCE.md docs/NEGADOCTOR_ACCEPTANCE_RESULTS.json --prerelease --title "FilmLab $version 公共测试版（未签名）" --notes-file docs/PUBLIC_BETA.md --verify-tag
