@@ -6,7 +6,7 @@ describe("Unsigned public-beta release contract", () => {
   it("builds an explicitly unsigned installer and publishes only allowlisted assets", async () => {
     const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
     const workflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
-    assert.equal(pkg.scripts["dist:win"], "npm run build && electron-builder --win --x64");
+    assert.equal(pkg.scripts["dist:win"], "npm run build && electron-builder --win --x64 --publish never");
     assert.doesNotMatch(workflow, /CSC_LINK|WINDOWS_CSC|signed-windows-release|release\/\*\.yml/);
     assert.match(workflow, /signature = 'NotSigned'/);
     assert.match(workflow, /docs\/PUBLIC_BETA\.md/);

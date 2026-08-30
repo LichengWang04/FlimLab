@@ -1,6 +1,6 @@
 {
   "name": "filmlab",
-  "version": "1.0.0-beta.2",
+  "version": "1.0.0-beta.3",
   "private": true,
   "author": {
     "name": "Licheng Wang"
@@ -32,7 +32,7 @@
     "smoke:raw": "npm run build && node scripts/raw-smoke.mjs",
     "smoke:export": "npm run build && node scripts/export-smoke.mjs",
     "dist": "npm run build && electron-builder",
-    "dist:win": "npm run build && electron-builder --win --x64",
+    "dist:win": "npm run build && electron-builder --win --x64 --publish never",
     "dist:win:unsigned": "npm run dist:win",
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:linux": "npm run build && electron-builder --linux"

@@ -2,7 +2,7 @@
 
 ## 发布输入
 
-- 发布分支必须无未提交文件，`package.json` 版本号与不可移动的 tag 完全一致（例如 `1.0.0-beta.2`）。
+- 发布分支必须无未提交文件，`package.json` 版本号与不可移动的 tag 完全一致（例如 `1.0.0-beta.3`）。
 - 公共测试版有意不使用 Windows 代码签名；不得配置 `CSC_LINK`、签名密码或把 `NotSigned` 描述成已验证发布者。
 - 只有 `.github/workflows/release.yml` 从干净 tag 产出的 Windows x64 NSIS 包可以作为官方公共测试版分发。下载入口固定为 FilmLab 官方 GitHub Releases，安装器必须与同页 `SHA256SUMS.txt` 匹配。
 - 私有 RAW 和 Negadoctor 样张只用于本地验收，不进入 Git、Actions artifact 或 GitHub Release。

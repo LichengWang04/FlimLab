@@ -2,6 +2,11 @@
 
 本文件记录面向用户的变更。
 
+## 1.0.0-beta.3 — 2026-08-30
+
+- 禁止 electron-builder 在 tag 构建中隐式发布，安装器完成本地验证与元数据生成后只由受控的 `gh release create` 步骤发布。
+- 继承 1.0.0-beta.2 的未签名公共测试版、Sony A7R V ARW 与 Negadoctor 5.6 验收内容；beta.2 tag 的流水线在上传资产前失败，未创建公开 Release。
+
 ## 1.0.0-beta.2 — 2026-08-30
 
 - 公共测试发布改为明确的 Windows x64 未签名策略：Release 页面、安装说明与构建元数据均标记 `NotSigned`，并通过 SHA-256 校验文件建立下载完整性边界。

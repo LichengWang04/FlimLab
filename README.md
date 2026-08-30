@@ -2,7 +2,7 @@
 
 FilmLab 是一款面向个人胶片翻拍与扫描的负像还原工作台。它在本机完成片基检测、密度反转、橙罩中和、白平衡和基础调色，并以原始分辨率导出正像。
 
-当前版本为 `1.0.0-beta.2`，公开发布目标为 Windows x64。FilmLab 不上传图像、源文件路径、配方或遥测数据，也不要求在线账户。
+当前版本为 `1.0.0-beta.3`，公开发布目标为 Windows x64。FilmLab 不上传图像、源文件路径、配方或遥测数据，也不要求在线账户。
 
 [下载与版本](https://github.com/LichengWang04/FlimLab/releases) · [问题反馈](https://github.com/LichengWang04/FlimLab/issues) · [隐私说明](PRIVACY.md) · [更新记录](CHANGELOG.md)
 
