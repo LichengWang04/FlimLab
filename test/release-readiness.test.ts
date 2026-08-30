@@ -92,7 +92,10 @@ describe("Installer legal bundle", () => {
     assert.ok(fromPaths.length >= 18, "extraResources 条目数量异常");
     assert.equal(toPaths.length, fromPaths.length, "每个 extraResources 都必须有唯一目标名");
     assert.equal(new Set(toPaths).size, toPaths.length, "legal 目标文件名不得互相覆盖");
-    const platformOptional = new Set(["node_modules/@img/sharp-win32-x64/LICENSE"]);
+    const platformOptional = new Set([
+      "node_modules/@img/sharp-win32-x64/LICENSE",
+      "node_modules/@img/sharp-wasm32/LICENSE",
+    ]);
     for (const relative of fromPaths) {
       if (process.platform !== "win32" && platformOptional.has(relative)) continue;
       await fs.access(new URL(`../${relative}`, import.meta.url));
@@ -107,6 +110,7 @@ describe("Installer legal bundle", () => {
     }
     const lock = await fs.readFile(new URL("../package-lock.json", import.meta.url), "utf8");
     assert.match(lock, /node_modules\/@img\/sharp-win32-x64/);
+    assert.match(lock, /node_modules\/@img\/sharp-wasm32/);
     const notices = await fs.readFile(new URL("../THIRD_PARTY_NOTICES.md", import.meta.url), "utf8");
     assert.match(notices, /libvips（含其捆绑的图像编解码组件） \| 8\.18\.3 \| LGPL-3\.0-or-later/);
     assert.match(notices, /@img\/sharp-wasm32 \| 0\.35\.3 \| Apache-2\.0 AND LGPL-3\.0-or-later AND MIT/);
