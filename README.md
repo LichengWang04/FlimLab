@@ -2,7 +2,7 @@
 
 FilmLab 是一款面向个人胶片翻拍与扫描的负像还原工作台。它在本机完成片基检测、密度反转、橙罩中和、白平衡和基础调色，并以原始分辨率导出正像。
 
-当前版本为 `1.0.0-beta.3`，公开发布目标为 Windows x64。FilmLab 不上传图像、源文件路径、配方或遥测数据，也不要求在线账户。
+当前版本为 `1.0.0-beta.3`，目前支持 Windows x64。FilmLab 不会上传图像、源文件路径、配方或遥测数据，也不要求在线账户。
 
 [下载与版本](https://github.com/LichengWang04/FlimLab/releases) · [问题反馈](https://github.com/LichengWang04/FlimLab/issues) · [隐私说明](PRIVACY.md) · [更新记录](CHANGELOG.md)
 
@@ -12,7 +12,7 @@ FilmLab 是一款面向个人胶片翻拍与扫描的负像还原工作台。它
 
 Windows x64 安装包统一通过 [GitHub Releases](https://github.com/LichengWang04/FlimLab/releases) 发布，请以该页面实际列出的可用版本为准。公测版采用手动更新，不会在应用内自动下载新版本。
 
-当前公共测试版有意不使用 Windows 代码签名，Windows Defender SmartScreen 可能显示“未知发布者”。只从 GitHub Releases 下载，并用同页 `SHA256SUMS.txt` 核对安装器；详细安全边界见 [公共测试说明](docs/PUBLIC_BETA.md)。
+当前公共测试版不包含 Windows 代码签名，Windows Defender SmartScreen 可能显示“未知发布者”。只从 GitHub Releases 下载；详细安全边界见 [公共测试说明](docs/PUBLIC_BETA.md)。
 
 ### 2. 准备底片文件
 
@@ -37,9 +37,7 @@ FilmLab 会把无 ICC 的 16 位 TIFF 解释为线性扫描数据。如果扫描
 2. 按需框选裁剪区域。旋转发生变化时，原裁剪、片基和中性选区会被清除，避免继续使用失效坐标。
 3. 默认片基模式会自动估算未曝光片基；若画面保留了片基边缘，选择“手动选取”并框选该区域通常更可靠。
 4. “FilmLab 经典”引擎保持历史算法：建议先保持“自动 Dmax”“自动中和橙罩”和“自动白平衡”开启，再按需调整曝光、对比度、高光压缩和饱和度。
-5. “相纸反相 5.6”引擎使用独立的片基密度、相纸打印曲线与高光软压缩。可先框选片基和曝光内容，再点“稳健自动设置”；分析结果会一次性写入配方，因此复制整卷和会话恢复可以复现。高级区可编辑 Dmin RGB、扫描曝光偏置、阴影色偏、高光白平衡和相纸黑位。
-
-自动片基、中和与白平衡都是无色卡的单帧全局估计。它们提供实用起点，但不能替代针对相机、光源、胶片和扫描仪的颜色标定。
+5. “相纸反相 5.6”引擎使用独立的片基密度、相纸打印曲线与高光软压缩。可先框选片基和曝光内容，再点“稳健自动设置”；高级区可编辑 Dmin RGB、扫描曝光偏置、阴影色偏、高光白平衡和相纸黑位。
 
 ### 5. 导出
 
@@ -49,7 +47,7 @@ FilmLab 会把无 ICC 的 16 位 TIFF 解释为线性扫描数据。如果扫描
 - 单帧失败不会中断其余帧，完成后会显示失败摘要；
 - 输出目录存在同名文件时会自动添加 `-2` 等后缀，不会静默覆盖。
 
-TIFF 输出为 16 位 sRGB，JPEG 输出为质量 95 的 8 位 sRGB。两种格式都先写入同目录临时文件，再原子发布最终文件。
+TIFF 输出为 16 位 sRGB，JPEG 输出为质量 95 的 8 位 sRGB。
 
 ## 单帧与整卷工作流
 
@@ -64,21 +62,19 @@ FilmLab 会在 Electron 的本地用户数据目录保存最近会话，包括�
 | 类型 | 支持情况 | 说明 |
 | --- | --- | --- |
 | JPEG / PNG 输入 | 支持 | 按显示编码的 sRGB 解码并转换到线性光域 |
-| ARW 输入 | 支持 | Sony A7R V 私有样张已实测；由 LibRaw 0.22.1 解码为 16 位线性 sRGB |
-| CR2 / NEF / RW2 输入 | 实验性 | 共用 LibRaw 解码路径，但当前没有对应真实相机样张验收记录 |
+| ARW 输入 | 支持 | ；由 LibRaw 0.22.1 解码为 16 位线性 sRGB |
+| CR2 / NEF / RW2 输入 | 实验性 | 共用 LibRaw 解码路径 |
 | 8 位整数 TIFF | 支持 | RGB 或灰度、strip 布局 |
 | 16 位整数 TIFF | 支持 | RGB 或灰度、strip 布局；无 ICC 时按线性扫描数据处理 |
 | TIFF 压缩 | 部分支持 | 无压缩、Deflate、LZW、PackBits |
-| 带 ICC 的 TIFF | 不支持 | 为避免隐式色彩转换和 16 位精度损失，会明确拒绝 |
-| 多页 TIFF | 不支持 | 会明确拒绝；请拆分为单页文件后导入 |
+| 带 ICC 的 TIFF | 不支持 | 暂不支持 |
+| 多页 TIFF | 不支持 |暂不支持 |
 | tiled、浮点、YCbCr、JPEG 压缩 TIFF | 不支持 | 请先转换为受支持的整数 RGB strip TIFF |
-| 其他 RAW / DNG / HEIF 输入 | 不支持 | 文件选择和文件夹扫描只接收上列四种 RAW 扩展名 |
+| 其他 RAW / DNG / HEIF 输入 | 不支持 | 暂不支持 |
 | TIFF 输出 | 支持 | 16 位、Deflate、sRGB 编码值 |
 | JPEG 输出 | 支持 | 8 位、质量 95、sRGB 编码值 |
 
-输出文件不嵌入 ICC 或 XMP；交付像素值按未标记 sRGB 约定解释。
-
-RAW 的具体机型兼容性取决于内置 LibRaw 0.22.1 的相机支持范围。FilmLab 对 RAW 使用完整传感器解码结果，不以嵌入式 JPEG 预览替代；无法识别或损坏的文件会明确报错。RAW 处理不是设备级标定流程，仍建议保留未曝光片基并通过实际画面校正。
+RAW 的具体机型兼容性取决于内置 LibRaw 0.22.1 的相机支持范围。FilmLab 对 RAW 使用完整传感器解码结果；无法识别或损坏的文件会明确报错。RAW 处理不是设备级标定流程，仍建议保留未曝光片基并通过实际画面校正。
 
 ## 处理流程
 
@@ -108,9 +104,7 @@ RAW 的具体机型兼容性取决于内置 LibRaw 0.22.1 的相机支持范围�
 → 16-bit TIFF / JPEG
 ```
 
-“相纸反相 5.6”的默认值、参数范围和像素公式冻结到 darktable 5.6.0 negadoctor；目标是参数语义与主要视觉结构兼容，不承诺不同输入配置跨应用逐像素相同。FilmLab 的实现为独立重写，参考链接见 [darktable 5.6.0 negadoctor 源码](https://github.com/darktable-org/darktable/blob/release-5.6.0/src/iop/negadoctor.c)与[官方手册](https://docs.darktable.org/usermanual/development/en/module-reference/processing-modules/negadoctor/)。
-
-胶片条缩略图由主进程以最多 2 个任务并发解码；1600 px 编辑预览由常驻 Web Worker 生成场景线性缓存，并只保留最新交互请求。支持 WebGPU 的设备会把经典引擎与“相纸反相 5.6”引擎的场景线性预览保留为 GPU 纹理，曝光、对比度、高光压缩与饱和度等高频调节只更新 WGSL 着色器 uniform，不再重复 CPU 管线；着色器阶段与 CPU 线性光域公式保持同序。WebGPU 不可用时自动使用 Canvas2D/CPU，所有全分辨率导出仍走可复现的 CPU Worker 路径。
+“相纸反相 5.6”的默认值、参数范围和像素公式冻结到 darktable 5.6.0 negadoctor；参考此项目，FilmLab 独立重写以实现相近效果，参考链接见 [darktable 5.6.0 negadoctor 源码](https://github.com/darktable-org/darktable/blob/release-5.6.0/src/iop/negadoctor.c)与[官方手册](https://docs.darktable.org/usermanual/development/en/module-reference/processing-modules/negadoctor/)。
 
 全分辨率导出在主进程之外的 Worker 中完成，大图可通过多个 Node Worker Threads 分块处理。真正的 Worker 通信或退出故障会回退到保守的 CPU 路径；连续两项导出出现这类故障时，本次会话后续导出改用串行路径。GPU 只加速交互预览调色（两个处理引擎），不改变导出像素合同。
 
@@ -173,8 +167,7 @@ Windows 打包：
 npm run dist:win           # Windows x64 未签名公共测试包
 npm run dist:win:unsigned  # 上述命令的兼容别名
 ```
-
-公共测试发布会从干净 tag 执行依赖安装、审计、测试、构建、未签名打包、安装后 smoke、实际导出、卸载、SHA-256 和元数据生成。详细流程见 [docs/RELEASE.md](docs/RELEASE.md)。
+详细流程见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ## 代码结构
 
@@ -190,4 +183,4 @@ test/          核心、集成、整卷服务和发布边界测试
 
 ## 反馈
 
-请通过 [GitHub Issues](https://github.com/LichengWang04/FlimLab/issues) 报告问题。提交诊断信息或样片完全自愿；公开样片前请先移除不希望披露的画面与元数据。
+请通过 [GitHub Issues](https://github.com/LichengWang04/FlimLab/issues) 报告问题。提交诊断信息或样片完全自愿。
