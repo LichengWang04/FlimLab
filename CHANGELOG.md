@@ -5,6 +5,7 @@
 ## 1.0.0-beta.2 — 2026-08-30
 
 - 公共测试发布改为明确的 Windows x64 未签名策略：Release 页面、安装说明与构建元数据均标记 `NotSigned`，并通过 SHA-256 校验文件建立下载完整性边界。
+- 安装包法律清单以干净 `npm ci` 的实际 Windows x64 运行时为准，不再声明或复制未随包安装的 sharp WASM 后备包。
 - Sony A7R V ARW 私有样张集扩充到 6 张；ARW 与尚无真实样张的 CR2/NEF/RW2 在公开兼容性说明中分开标注。
 - 新增 CR2、NEF、RW2、ARW 相机原始文件导入：内置 LibRaw 0.22.1 WebAssembly 解码器，以 16 位线性 sRGB 贯通缩略图、1600 px 预览和全分辨率导出；JPEG/PNG/TIFF 既有路径保持不变。当前真实相机验收只覆盖 Sony A7R V ARW 的元数据与 1600 px 解码。
 - 新增 WebGPU 预览调色路径：场景线性缓存上传一次后，曝光、对比度、高光压缩和饱和度改为 WGSL uniform 热更新，经典引擎与“相纸反相 5.6”引擎共用该路径。WebGPU 不可用时回退 Canvas2D/CPU，导出继续使用确定性的 CPU Worker。

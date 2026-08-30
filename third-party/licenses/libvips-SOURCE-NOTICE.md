@@ -3,9 +3,8 @@
 FilmLab distributes the prebuilt image runtime published with `sharp` 0.35.3:
 
 - `@img/sharp-win32-x64` 0.35.3 ships `libvips-42.dll` and `libvips-cpp-8.18.3.dll`.
-- `@img/sharp-wasm32` 0.35.3 ships the WebAssembly fallback build of the same runtime.
 
-These binaries bundle libvips 8.18.3 together with the image codec components
+This binary package bundles libvips 8.18.3 together with the image codec components
 that the sharp project statically links into it (JPEG-XL/WebP/PNG/TIFF/HEIF
 codecs, glib, and related libraries). FilmLab uses them exactly as published on
 npm and does not modify them.

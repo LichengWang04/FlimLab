@@ -89,13 +89,10 @@ describe("Installer legal bundle", () => {
     const builder = await fs.readFile(new URL("../electron-builder.yml", import.meta.url), "utf8");
     const fromPaths = [...builder.matchAll(/^\s*-\s*from:\s*(.+)$/gm)].map((match) => match[1]!.trim());
     const toPaths = [...builder.matchAll(/^\s*to:\s*(.+)$/gm)].map((match) => match[1]!.trim());
-    assert.ok(fromPaths.length >= 18, "extraResources 条目数量异常");
+    assert.ok(fromPaths.length >= 17, "extraResources 条目数量异常");
     assert.equal(toPaths.length, fromPaths.length, "每个 extraResources 都必须有唯一目标名");
     assert.equal(new Set(toPaths).size, toPaths.length, "legal 目标文件名不得互相覆盖");
-    const platformOptional = new Set([
-      "node_modules/@img/sharp-win32-x64/LICENSE",
-      "node_modules/@img/sharp-wasm32/LICENSE",
-    ]);
+    const platformOptional = new Set(["node_modules/@img/sharp-win32-x64/LICENSE"]);
     for (const relative of fromPaths) {
       if (process.platform !== "win32" && platformOptional.has(relative)) continue;
       await fs.access(new URL(`../${relative}`, import.meta.url));
@@ -104,16 +101,14 @@ describe("Installer legal bundle", () => {
       "third-party/licenses/LGPL-3.0-or-later.txt",
       "third-party/licenses/libvips-SOURCE-NOTICE.md",
       "node_modules/@img/sharp-win32-x64/LICENSE",
-      "node_modules/@img/sharp-wasm32/LICENSE",
     ]) {
       assert.ok(fromPaths.includes(required), `extraResources 缺少 ${required}`);
     }
     const lock = await fs.readFile(new URL("../package-lock.json", import.meta.url), "utf8");
     assert.match(lock, /node_modules\/@img\/sharp-win32-x64/);
-    assert.match(lock, /node_modules\/@img\/sharp-wasm32/);
     const notices = await fs.readFile(new URL("../THIRD_PARTY_NOTICES.md", import.meta.url), "utf8");
     assert.match(notices, /libvips（含其捆绑的图像编解码组件） \| 8\.18\.3 \| LGPL-3\.0-or-later/);
-    assert.match(notices, /@img\/sharp-wasm32 \| 0\.35\.3 \| Apache-2\.0 AND LGPL-3\.0-or-later AND MIT/);
+    assert.doesNotMatch(notices, /@img\/sharp-wasm32/);
     assert.doesNotMatch(notices, /捆绑组件声明见包内许可证/);
     const lgpl = await fs.readFile(
       new URL("../third-party/licenses/LGPL-3.0-or-later.txt", import.meta.url),

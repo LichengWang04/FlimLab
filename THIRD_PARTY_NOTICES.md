@@ -11,7 +11,6 @@ FilmLab Windows 安装包直接分发以下运行时与传递依赖。各组件�
 | sharp | 0.35.3 | Apache-2.0 | JPEG/PNG 解码与 JPEG 编码 |
 | @img/colour | 1.1.0 | MIT | sharp 传递依赖 |
 | @img/sharp-win32-x64 | 0.35.3 | Apache-2.0 AND LGPL-3.0-or-later | Windows x64 原生图像运行时，捆绑 libvips 二进制 |
-| @img/sharp-wasm32 | 0.35.3 | Apache-2.0 AND LGPL-3.0-or-later AND MIT | WASM 后备图像运行时，捆绑 libvips |
 | libvips（含其捆绑的图像编解码组件） | 8.18.3 | LGPL-3.0-or-later；许可证原文见随包 `legal/licenses/LGPL-3.0-or-later.txt`，二进制来源与源码取得方式见随包 `legal/licenses/libvips-SOURCE-NOTICE.md` | sharp 捆绑的图像处理核心库 |
 | detect-libc | 2.1.2 | Apache-2.0 | sharp 平台检测传递依赖 |
 | semver | 7.8.5 | ISC | sharp 版本判断传递依赖 |
