@@ -13,8 +13,14 @@ const require = createRequire(import.meta.url);
 // The electron npm package exports the path to its executable.
 const electronPath = require("electron");
 const mainPath = join(process.cwd(), "out", "main", "index.js");
+// GitHub's unprivileged Linux runners cannot give Electron's downloaded
+// chrome-sandbox helper root ownership/mode 4755. This flag is limited to the
+// disposable smoke process; packaged applications keep their normal sandbox.
+const electronArgs = process.platform === "linux"
+  ? ["--no-sandbox", mainPath, "--smoke"]
+  : [mainPath, "--smoke"];
 
-const child = spawn(electronPath, [mainPath, "--smoke"], {
+const child = spawn(electronPath, electronArgs, {
   cwd: process.cwd(),
   stdio: ["ignore", "pipe", "pipe"],
   env: { ...process.env, FILMLAB_SMOKE: "1" },
